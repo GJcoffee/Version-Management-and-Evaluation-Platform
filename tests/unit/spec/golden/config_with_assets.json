@@ -1,0 +1,63 @@
+{
+  "description": "固化后的资产引用（含内容哈希）、内置工具、知识注入",
+  "spec": {
+    "kind": "config",
+    "model": {
+      "provider": "deepseek",
+      "name": "deepseek-chat"
+    },
+    "prompts": {
+      "system": {
+        "$asset": {
+          "kind": "prompt",
+          "name": "cs-system",
+          "rev": 7,
+          "hash": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      },
+      "variables": {
+        "company": "示例公司"
+      }
+    },
+    "tools": [
+      {
+        "$asset": {
+          "kind": "tool",
+          "name": "query-order",
+          "rev": 3,
+          "hash": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      },
+      {
+        "builtin": "knowledge_search",
+        "with": {
+          "sources": [
+            {
+              "$asset": {
+                "kind": "knowledge",
+                "name": "faq",
+                "rev": 2,
+                "hash": "3333333333333333333333333333333333333333333333333333333333333333"
+              }
+            }
+          ],
+          "top_k": 5
+        }
+      }
+    ],
+    "knowledge": {
+      "inject": [
+        {
+          "$asset": {
+            "kind": "knowledge",
+            "name": "style-guide",
+            "rev": 1,
+            "hash": "3333333333333333333333333333333333333333333333333333333333333333"
+          }
+        }
+      ]
+    }
+  },
+  "canonical": "{\"kind\":\"config\",\"knowledge\":{\"inject\":[{\"$asset\":{\"hash\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"kind\":\"knowledge\",\"name\":\"style-guide\",\"rev\":1}}]},\"model\":{\"name\":\"deepseek-chat\",\"params\":{\"max_tokens\":4096,\"seed\":null,\"temperature\":0.3,\"top_p\":1},\"provider\":\"deepseek\"},\"prompts\":{\"system\":{\"$asset\":{\"hash\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"kind\":\"prompt\",\"name\":\"cs-system\",\"rev\":7}},\"variables\":{\"company\":\"示例公司\"}},\"runtime\":{\"max_steps\":12,\"parallel_tool_calls\":true,\"tool_timeout_s\":30,\"turn_timeout_s\":180},\"schema\":\"evalp/v1\",\"tools\":[{\"$asset\":{\"hash\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"kind\":\"tool\",\"name\":\"query-order\",\"rev\":3}},{\"builtin\":\"knowledge_search\",\"with\":{\"sources\":[{\"$asset\":{\"hash\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"kind\":\"knowledge\",\"name\":\"faq\",\"rev\":2}}],\"top_k\":5}}]}",
+  "hash": "d7c446c6cfaf5ccad43aaa917aa7190fcacc5483cc813cdc505ab5ab982db28e"
+}

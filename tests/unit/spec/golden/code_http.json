@@ -1,0 +1,24 @@
+{
+  "description": "代码型（http），环境变量引用原样参与哈希",
+  "spec": {
+    "kind": "code",
+    "transport": "http",
+    "http": {
+      "base_url": "http://127.0.0.1:8001",
+      "headers": {
+        "Authorization": "Bearer ${env:MY_AGENT_TOKEN}"
+      },
+      "timeout_s": 300
+    },
+    "source": {
+      "repo": "/work/agent",
+      "capture_git": false
+    },
+    "params": {
+      "retrieval_top_k": 8,
+      "model": "qwen-max"
+    }
+  },
+  "canonical": "{\"http\":{\"base_url\":\"http://127.0.0.1:8001\",\"headers\":{\"Authorization\":\"Bearer ${env:MY_AGENT_TOKEN}\"},\"timeout_s\":300},\"kind\":\"code\",\"params\":{\"model\":\"qwen-max\",\"retrieval_top_k\":8},\"runtime\":{\"turn_timeout_s\":300},\"schema\":\"evalp/v1\",\"source\":{\"allow_dirty\":false,\"capture_git\":false,\"git\":null,\"repo\":\"/work/agent\"},\"subprocess\":null,\"transport\":\"http\"}",
+  "hash": "fa34d4f3d44d809b649de26b7ae8168089c8ffd64286fe55567cacb0d03ca8a5"
+}

@@ -24,6 +24,8 @@ from evalp.context import AppContext
 from fastapi import FastAPI
 from keyring.backends import fail
 
+pytest_plugins = ["tests.fixtures.fake_openai"]
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _no_system_keyring() -> Iterator[None]:

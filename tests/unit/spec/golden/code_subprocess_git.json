@@ -1,0 +1,32 @@
+{
+  "description": "代码型（subprocess），commit 与补丁哈希参与哈希",
+  "spec": {
+    "kind": "code",
+    "transport": "subprocess",
+    "subprocess": {
+      "command": [
+        "python",
+        "-m",
+        "my_agent.evalp_entry"
+      ],
+      "cwd": "/work/agent",
+      "env": {
+        "LOG_LEVEL": "info"
+      }
+    },
+    "source": {
+      "repo": "/work/agent",
+      "capture_git": true,
+      "allow_dirty": true,
+      "git": {
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "patch_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    },
+    "runtime": {
+      "turn_timeout_s": 600
+    }
+  },
+  "canonical": "{\"http\":null,\"kind\":\"code\",\"params\":{},\"runtime\":{\"turn_timeout_s\":600},\"schema\":\"evalp/v1\",\"source\":{\"allow_dirty\":true,\"capture_git\":true,\"git\":{\"commit\":\"0123456789abcdef0123456789abcdef01234567\",\"patch_hash\":\"2222222222222222222222222222222222222222222222222222222222222222\"},\"repo\":\"/work/agent\"},\"subprocess\":{\"command\":[\"python\",\"-m\",\"my_agent.evalp_entry\"],\"cwd\":\"/work/agent\",\"env\":{\"LOG_LEVEL\":\"info\"}},\"transport\":\"subprocess\"}",
+  "hash": "0c6159fce2e81e405bec11e30c9cfdb16f7f24dbc290f656aa3ac8bc62eddfa3"
+}

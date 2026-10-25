@@ -1,0 +1,12 @@
+{
+  "description": "最小配置型 Spec：其余字段全部取默认值",
+  "spec": {
+    "kind": "config",
+    "model": {
+      "provider": "deepseek",
+      "name": "deepseek-chat"
+    }
+  },
+  "canonical": "{\"kind\":\"config\",\"knowledge\":{\"inject\":[]},\"model\":{\"name\":\"deepseek-chat\",\"params\":{\"max_tokens\":4096,\"seed\":null,\"temperature\":0.3,\"top_p\":1},\"provider\":\"deepseek\"},\"prompts\":{\"system\":\"\",\"variables\":{}},\"runtime\":{\"max_steps\":12,\"parallel_tool_calls\":true,\"tool_timeout_s\":30,\"turn_timeout_s\":180},\"schema\":\"evalp/v1\",\"tools\":[]}",
+  "hash": "5331f07e7f39a7217850fb54d015e370031e204ca7f7808798309d7cb209bf19"
+}

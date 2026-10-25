@@ -158,6 +158,7 @@ class ProviderService:
                 raise Conflict(f"Provider 名称已存在: {body.name}", {"name": body.name}) from None
             out = to_out(p)
         log.info("provider.updated", provider_id=provider_id, fields=sorted(fields - {"api_key"}))
+        self._invalidate_llm()
         return out
 
     async def delete(self, provider_id: str) -> None:
@@ -168,6 +169,13 @@ class ProviderService:
         if ref:
             await self.ctx.secrets.delete(ref)
         log.info("provider.deleted", provider_id=provider_id)
+        self._invalidate_llm()
+
+    def _invalidate_llm(self) -> None:
+        """Provider 配置变化后立即让 LLM 客户端缓存失效（重建客户端以应用新的 base_url/密钥）。"""
+        from evalp.runtime.llm.registry import LLMRegistry
+
+        self.ctx.svc(LLMRegistry).invalidate(rebuild=True)
 
     async def test(self, provider_id: str) -> ProviderTestResult:
         """调用 ``GET {base_url}/models`` 检查连通性与密钥（超时 10s）。"""

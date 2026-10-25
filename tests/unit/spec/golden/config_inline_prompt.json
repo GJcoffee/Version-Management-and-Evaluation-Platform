@@ -1,0 +1,33 @@
+{
+  "description": "内联多行 prompt（CRLF 与行尾空白会被规范化）、中文变量、浮点参数",
+  "spec": {
+    "schema": "evalp/v1",
+    "kind": "config",
+    "name": "客服",
+    "description": "仅显示",
+    "notes": "忽略",
+    "model": {
+      "provider": "deepseek",
+      "name": "deepseek-chat",
+      "params": {
+        "temperature": 0.7,
+        "top_p": 1.0,
+        "max_tokens": 2048,
+        "seed": 42
+      }
+    },
+    "prompts": {
+      "system": "你是客服助手。  \r\n请礼貌回答。\r\n",
+      "variables": {
+        "company": "示例公司",
+        "n": 3.0
+      }
+    },
+    "runtime": {
+      "max_steps": 8,
+      "turn_timeout_s": 120.5
+    }
+  },
+  "canonical": "{\"kind\":\"config\",\"knowledge\":{\"inject\":[]},\"model\":{\"name\":\"deepseek-chat\",\"params\":{\"max_tokens\":2048,\"seed\":42,\"temperature\":0.7,\"top_p\":1},\"provider\":\"deepseek\"},\"prompts\":{\"system\":\"你是客服助手。\\n请礼貌回答。\\n\",\"variables\":{\"company\":\"示例公司\",\"n\":3}},\"runtime\":{\"max_steps\":8,\"parallel_tool_calls\":true,\"tool_timeout_s\":30,\"turn_timeout_s\":120.5},\"schema\":\"evalp/v1\",\"tools\":[]}",
+  "hash": "82332affd7b665ecb36ce64b024fc9707d7c2ee71c3d3d066f6ce53e08362b63"
+}

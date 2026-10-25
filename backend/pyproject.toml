@@ -31,6 +31,8 @@ dependencies = [
   "numpy",
   "pyyaml",
   "tomli-w",
+  "python-multipart",
+  "jsonschema",
 ]
 
 [project.optional-dependencies]
