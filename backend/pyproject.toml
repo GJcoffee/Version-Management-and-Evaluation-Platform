@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evalp"
+dynamic = ["version"]
+description = "版本管理与评测平台（EvalP）"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "sqlalchemy[asyncio]>=2.0",
+  "aiosqlite",
+  "alembic",
+  "pydantic>=2",
+  "openai>=1.40",
+  "httpx",
+  "mcp",
+  "typer",
+  "rich",
+  "jinja2",
+  "rank-bm25",
+  "jieba",
+  "tiktoken",
+  "keyring",
+  "cryptography",
+  "psutil",
+  "python-ulid",
+  "structlog",
+  "numpy",
+  "pyyaml",
+  "tomli-w",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "ruff",
+  "respx",
+]
+
+[project.scripts]
+evalp = "evalp.cli.main:app"
+
+[tool.setuptools.packages.find]
+include = ["evalp*"]
+
+[tool.setuptools.package-data]
+evalp = [
+  "static/**/*",
+  "store/migrations/*.mako",
+  "store/migrations/versions/*.py",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "evalp.__version__" }

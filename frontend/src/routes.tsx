@@ -1,0 +1,100 @@
+import { createBrowserRouter, type RouteObject } from 'react-router-dom'
+import { AppLayout } from '@/components/layout/AppLayout'
+import type { RouteHandle } from '@/components/layout/Breadcrumbs'
+import { shortenId } from '@/components/ui/IdText'
+import HomePage from '@/pages/HomePage'
+import AgentsPage from '@/pages/AgentsPage'
+import AgentDetailPage from '@/pages/AgentDetailPage'
+import DraftEditorPage from '@/pages/DraftEditorPage'
+import VersionDiffPage from '@/pages/VersionDiffPage'
+import AssetsPage from '@/pages/AssetsPage'
+import AssetDetailPage from '@/pages/AssetDetailPage'
+import SessionPage from '@/pages/SessionPage'
+import ComparePage from '@/pages/ComparePage'
+import EvalsPage from '@/pages/EvalsPage'
+import EvalReportPage from '@/pages/EvalReportPage'
+import EvalComparePage from '@/pages/EvalComparePage'
+import EvalAnnotatePage from '@/pages/EvalAnnotatePage'
+import SettingsPage from '@/pages/SettingsPage'
+import NotFoundPage from '@/pages/NotFoundPage'
+
+const idCrumb = (key: string): RouteHandle['crumb'] => (p) => shortenId(p[key] ?? '')
+
+/**
+ * 路由表（详设 14.1）。handle.crumb 用于顶栏面包屑。
+ * 新增页面：在 src/pages 下建文件，在这里注册。
+ * 注意：后端需对非 /api、/auth 的路径回退到 index.html（SPA fallback）。
+ */
+export const routes: RouteObject[] = [
+  {
+    path: '/',
+    element: <AppLayout />,
+    handle: { crumb: '首页' } satisfies RouteHandle,
+    children: [
+      { index: true, element: <HomePage /> },
+      {
+        path: 'agents',
+        handle: { crumb: 'Agents' } satisfies RouteHandle,
+        children: [
+          { index: true, element: <AgentsPage /> },
+          {
+            path: ':id',
+            handle: { crumb: idCrumb('id') } satisfies RouteHandle,
+            children: [
+              { index: true, element: <AgentDetailPage /> },
+              {
+                path: 'draft/:draftId',
+                element: <DraftEditorPage />,
+                handle: { crumb: '草稿编辑器' } satisfies RouteHandle,
+              },
+              {
+                path: 'versions/diff',
+                element: <VersionDiffPage />,
+                handle: { crumb: '版本对比' } satisfies RouteHandle,
+              },
+            ],
+          },
+        ],
+      },
+      {
+        path: 'assets',
+        handle: { crumb: '资产库' } satisfies RouteHandle,
+        children: [
+          { index: true, element: <AssetsPage /> },
+          { path: ':id', element: <AssetDetailPage />, handle: { crumb: idCrumb('id') } satisfies RouteHandle },
+        ],
+      },
+      {
+        path: 'sessions/:id',
+        element: <SessionPage />,
+        handle: { crumb: (p) => `会话 ${shortenId(p.id ?? '')}` } satisfies RouteHandle,
+      },
+      {
+        path: 'compare/:id',
+        element: <ComparePage />,
+        handle: { crumb: (p) => `对比 ${shortenId(p.id ?? '')}` } satisfies RouteHandle,
+      },
+      {
+        path: 'evals',
+        handle: { crumb: '评测' } satisfies RouteHandle,
+        children: [
+          { index: true, element: <EvalsPage /> },
+          // 静态路径 compare 优先于 :id
+          { path: 'compare', element: <EvalComparePage />, handle: { crumb: '评测对比' } satisfies RouteHandle },
+          {
+            path: ':id',
+            handle: { crumb: idCrumb('id') } satisfies RouteHandle,
+            children: [
+              { index: true, element: <EvalReportPage /> },
+              { path: 'annotate', element: <EvalAnnotatePage />, handle: { crumb: '人工评审' } satisfies RouteHandle },
+            ],
+          },
+        ],
+      },
+      { path: 'settings', element: <SettingsPage />, handle: { crumb: '设置' } satisfies RouteHandle },
+      { path: '*', element: <NotFoundPage />, handle: { crumb: '页面不存在' } satisfies RouteHandle },
+    ],
+  },
+]
+
+export const createAppRouter = () => createBrowserRouter(routes)
