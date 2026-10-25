@@ -218,7 +218,7 @@ class Runner:
                 state.deltas[key] = state.deltas.get(key, "") + p["text"]
         elif event.type == "llm.response":
             state.mark_first_output()
-            state.deltas.pop(event.step_id or "", None)
+            state.deltas.pop(event.step_id or p.get("step_id") or "", None)
             state.llm_calls += 1
             usage = p.get("usage") or {}
             state.prompt_tokens += int(usage.get("prompt_tokens") or 0)
