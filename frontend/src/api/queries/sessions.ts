@@ -75,6 +75,15 @@ export function useCreateSession() {
   })
 }
 
+/** 修改会话标题（1 到 120 个字符；空串 / 超长返回 400 VALIDATION_ERROR） */
+export function useRenameSession(sessionId: string | undefined) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (title: string) => api.patch<{ session: Session }>(`/sessions/${sessionId}`, { body: { title } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: sessionKeys.all }),
+  })
+}
+
 /** 发送一轮（默认 202，后台执行；之后用 SSE 订阅过程）。会话忙时抛 ApiError(code=SESSION_BUSY) */
 export function sendTurn(sessionId: string, body: TurnCreate): Promise<TurnAccepted> {
   return api.post<TurnAccepted>(`/sessions/${sessionId}/turns`, { body })

@@ -1,12 +1,11 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../client'
-import type { Agent, AgentCreate, AgentKind, AgentUpdate, Draft, Page, VersionTag } from '../types'
+import type { Agent, AgentCreate, AgentKind, AgentUpdate, Draft, Page } from '../types'
 
 export const agentKeys = {
   all: ['agents'] as const,
   list: (p: AgentListParams) => [...agentKeys.all, 'list', p] as const,
   detail: (ref: string) => [...agentKeys.all, 'detail', ref] as const,
-  tags: (ref: string) => [...agentKeys.all, 'tags', ref] as const,
 }
 
 export interface AgentListParams {
@@ -32,14 +31,6 @@ export function useAgent(ref: string | undefined) {
   return useQuery({
     queryKey: agentKeys.detail(ref ?? ''),
     queryFn: () => api.get<Agent>(`/agents/${encodeURIComponent(ref!)}`),
-    enabled: !!ref,
-  })
-}
-
-export function useAgentTags(ref: string | undefined) {
-  return useQuery({
-    queryKey: agentKeys.tags(ref ?? ''),
-    queryFn: () => api.get<VersionTag[]>(`/agents/${encodeURIComponent(ref!)}/tags`),
     enabled: !!ref,
   })
 }

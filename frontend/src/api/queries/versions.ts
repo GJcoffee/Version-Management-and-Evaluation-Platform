@@ -43,6 +43,19 @@ export function useVersionDiff(left: string | undefined | null, right: string | 
   })
 }
 
+/**
+ * 草稿（已保存的内容）相对基础版本的 diff：`right` 传草稿 id。`revision` 进入 queryKey，保存后重新请求。
+ * `enabled` 为 false（如编辑器里有未保存的修改，服务端看不到）时不请求。
+ */
+export function useDraftDiff(baseVersionId: string | null | undefined, draftId: string, revision: number, enabled = true) {
+  return useQuery({
+    queryKey: [...versionKeys.all, 'draft-diff', baseVersionId ?? '', draftId, revision] as const,
+    queryFn: () => api.get<VersionDiff>('/versions/diff', { query: { left: baseVersionId!, right: draftId } }),
+    enabled: enabled && !!baseVersionId,
+    retry: false,
+  })
+}
+
 function useInvalidateVersions() {
   const qc = useQueryClient()
   return () => {

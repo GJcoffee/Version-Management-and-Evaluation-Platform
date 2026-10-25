@@ -10,7 +10,7 @@ def version_brief(v: Version) -> VersionBrief:
     return VersionBrief(id=v.id, seq=v.seq, spec_hash=v.spec_hash, created_at=v.created_at)
 
 
-def agent_out(a: Agent, latest: Version | None = None) -> AgentOut:
+def agent_out(a: Agent, latest: Version | None = None, tags: list[str] | None = None) -> AgentOut:
     return AgentOut(
         id=a.id,
         name=a.name,
@@ -20,6 +20,7 @@ def agent_out(a: Agent, latest: Version | None = None) -> AgentOut:
         created_at=a.created_at,
         updated_at=a.updated_at,
         latest_version=version_brief(latest) if latest is not None else None,
+        tags=tags or [],
     )
 
 

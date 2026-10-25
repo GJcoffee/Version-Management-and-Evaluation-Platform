@@ -219,6 +219,39 @@ describe('sessionReducer：错误、取消、超时', () => {
     expect(t.steps[0].status).toBe('incomplete')
   })
 
+  it('取消 / 出错后刷新（没有 llm.delta）：用 turn.end.partial_text 还原已流出的文本', () => {
+    const end = (status: string, extra: Record<string, unknown> = {}) =>
+      mk('turn.end', { status, output: null, usage: null, cost: 0, latency_ms: 5, ttft_ms: null, ...extra }, { seq: 4 })
+    const base = [
+      mk('turn.start', { input: { role: 'user', content: 'x' }, history_len: 0 }, { seq: 1 }),
+      mk('llm.request', { provider: 'p', model: 'm', params: {}, messages: [], tools: null }, { seq: 2, step: 's1' }),
+    ]
+    const cancelled = fold([...base, end('cancelled', { partial_text: '写到一半' })]).turns[0]
+    expect(cancelled.messages).toHaveLength(1)
+    expect(cancelled.messages[0]).toMatchObject({ content: '写到一半', partial: true, streaming: false, final: false })
+    // 出错同样；没有 partial_text 时不产生空消息
+    const errored = fold([...base, end('error', { partial_text: '前半' })]).turns[0]
+    expect(errored.messages[0]).toMatchObject({ content: '前半', partial: true })
+    const none = fold([...base, end('cancelled')]).turns[0]
+    expect(none.messages[0]).toMatchObject({ content: '', partial: false })
+    // 没有 llm.request 的消息（代码型 agent）：追加一条部分消息
+    const code = fold([base[0], end('cancelled', { partial_text: '外部 agent 的输出' })]).turns[0]
+    expect(code.messages.map((m) => [m.content, m.partial])).toEqual([['外部 agent 的输出', true]])
+    // 正常结束不受影响
+    const ok = fold([...base, end('completed', { partial_text: '不应使用' })]).turns[0]
+    expect(ok.messages.every((m) => !m.partial)).toBe(true)
+  })
+
+  it('实时观看时已有的 delta 文本保留，并标为部分内容', () => {
+    const t = fold([
+      mk('turn.start', { input: { role: 'user', content: 'x' }, history_len: 0 }, { seq: 1 }),
+      mk('llm.request', { provider: 'p', model: 'm', params: {}, messages: [], tools: null }, { seq: 2, step: 's1' }),
+      mk('llm.delta', { step_id: 's1', text: '已经流出的内容' }, { step: 's1' }),
+      mk('turn.end', { status: 'cancelled', output: null, usage: null, cost: 0, latency_ms: 5, ttft_ms: null, partial_text: '已经流出' }, { seq: 3 }),
+    ]).turns[0]
+    expect(t.messages[0]).toMatchObject({ content: '已经流出的内容', partial: true })
+  })
+
   it('超时：turn.end(timeout)', () => {
     const s = fold([
       ...head,

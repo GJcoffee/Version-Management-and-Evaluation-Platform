@@ -230,6 +230,25 @@ async def test_http_stream_replay_and_idle(world, stream_client, fake_openai):
     assert r.status_code == 404
 
 
+async def test_http_stream_error_event_is_named_agent_error(world, stream_client, fake_openai):
+    """业务事件 error 在 SSE 线上叫 agent.error（避开 EventSource.onerror）；库里和 data.type 仍是 error。"""
+    v = await world.config_version()
+    s = await world.session(v)
+    fake_openai.fail(400, times=1, message="坏请求")
+    turn = await world.sessions.run_turn(s.id, "会失败", wait=True)
+    assert turn.status == "error"
+    persisted = await world.events(s.id)
+    assert "error" in [e.type for e in persisted]  # 落库类型不变
+    frames = parse_sse((await stream_client.get(f"/api/v1/sessions/{s.id}/stream")).text)
+    names = [f["event"] for f in frames]
+    assert "error" not in names and names.count("agent.error") == 1
+    f = next(f for f in frames if f["event"] == "agent.error")
+    assert f["json"]["type"] == "error" and f["json"]["payload"]["code"] and "id" in f
+    assert names[-1] == "idle" and names[-2] == "turn.end"
+    # 其余事件的帧名与类型一致
+    assert [n for n in names if n != "agent.error"][:-1] == [e.type for e in persisted if e.type != "error"]
+
+
 async def test_http_stream_live_matches_db(world, stream_client, sdk_server):
     v = await world.http_version(sdk_server.url)
     s = await world.session(v)

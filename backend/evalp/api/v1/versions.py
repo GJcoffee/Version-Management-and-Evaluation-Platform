@@ -38,7 +38,8 @@ async def list_tags(agent_ref: str, ctx: AppContext = Depends(get_ctx)):
 
 @router.get("/versions/diff")
 async def diff_versions(left: str, right: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
-    """版本 diff。left / right 可以是版本 id，也可以写成 ``agent名:v12`` 或 ``agent名:标签``。"""
+    """版本 diff。left / right 可以是版本 id，也可以写成 ``agent名:v12`` 或 ``agent名:标签``；
+    还可以是草稿（取已保存的内容）：草稿 id ``drf_…`` 或 ``agent名:@草稿名``。"""
     return await ctx.svc(VersionService).diff(left, right)
 
 

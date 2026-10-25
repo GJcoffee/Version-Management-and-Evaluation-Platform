@@ -10,6 +10,9 @@
 - 捕获 Adapter 抛出的异常，转成 ``error`` 事件；
 - 从 ``llm.response`` 汇总 usage / cost / llm_calls / tool_calls，计算 ttft（第一个 ``llm.delta`` 或
   ``llm.response`` 的时间，相对本轮开始）与 latency；
+- 累积每次 LLM 调用已流出的文本（``llm.delta``），``llm.response`` 到达后丢弃（那时内容已随事件落库）；
+  轮次以取消 / 出错 / 超时结束时，把仍未被 ``llm.response`` 取代的部分文本放进 ``TurnResult.partial_text``，
+  由会话服务写入 ``turns.output.partial_text``，并随 ``turn.end`` 事件发布（刷新页面后仍能看到）；
 - 组装 :class:`TurnOutput`：``final`` 来自 ``message.assistant``（或 Adapter 的 ``turn.end.output``），
   ``messages`` 为 ``ctx.new_messages``（Adapter 没填时为 ``[final]``）。
 
@@ -40,6 +43,9 @@ BeforeEndFn = Callable[["TurnResult"], Awaitable[None]]
 _END_TO_STATUS = {"completed": "ok", "error": "error", "cancelled": "cancelled", "timeout": "timeout"}
 _STATUS_TO_END = {v: k for k, v in _END_TO_STATUS.items()}
 
+# 部分文本的长度上限（字符）。它随 turn.end 事件发布，过大会让整个 payload 被转存为 blob（见 EventSink）
+PARTIAL_TEXT_MAX = 10_000
+
 
 @dataclass
 class TurnResult:
@@ -52,6 +58,7 @@ class TurnResult:
     latency_ms: int
     ttft_ms: int | None
     error: dict[str, Any] | None = None  # {code, message, retriable}
+    partial_text: str | None = None  # 取消 / 出错 / 超时时，已流出但未成为 llm.response 的文本
 
     @property
     def end_status(self) -> str:
@@ -89,6 +96,7 @@ class _State:
     cost: float = 0.0
     ttft_ms: int | None = None
     dropped: int = 0
+    deltas: dict[str, str] = field(default_factory=dict)  # step_id -> 尚未被 llm.response 取代的流出文本
     notes: list[str] = field(default_factory=list)
 
     def mark_first_output(self) -> None:
@@ -205,8 +213,12 @@ class Runner:
             state.error_emitted = True
         elif event.type == "llm.delta":
             state.mark_first_output()
+            if isinstance(p.get("text"), str) and p["text"]:
+                key = event.step_id or p.get("step_id") or ""
+                state.deltas[key] = state.deltas.get(key, "") + p["text"]
         elif event.type == "llm.response":
             state.mark_first_output()
+            state.deltas.pop(event.step_id or "", None)
             state.llm_calls += 1
             usage = p.get("usage") or {}
             state.prompt_tokens += int(usage.get("prompt_tokens") or 0)
@@ -309,6 +321,9 @@ class Runner:
                 cost = float(end["cost"])
         if state.estimated:
             usage["estimated"] = True
+        partial = "".join(state.deltas.values()) if status != "ok" else ""
+        if len(partial) > PARTIAL_TEXT_MAX:
+            partial = partial[:PARTIAL_TEXT_MAX] + "…"
         result = TurnResult(
             status=status,
             output=output,
@@ -317,6 +332,7 @@ class Runner:
             latency_ms=int((time.monotonic() - state.t0) * 1000),
             ttft_ms=state.ttft_ms,
             error=state.error if status in ("error", "timeout") else None,
+            partial_text=partial or None,
         )
         if before_end is not None:
             try:
@@ -324,6 +340,8 @@ class Runner:
             except Exception as e:  # noqa: BLE001 - 持久化失败不应阻止 turn.end 的发布
                 log.exception("runner.before_end_failed", error=f"{type(e).__name__}: {e}")
         extra: dict[str, Any] = {"error": result.error} if result.error else {}
+        if result.partial_text:
+            extra["partial_text"] = result.partial_text
         await emit(
             ev(
                 "turn.end",

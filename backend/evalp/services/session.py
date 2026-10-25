@@ -315,6 +315,17 @@ class SessionService:
         async with self.ctx.db.read() as s:
             return await self._session_out(s, session_id)
 
+    async def rename(self, session_id: str, title: str) -> SessionOut:
+        """修改会话标题；不存在抛 NotFound。标题的长度校验在请求 DTO 里。"""
+        async with self.ctx.db.write() as s:
+            row = await s.get(Session, session_id)
+            if row is None:
+                raise NotFound(f"会话不存在: {session_id}", {"id": session_id})
+            row.title = title
+            row.updated_at = now_iso()
+            await s.flush()
+            return await self._session_out(s, session_id)
+
     async def _session_out(self, s: AsyncSession, session_id: str) -> SessionOut:
         row = await s.get(Session, session_id)
         if row is None:
@@ -638,7 +649,14 @@ class SessionService:
             t = await s.get(Turn, slot.turn_id)
             if t is not None:
                 t.status = result.status
-                t.output = result.output.model_dump(mode="json", exclude_none=True) if result.output else None
+                if result.output:
+                    t.output = result.output.model_dump(mode="json", exclude_none=True)
+                elif result.partial_text:  # 取消 / 出错的轮次：只保存已流出的部分文本
+                    t.output = TurnOutput(partial_text=result.partial_text).model_dump(
+                        mode="json", exclude_none=True
+                    )
+                else:
+                    t.output = None
                 t.usage, t.cost = result.usage, result.cost
                 t.latency_ms, t.ttft_ms = result.latency_ms, result.ttft_ms
                 t.error = error_to_text(result.error)

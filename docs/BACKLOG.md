@@ -54,18 +54,6 @@
 | chat 支持直接与草稿对话（目前只能选已发布版本） | 13 |
 | pull 重写 agent.yaml 时保留注释 | 10.3 |
 
-## 后端改进（来自前端联调反馈）
-
-| 条目 | 说明 |
-|---|---|
-| `GET /agents` 列表直接返回 tags | 现在前端逐行请求 `/agents/{id}/tags`（N+1） |
-| 版本 diff 的 path 与 `assets[].spec_path` 统一 | 现在一个用身份键 `tools[name]`、一个用下标 `tools[0]` |
-| `PATCH /sessions/{id}` 修改会话标题 | 前端目前只读 |
-| 取消 / 出错的轮次保存已流出的部分文本 | 现在 llm.delta 不落库，刷新后只剩"已取消" |
-| 大 payload 存根改为字段级 `{"$blob"}`，或在 api.md 写明整 payload 存根 | 16.x / 6.2 |
-| SSE 业务事件 `error` 改名（如 `agent.error`） | 与 EventSource.onerror 同名，易被客户端误判为断线 |
-| `/versions/diff` 支持草稿对比基础版本 | 状态栏改动数目前由前端计算 |
-
 ## 前端
 
 | 条目 | 说明 |

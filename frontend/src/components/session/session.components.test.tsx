@@ -76,6 +76,21 @@ describe('ChatPane', () => {
     expect(screen.getByTestId('turn-cancelled')).toHaveTextContent('已取消')
   })
 
+  it('取消 / 出错的轮次显示已流出的部分文本并标注', () => {
+    const mkState = (status: string) =>
+      buildSessionState([
+        mk('turn.start', { input: { role: 'user', content: 'x' }, history_len: 0 }, { seq: 1 }),
+        mk('llm.request', { provider: 'p', model: 'm', params: {}, messages: [], tools: null }, { seq: 2, step: 's1' }),
+        mk('turn.end', { status, output: null, usage: null, cost: 0, latency_ms: 1, ttft_ms: null, partial_text: '说到一半' }, { seq: 3 }),
+      ])
+    const { rerender } = render(wrap(<ChatPane turns={mkState('cancelled').turns} />))
+    expect(screen.getByTestId('assistant-message')).toHaveTextContent('说到一半')
+    expect(screen.getByTestId('partial-mark')).toHaveTextContent('已取消')
+    rerender(wrap(<ChatPane turns={mkState('error').turns} />))
+    expect(screen.getByTestId('assistant-message')).toHaveTextContent('说到一半')
+    expect(screen.getByTestId('partial-mark')).toHaveTextContent('执行中断')
+  })
+
   it('点击“查看 Trace”触发轮次选择', async () => {
     const onSelectTurn = vi.fn()
     render(wrap(<ChatPane turns={state.turns} onSelectTurn={onSelectTurn} />))

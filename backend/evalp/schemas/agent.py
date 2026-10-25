@@ -71,6 +71,7 @@ class AgentOut(BaseModel):
     created_at: str
     updated_at: str
     latest_version: VersionBrief | None = None
+    tags: list[str] = Field(default_factory=list, description="该 agent 全部版本标签的名称（按字典序）")
 
 
 # ---------------------------------------------------------------- 草稿

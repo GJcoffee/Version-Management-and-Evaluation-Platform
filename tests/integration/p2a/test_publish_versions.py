@@ -77,9 +77,9 @@ async def test_publish_creates_version_with_resolved_spec(api, client, ctx, worl
     refs = {(a["spec_path"], a["name"], a["rev"]) for a in v["assets"]}
     assert refs == {
         ("prompts.system", "sys", 1),
-        ("tools[0]", "q", 1),
-        ("tools[1].with.sources[0]", "faq", 1),
-        ("knowledge.inject[0]", "faq", 1),
+        ("tools[q]", "q", 1),
+        ("tools[knowledge_search].with.sources[faq]", "faq", 1),
+        ("knowledge.inject[faq]", "faq", 1),
     }
     async with ctx.db.read() as s:
         rows = (
@@ -88,6 +88,13 @@ async def test_publish_creates_version_with_resolved_spec(api, client, ctx, worl
             .all()
         )
     assert len(rows) == 4
+    # 库里仍存下标路径（校验报错的路径也是下标），对外才换成身份键
+    assert {r.spec_path for r in rows} == {
+        "prompts.system",
+        "tools[0]",
+        "tools[1].with.sources[0]",
+        "knowledge.inject[0]",
+    }
     # 草稿的 base_version_id 指向新版本，revision 不变
     d = await api.draft(world["draft"]["id"])
     assert d["base_version_id"] == v["id"] and d["revision"] == world["draft"]["revision"]
@@ -283,6 +290,21 @@ async def test_version_list_pagination_and_tags(api, client, world):
     assert [(t["tag"], t["version_id"]) for t in tags] == [("prod", ids[0]), ("stable", ids[0])]
 
 
+async def test_agent_list_returns_tags_in_one_batch(api, client, world):
+    """GET /agents 直接带 tags（按字典序），没有标签的 agent 返回空列表；get 同样带。"""
+    v1 = (await api.publish(world["draft"]))["version"]
+    other = await api.agent("bot2", spec=world["spec"])
+    await api.publish(other["draft"])
+    await client.post(f"{API}/versions/{v1['id']}/tags", json={"tag": "stable"})
+    await client.post(f"{API}/versions/{v1['id']}/tags", json={"tag": "prod"})
+    items = {a["name"]: a for a in (await client.get(f"{API}/agents")).json()["items"]}
+    assert items["bot"]["tags"] == ["prod", "stable"]
+    assert items["bot2"]["tags"] == []
+    assert (await client.get(f"{API}/agents/bot")).json()["tags"] == ["prod", "stable"]
+    # 新建的 agent 响应里 tags 也存在
+    assert (await api.agent("bot3", spec=world["spec"]))["agent"]["tags"] == []
+
+
 async def test_tag_upsert_moves_tag_between_versions(api, client, world):
     v1 = (await api.publish(world["draft"]))["version"]
     d = (await api.save(world["draft"], {**world["spec"], "runtime": {"max_steps": 3}}))["draft"]
@@ -397,6 +419,10 @@ async def test_version_diff_matches_design_doc_shape(api, client, world):
     p = ch["prompts.system"]
     assert p["op"] == "asset_changed" and "+请简洁。" in p["content_diff"]["text"]
     assert diff["summary"] == {"add": 0, "remove": 0, "replace": 1, "asset_changed": 2}
+    # asset_changed 的 path 与两侧版本 assets[].spec_path 完全一致（都是身份键）
+    for vid in (v1["id"], v2["id"]):
+        spec_paths = {a["spec_path"] for a in (await client.get(f"{API}/versions/{vid}")).json()["assets"]}
+        assert {c["path"] for c in diff["changes"] if c["op"] == "asset_changed"} <= spec_paths
 
 
 async def test_version_diff_reference_forms(api, client, world):
@@ -432,6 +458,62 @@ async def test_version_diff_tools_matched_by_name(api, client, world):
     v2 = (await api.publish(d))["version"]
     diff = (await client.get(f"{API}/versions/diff", params={"left": v1["id"], "right": v2["id"]})).json()
     assert [(c["path"], c["op"]) for c in diff["changes"]] == [("tools[extra]", "add")]
+
+
+async def test_version_diff_against_draft(api, client, world):
+    """一侧传草稿引用：drf_ id 或 agent名:@草稿名，取已保存的内容并按发布流程固化。"""
+    v1 = (await api.publish(world["draft"]))["version"]
+    spec = copy.deepcopy(world["spec"])
+    spec["model"]["params"] = {"temperature": 0.9}
+    await api.revision(world["prompt"]["asset"]["id"], "你是客服。\n请礼貌。\n请简洁。\n")
+    d = (await api.save(world["draft"], spec))["draft"]
+    for right in (d["id"], "bot:@main"):
+        r = await client.get(f"{API}/versions/diff", params={"left": "bot:v1", "right": right})
+        assert r.status_code == 200, r.text
+        diff = r.json()
+        assert diff["left"] == {"id": v1["id"], "seq": 1, "spec_hash": v1["spec_hash"]}
+        assert diff["right"]["id"] == d["id"] and diff["right"]["draft"] is True
+        assert diff["right"]["name"] == "main" and diff["right"]["revision"] == d["revision"]
+        ch = {c["path"]: c for c in diff["changes"]}
+        # @latest 在草稿侧被固化为最新修订，所以资产变化能看到；路径与版本侧的身份键一致
+        assert set(ch) == {"model.params.temperature", "prompts.system"}
+        assert (
+            ch["prompts.system"]["op"] == "asset_changed"
+            and "+请简洁。" in ch["prompts.system"]["content_diff"]["text"]
+        )
+    # 草稿在左侧也行；草稿与已发布内容相同时没有变更，spec_hash 与发布后的版本一致
+    d2 = (await api.save(d, world["spec"]))["draft"]
+    await api.revision(world["prompt"]["asset"]["id"], "你是客服。\n请礼貌。\n")  # 改回去（去重到 rev 1）
+    same = (await client.get(f"{API}/versions/diff", params={"left": d2["id"], "right": "bot:v1"})).json()
+    assert same["changes"] == [] and same["left"]["spec_hash"] == v1["spec_hash"]
+    # 两侧都是草稿
+    other = (await client.post(f"{API}/agents/bot/drafts", json={"name": "exp", "spec": spec})).json()[
+        "draft"
+    ]
+    both = (
+        await client.get(f"{API}/versions/diff", params={"left": "bot:@main", "right": other["id"]})
+    ).json()
+    assert [c["path"] for c in both["changes"]] == ["model.params.temperature"]
+
+
+async def test_version_diff_draft_errors(api, client, world):
+    await api.publish(world["draft"])
+    params = {"left": "bot:v1"}
+    r = await client.get(f"{API}/versions/diff", params={**params, "right": "bot:@nope"})
+    assert r.status_code == 404
+    r = await client.get(f"{API}/versions/diff", params={**params, "right": "drf_nope"})
+    assert r.status_code == 404
+    r = await client.get(f"{API}/versions/diff", params={**params, "right": "bot:@"})
+    assert r.status_code == 400
+    # 草稿校验不通过（模型不存在）：和发布一样报错，原因在 details.errors
+    bad = copy.deepcopy(world["spec"])
+    bad["model"]["name"] = "no-such-model"
+    d = (await api.save(world["draft"], bad))["draft"]
+    r = await client.get(f"{API}/versions/diff", params={**params, "right": d["id"]})
+    assert r.status_code in (400, 422) and r.json()["error"]["details"]["errors"]
+    # 标签不会和草稿引用混淆（标签不能以 @ 开头）
+    r = await client.post(f"{API}/versions/bot:v1/tags", json={"tag": "@main"})
+    assert r.status_code == 400
 
 
 # ---------------------------------------------------------------- 供其他模块使用

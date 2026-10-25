@@ -267,12 +267,12 @@ def build_server(
     @mcp.tool()
     @_guard
     async def diff_versions(
-        left: Annotated[str, Field(description="左侧版本：v12、标签（如 baseline）或版本 id")],
-        right: Annotated[str, Field(description="右侧版本")],
+        left: Annotated[str, Field(description="左侧版本：v12、标签（如 baseline）、版本 id，或草稿 @main")],
+        right: Annotated[str, Field(description="右侧版本（同左；@草稿名 取服务端已保存的草稿）")],
         agent: Agent = None,
         max_lines: Annotated[int, Field(ge=10, le=1000, description="文本 diff 最多显示多少行")] = 200,
     ) -> str:
-        """比较两个版本。
+        """比较两个版本（或已保存的草稿，写 @main）。
 
         返回变更列表（路径、操作、新旧值）加 prompt 等文本的 unified diff（默认截断到 200 行）。
         """

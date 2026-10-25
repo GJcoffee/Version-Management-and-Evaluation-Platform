@@ -46,7 +46,7 @@ from evalp.services.asset_content import (
     normalize_content_type,
     validate_content,
 )
-from evalp.spec.diff import unified_content_diff
+from evalp.spec.diff import identity_paths, unified_content_diff
 from evalp.spec.refs import AssetRef, parse_asset_ref, validate_asset_name
 from evalp.spec.resolve import ResolvedAsset, lookup_revision
 from evalp.store.models import (
@@ -517,6 +517,7 @@ class AssetService:
                     .order_by(Version.id.desc(), VersionAssetRef.spec_path)
                 )
             ).all()
+            xpaths: dict[str, dict[str, str]] = {}  # version_id -> 下标路径到身份键路径的映射（与 diff 一致）
             versions = [
                 {
                     "version_id": v.id,
@@ -525,7 +526,9 @@ class AssetService:
                     "seq": v.seq,
                     "rev": ar.rev,
                     "revision_id": ar.id,
-                    "spec_path": ref.spec_path,
+                    "spec_path": xpaths.setdefault(v.id, identity_paths(v.spec)).get(
+                        ref.spec_path, ref.spec_path
+                    ),
                 }
                 for ref, v, ag, ar in vrows
             ]

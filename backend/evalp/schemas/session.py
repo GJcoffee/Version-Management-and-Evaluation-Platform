@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from evalp.runtime.events import AgentEvent
 from evalp.runtime.messages import Message, TurnOutput
@@ -87,6 +87,27 @@ class SessionCreate(BaseModel):
         if self.tag and not self.agent:
             raise ValueError("tag 需要和 agent 一起使用")
         return self
+
+
+SESSION_TITLE_MAX = 120
+
+
+class SessionUpdate(BaseModel):
+    """``PATCH /sessions/{id}``：目前只能改标题（去掉首尾空白后 1 到 120 个字符，不能清空）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+
+    @field_validator("title")
+    @classmethod
+    def _title(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("标题不能为空")
+        if len(v) > SESSION_TITLE_MAX:
+            raise ValueError(f"标题最长 {SESSION_TITLE_MAX} 个字符")
+        return v
 
 
 class TurnCreate(BaseModel):

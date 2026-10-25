@@ -84,6 +84,8 @@ export interface AssistantMessageView {
   contentBlob: string | null
   /** 是否已收到 llm.response（之后的 delta 被忽略） */
   responded: boolean
+  /** 轮次以取消 / 出错 / 超时结束时，这条消息只是中断前已流出的部分内容 */
+  partial: boolean
 }
 
 export interface TurnMetrics {
@@ -177,6 +179,7 @@ function newMessage(key: string, stepId: string | null): AssistantMessageView {
     llm: null,
     contentBlob: null,
     responded: false,
+    partial: false,
   }
 }
 
@@ -472,6 +475,29 @@ function applyEventToTurn(turn: TurnState, ev: EventEnvelope): TurnState {
   return { ...t, steps: buildStepTree(t.events) }
 }
 
+/**
+ * 取消 / 出错 / 超时：把中断时仍未收到 llm.response 的那条消息标为"部分内容"。
+ * 刷新页面后 llm.delta 已经没有了，内容由 turn.end 的 partial_text 补上（实时观看时已有的 delta 文本不被覆盖，除非更短）。
+ */
+function markPartial(messages: AssistantMessageView[], partialText: string | null | undefined): AssistantMessageView[] {
+  const text = partialText ?? ''
+  let i = -1
+  for (let k = messages.length - 1; k >= 0; k--) {
+    if (!messages[k].responded && !messages[k].final) {
+      i = k
+      break
+    }
+  }
+  if (i < 0) {
+    if (!text) return messages
+    return [...messages, { ...newMessage(`partial:${messages.length}`, null), content: text, responded: true, partial: true }]
+  }
+  const m = messages[i]
+  const content = text.length > m.content.length ? text : m.content
+  if (!content.trim()) return messages
+  return replaceAt(messages, i, { ...m, content, partial: true })
+}
+
 function applyTurnEnd(t: TurnState, p: TurnEndPayload, ts: string): TurnState {
   const status = normalizeTurnStatus(p.status)
   const u: Usage = p.usage ?? {}
@@ -487,6 +513,7 @@ function applyTurnEnd(t: TurnState, p: TurnEndPayload, ts: string): TurnState {
         : c,
     ),
   }))
+  if (status !== 'ok') messages = markPartial(messages, p.partial_text)
   if (status === 'ok' && !messages.some((m) => m.final) && p.output?.final) {
     const text = messageText(p.output.final)
     const last = messages[messages.length - 1]

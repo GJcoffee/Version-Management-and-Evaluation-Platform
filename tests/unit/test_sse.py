@@ -1,7 +1,7 @@
 import asyncio
 
 import pytest
-from evalp.api.sse import PING_FRAME, format_sse, sse_response, with_heartbeat
+from evalp.api.sse import PING_FRAME, format_sse, sse_event_name, sse_response, with_heartbeat
 
 
 def test_format_full_frame():
@@ -26,6 +26,12 @@ def test_pydantic_model_data():
         x: int
 
     assert format_sse(M(x=1)) == 'data: {"x":1}\n\n'
+
+
+def test_error_event_is_renamed_on_the_wire_only():
+    assert sse_event_name("error") == "agent.error"
+    for t in ("turn.start", "llm.delta", "tool.result", "turn.end", "idle"):
+        assert sse_event_name(t) == t
 
 
 def test_ping_frame_is_comment():

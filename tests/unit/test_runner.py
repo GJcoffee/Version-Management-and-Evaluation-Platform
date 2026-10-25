@@ -8,7 +8,7 @@ from evalp.errors import ProviderError
 from evalp.runtime.adapters.base import AgentAdapter, RunContext
 from evalp.runtime.events import ev
 from evalp.runtime.messages import Message
-from evalp.runtime.runner import Runner
+from evalp.runtime.runner import PARTIAL_TEXT_MAX, Runner
 
 USER = Message.user("你好")
 FINAL = Message(role="assistant", content="你好呀")
@@ -325,3 +325,64 @@ async def test_before_end_failure_does_not_block_turn_end():
         before_end=before_end,
     )
     assert result.status == "ok" and events[-1].type == "turn.end"
+
+
+# ---------------------------------------------------------------- 部分文本（取消 / 出错时保留已流出的内容）
+
+
+def delta(text, step="s1"):
+    return ev("llm.delta", step_id=step, text=text)
+
+
+async def test_cancel_keeps_streamed_partial_text():
+    adapter = ScriptAdapter([ev("llm.request", step_id="s1", model="m"), delta("你"), delta("好"), 30])
+    ctx = make_ctx(timeout=30)
+
+    async def canceller():
+        await adapter.started.wait()
+        await asyncio.sleep(0.1)
+        ctx.cancel.set()
+
+    task = asyncio.create_task(canceller())
+    result, events = await run(adapter, ctx)
+    await task
+    assert result.status == "cancelled" and result.output is None and result.partial_text == "你好"
+    end = events[-1].payload
+    assert end["status"] == "cancelled" and end["partial_text"] == "你好" and end["output"] is None
+
+
+async def test_error_after_deltas_keeps_partial_text():
+    adapter = ScriptAdapter([delta("前半"), delta("句"), RuntimeError("连接断了")])
+    result, events = await run(adapter)
+    assert result.status == "error" and result.partial_text == "前半句"
+    assert events[-1].payload["partial_text"] == "前半句"
+
+
+async def test_llm_response_replaces_deltas_so_only_unfinished_call_is_partial():
+    adapter = ScriptAdapter(
+        [
+            delta("已完成的一次调用", "s1"),
+            ev("llm.response", step_id="s1", content="已完成的一次调用", finish_reason="tool_calls"),
+            delta("第二次调用写到一半", "s2"),
+            RuntimeError("boom"),
+        ]
+    )
+    result, _ = await run(adapter)
+    assert result.partial_text == "第二次调用写到一半"
+
+
+async def test_no_partial_text_when_ok_or_nothing_streamed():
+    ok, events = await run(
+        ScriptAdapter([delta("你好呀"), ev("message.assistant", message=FINAL)]),
+    )
+    assert ok.status == "ok" and ok.partial_text is None and "partial_text" not in events[-1].payload
+    failed, events = await run(ScriptAdapter([RuntimeError("x")]))
+    assert (
+        failed.status == "error" and failed.partial_text is None and "partial_text" not in events[-1].payload
+    )
+
+
+async def test_partial_text_is_truncated():
+    adapter = ScriptAdapter([delta("长" * (PARTIAL_TEXT_MAX + 50)), RuntimeError("x")])
+    result, _ = await run(adapter)
+    assert len(result.partial_text) == PARTIAL_TEXT_MAX + 1 and result.partial_text.endswith("…")

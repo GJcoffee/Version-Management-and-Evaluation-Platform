@@ -16,7 +16,7 @@ from evalp.logging import get_logger
 from evalp.schemas.agent import AgentCreate, AgentCreated, AgentOut, AgentUpdate
 from evalp.services.convert import agent_out, draft_out
 from evalp.spec.models import SCHEMA_VERSION, CodeSpec, ConfigSpec, dump_spec
-from evalp.store.models import Agent, Draft, Provider, Version
+from evalp.store.models import Agent, Draft, Provider, Version, VersionTag
 from evalp.utils.time import now_iso
 
 log = get_logger(__name__)
@@ -185,6 +185,22 @@ class AgentService:
         ).scalars()
         return {v.agent_id: v for v in rows}
 
+    async def _tags_of(self, s: AsyncSession, agent_ids: list[str]) -> dict[str, list[str]]:
+        """一次查询批量取多个 agent 的标签名（每个 agent 内按字典序）。"""
+        out: dict[str, list[str]] = {}
+        if not agent_ids:
+            return out
+        rows = (
+            await s.execute(
+                select(VersionTag.agent_id, VersionTag.tag)
+                .where(VersionTag.agent_id.in_(agent_ids))
+                .order_by(VersionTag.agent_id, VersionTag.tag)
+            )
+        ).all()
+        for aid, tag in rows:
+            out.setdefault(aid, []).append(tag)
+        return out
+
     async def list(
         self,
         *,
@@ -210,8 +226,10 @@ class AgentService:
         async with self.ctx.db.read() as s:
             page = await paginate(s, stmt, Agent.id, limit=limit, cursor=cursor)
             agents: list[Agent] = page.items
-            latest = await self._latest_versions(s, [a.id for a in agents])
-            items = [agent_out(a, latest.get(a.id)) for a in agents]
+            ids = [a.id for a in agents]
+            latest = await self._latest_versions(s, ids)
+            tags = await self._tags_of(s, ids)
+            items = [agent_out(a, latest.get(a.id), tags.get(a.id)) for a in agents]
         return Page[AgentOut](items=items, next_cursor=page.next_cursor)
 
     async def get(self, ref: str) -> AgentOut:
@@ -219,7 +237,8 @@ class AgentService:
         async with self.ctx.db.read() as s:
             a = await self.get_orm(s, ref)
             latest = await self._latest_versions(s, [a.id])
-            return agent_out(a, latest.get(a.id))
+            tags = await self._tags_of(s, [a.id])
+            return agent_out(a, latest.get(a.id), tags.get(a.id))
 
     async def update(self, ref: str, body: AgentUpdate) -> AgentOut:
         """修改名称 / 描述 / 归档状态。"""
@@ -240,7 +259,8 @@ class AgentService:
             except IntegrityError:
                 raise Conflict(f"Agent 名称已存在: {body.name}", {"name": body.name}) from None
             latest = await self._latest_versions(s, [a.id])
-            return agent_out(a, latest.get(a.id))
+            tags = await self._tags_of(s, [a.id])
+            return agent_out(a, latest.get(a.id), tags.get(a.id))
 
     async def delete(self, ref: str) -> None:
         """删除 agent 及其草稿。已有版本的 agent 不能删除（请归档）。"""

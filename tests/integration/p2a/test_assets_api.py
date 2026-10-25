@@ -403,6 +403,16 @@ async def test_references_report_versions_and_evals(api, client, ctx):
     )
 
 
+async def test_references_spec_path_uses_identity_key(api, client):
+    """被工具列表引用的资产，references 里的 spec_path 是身份键 tools[name]，与版本 diff 一致。"""
+    await api.provider()
+    tool = await api.asset("tool", "q", TOOL_YAML, "application/x-yaml")
+    ag = await api.agent("bot", spec=config_spec(tools=["asset://tool/q@latest"]))
+    await api.publish(ag["draft"])
+    refs = (await client.get(f"{API}/assets/{tool['asset']['id']}/references")).json()
+    assert [v["spec_path"] for v in refs["versions"]] == ["tools[q]"]
+
+
 async def test_dataset_references_include_eval_runs(api, client, ctx):
     from evalp.ids import new_id
     from evalp.store.models import EvalBatch, EvalRun

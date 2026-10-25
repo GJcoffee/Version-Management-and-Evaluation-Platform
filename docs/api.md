@@ -26,6 +26,9 @@
 **版本引用**：凡是接受"版本"的地方（`/versions/{ref}`、`/versions/diff`、`to-draft`、标签接口），除版本 id 外还可以写成
 `agent名:v12`（第 12 号版本）、`agent名:标签`、`agent名:latest`（序号最大的版本）。`{agent_ref}` 可以是 agent 的 id 或名称。
 
+**草稿引用**：只有 `/versions/diff` 的两侧还接受草稿（取**已保存**的内容）：草稿 id（`drf_…`）或 `agent名:@草稿名`（如 `bot:@main`）。
+`@` 开头不是合法的标签名，所以不会与 `agent名:标签` 混淆。
+
 ## 1. AgentSpec
 
 `GET /spec/schema` 返回 AgentSpec 的 JSON Schema（`kind` 为判别字段；`schema` 固定为 `evalp/v1`），供前端生成表单。
@@ -95,7 +98,7 @@
 ```json
 {
   "agent": {"id": "agt_01…", "name": "customer-support", "kind": "config", "description": "客服机器人", "archived": false,
-            "created_at": "2026-10-25T08:00:00.000Z", "updated_at": "2026-10-25T08:00:00.000Z", "latest_version": null},
+            "created_at": "2026-10-25T08:00:00.000Z", "updated_at": "2026-10-25T08:00:00.000Z", "latest_version": null, "tags": []},
   "draft": {"id": "drf_01…", "agent_id": "agt_01…", "name": "main", "spec": {"schema": "evalp/v1", "kind": "config", "…": "…"},
             "base_version_id": null, "revision": 1, "created_at": "…", "updated_at": "…"}
 }
@@ -105,6 +108,8 @@
 
 `?include_archived=false&kind=config|code&q=关键字&limit&cursor` → `{"items": [Agent…], "next_cursor": null}`。
 `latest_version` 为 `{"id", "seq", "spec_hash", "created_at"}` 或 `null`。
+`tags` 是该 agent 全部版本标签的名称（字符串数组，按字典序，没有则为 `[]`），列表一次查询批量取出，不需要再逐个请求 `/agents/{id}/tags`
+（要知道标签指向哪个版本时才用那个接口）。`GET /agents/{agent_ref}` 与 PATCH 的响应同样带 `tags`。
 
 ### GET /agents/{agent_ref} / PATCH /agents/{agent_ref} / DELETE /agents/{agent_ref}
 
@@ -177,6 +182,8 @@ DELETE → 204；已有版本时返回 409 `AGENT_IN_USE`，请改为归档。
 ```
 
 错误：409 `DRAFT_CONFLICT`、400 `VALIDATION_ERROR`（结构）、400 `SPEC_INVALID`（业务）、400 `GIT_DIRTY`。
+`assets[].spec_path` 是资产引用在 Spec 里的位置，列表元素用**身份键**：`tools[query-order]`、`tools[knowledge_search].with.sources[faq]`、
+`knowledge.inject[faq]`，与 `GET /versions/diff` 的 `changes[].path` 同一套写法（身份键有重复时退回下标，如 `knowledge.inject[1]`）。
 代码型且 `capture_git=true` 时 `source` 为 `{"git_commit", "git_branch", "dirty", "patch_blob"}`（`dirty` 且 `allow_dirty` 时 `patch_blob` 是补丁的 blob 哈希，补丁哈希参与 `spec_hash`）。
 
 ## 4. 版本
@@ -211,7 +218,7 @@ UPSERT：同一个标签会从旧版本移到这个版本。标签名：字母�
 
 ### GET /versions/diff?left=&right=
 
-`left` / `right` 可以是版本 id、`agent名:v12`、`agent名:标签`。
+`left` / `right` 可以是版本 id、`agent名:v12`、`agent名:标签`，也可以是草稿（见"草稿引用"：`drf_…` 或 `agent名:@草稿名`）。
 
 ```json
 {
@@ -231,10 +238,18 @@ UPSERT：同一个标签会从旧版本移到这个版本。标签名：字母�
 ```
 
 - `op`：`add` / `remove` / `replace` / `asset_changed`；`path` 用点号连接键名；列表元素按身份键匹配：`tools[工具资产名]`、`tools[knowledge_search]`（内置工具）、
-  `knowledge.inject[资产名]`、`tools[knowledge_search].with.sources[资产名]`；其他列表按下标 `a[1]`。
+  `knowledge.inject[资产名]`、`tools[knowledge_search].with.sources[资产名]`；其他列表（或身份键有重复时）按下标 `a[1]`。
+  版本详情 `assets[].spec_path`、`GET /assets/{id}/references` 的 `versions[].spec_path` 用的是**同一套路径**，
+  所以 `asset_changed` 的 `path` 可以直接在 `assets[]` 里按 `spec_path` 相等找到两侧的资产修订。
+  （库里 `version_asset_refs.spec_path` 仍存下标路径，如 `tools[0]`，接口输出时换算；`validate` 报告里的 `errors[].path` 指向草稿里的位置，也仍是下标。）
 - 资产引用在 `add`/`remove`/`replace` 里以 `{"kind","name","rev"}` 表示；内容哈希相同视为未变化（即使修订号不同）。
 - 多行或超过 80 个字符的文本变更附 `content_diff`（unified diff，从 `@@` 开始，不含文件头）；文本类资产（prompt / tool / knowledge）的 `asset_changed` 同样附 `content_diff`。
 - 前端用 Monaco DiffEditor 展示完整文本时，用 `GET /assets/revisions/{revision_id}` 取两侧内容。
+- **草稿一侧**：取已保存的草稿内容（编辑器里未保存的修改看不到），按发布时的流程固化引用（`@latest` 取当前最新修订）并规范化（补齐默认值），
+  所以和"现在发布会得到的 Spec"比较；校验不通过时和发布一样报错（400 `VALIDATION_ERROR` / `SPEC_INVALID`，`details.errors`）。
+  草稿不存在 404，`agent名:@` 缺草稿名 400。代码型 Spec 的 `source.git` 是发布时才采集的，涉及草稿时两侧都忽略它。
+  草稿一侧的摘要是 `{"id": "drf_…", "draft": true, "name": "main", "revision": 3, "spec_hash": "…"}`（没有 `seq`）；版本一侧不变。
+  典型用法：`left=agent:v12&right=<草稿 id>` 得到草稿相对基础版本的改动（前端状态栏的改动数用 `summary` 各项之和）。
 
 ## 5. 资产
 
@@ -339,6 +354,8 @@ UPSERT：同一个标签会从旧版本移到这个版本。标签名：字母�
 `changed_fields` 取自 `input / expected / rubric / tags / metadata`；明细每类最多 500 条（`truncated`）。
 
 ### GET /assets/{id}/references?rev=
+
+`versions[].spec_path` 与版本详情的 `assets[].spec_path` 相同（身份键路径，如 `tools[query-order]`）。
 
 ```json
 {
@@ -504,16 +521,33 @@ CSV 需要 `column_map`（`{字段名: 列名}`）；字段名可用 `case_key /
 通过本接口创建的会话 `mode` 恒为 `chat`；`stats = {turns, prompt_tokens, completion_tokens, llm_calls, tool_calls, cost}`。
 `variables` 是会话级模板变量（优先级：Spec < 会话 < 单轮）。标题缺省时取第一轮用户输入的前几十个字。
 
+### PATCH /sessions/{id}
+```json
+{"title": "退货流程咨询"}
+```
+修改会话标题，返回 `{"session": SessionOut}`。标题去掉首尾空白后必须是 1 到 120 个字符，不能清空（不接受 `null`），也不接受其他字段；
+空串、纯空白、超长、缺字段或有多余字段返回 400 `VALIDATION_ERROR`，会话不存在返回 404。会话正在执行时也可以改。
+
 ### GET /sessions
 `?agent_id=（id 或名称）&version_id=&mode=chat,replay&q=标题关键字&limit=&cursor=`；`mode` 可逗号分隔，缺省为 `chat,replay`（**不含** `eval`、`judge`）。
 新的在前，分页同 0 节。
 
 ### GET /sessions/{id}?include=turns,events
 `include` 缺省 `turns`；传空字符串则只要会话信息。返回 `{"session", "turns": [TurnOut], "events": [AgentEvent] | null}`。
-事件里超过 `events.payload_inline_limit_kb` 的字段以 `{"$blob": "<sha256>"}` 返回，用 `GET /blobs/{hash}` 读取完整内容。
+事件的 `payload` 序列化后超过 `events.payload_inline_limit_kb`（默认 32）KB 时，**整个 payload** 会被转存为 blob，库里和本接口返回的 `payload` 被替换成存根：
+`{"$blob": "<sha256>", …}`——除 `$blob` 外只保留序列化后不超过 256 字节的顶层字段（如 `name`、`call_id`、`model`、`usage`、`status`），
+体积大的字段（`arguments`、`output`、`messages`、`content`、`input` 等）都不在里面，也**不是**字段级替换。
+取回原文：`GET /blobs/{hash}`（可加 `?session_id=` 加速校验）返回被替换前的**完整 payload**（`application/json`，与未转存时的 `payload` 完全一致）。
+不超限的事件原样内联。实时 SSE 推送的是完整内容（不含存根）；只有从库里读取的事件（`GET /sessions/{id}?include=events`、SSE 回放）是存根。
+`turns[].input` / `output` 存在 `turns` 表里，始终是完整的，不受影响。
 
-`TurnOut = {id, session_id, idx, pair_index, status: running|ok|error|cancelled|timeout, input: Message, output: {final, messages} | null, usage, cost, latency_ms, ttft_ms, error, anchored_from_turn_id, started_at, finished_at}`。
+`TurnOut = {id, session_id, idx, pair_index, status: running|ok|error|cancelled|timeout, input: Message, output: {final, messages, partial_text?} | null, usage, cost, latency_ms, ttft_ms, error, anchored_from_turn_id, started_at, finished_at}`。
 `usage = {prompt_tokens, completion_tokens, llm_calls, tool_calls}`；`output.messages` 是本轮新增的 assistant / tool 消息（含工具调用），下一轮历史由它们拼接。
+
+**取消 / 出错 / 超时的轮次保留部分文本**：`llm.delta` 不落库，但轮次以 `cancelled` / `error` / `timeout` 结束时，如果某次 LLM 调用已经流出了文本、
+却没等到它的 `llm.response`，这部分文本会保存下来：`output = {"final": null, "messages": [], "partial_text": "…"}`（此时 `output` 非 null 但没有 `final`），
+同一份文本也放在 `turn.end` 事件的 `payload.partial_text` 里，所以刷新页面后 SSE 回放仍能还原。已有 `llm.response` 的调用不算（内容已在事件里）；
+超过 10000 个字符时截断并以 `…` 结尾；正常结束的轮次没有该字段。它不属于对话历史（`status != ok` 的轮次本来就不参与历史拼接）。
 
 ### POST /sessions/{id}/turns
 ```json
@@ -535,12 +569,15 @@ CSV 需要 `column_map`（`{字段名: 列名}`）；字段名可用 `case_key /
 帧格式：
 ```
 id: 12                       // 事件 seq；llm.delta 没有 id（不落库、重连后不重放）
-event: tool.call             // 事件类型：turn.start / llm.request / llm.delta / llm.response / tool.call / tool.result / span.* / log / message.assistant / error / turn.end
+event: tool.call             // 帧名：turn.start / llm.request / llm.delta / llm.response / tool.call / tool.result / span.* / log / message.assistant / agent.error / turn.end
 data: {"seq":12,"turn_id":"trn_…","ts":"…","type":"tool.call","step_id":"s2","parent_step_id":"s1","payload":{…}}
 
 event: idle                  // 没有轮次在运行（或正在运行的这一轮已结束且 turn.end 已落库）后发送，随后服务端关闭连接
 data: {"status":"idle","last_seq":12}
 ```
+**`error` 事件的帧名是 `agent.error`**（避开浏览器 `EventSource.onerror` 的同名事件，客户端不会再把它误判为断线）。只有 `event:` 这一行改名：
+`data` 里的 `type` 仍是 `error`，库里的事件类型、`GET /sessions/{id}?include=events` 返回的 `type`、agent 对外协议（SDK / HTTP / 子进程）里的事件类型都不变。
+客户端要用 `addEventListener("agent.error", …)` 监听，不再有名为 `error` 的帧。
 空闲的会话回放完立即收到 `idle`。每 15 秒有一次 `: ping` 心跳注释帧。订阅者消费太慢（积压超过 1000 条）会被断开且没有 `idle` 帧——带 `Last-Event-ID` 重连即可从库里补齐。
 
 ### GET /blobs/{hash}[?session_id=]

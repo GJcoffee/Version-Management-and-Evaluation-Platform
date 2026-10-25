@@ -11,13 +11,14 @@ from pydantic import BaseModel
 
 from evalp.api.deps import get_ctx
 from evalp.api.pagination import Page, PageParams, page_params
-from evalp.api.sse import format_sse, sse_response
+from evalp.api.sse import format_sse, sse_event_name, sse_response
 from evalp.context import AppContext
 from evalp.errors import NotFound, ValidationFailed
 from evalp.schemas.session import (
     SessionCreate,
     SessionDetail,
     SessionOut,
+    SessionUpdate,
     TurnAccepted,
     TurnCreate,
     TurnOut,
@@ -86,6 +87,12 @@ async def get_session(
     return detail
 
 
+@router.patch("/sessions/{session_id}", response_model=SessionWrapper)
+async def update_session(session_id: str, body: SessionUpdate, ctx: AppContext = Depends(get_ctx)):
+    """修改会话标题（1 到 120 个字符，不能为空；超出返回 400 ``VALIDATION_ERROR``）。"""
+    return SessionWrapper(session=await ctx.svc(SessionService).rename(session_id, body.title))
+
+
 @router.post("/sessions/{session_id}/turns", response_model=TurnAccepted, status_code=202)
 async def create_turn(
     session_id: str,
@@ -135,7 +142,8 @@ async def stream_session(
 ):
     """SSE：先回放库里 ``after_seq`` 之后的事件，再订阅实时事件。
 
-    帧：``id: {seq}``（llm.delta 没有）/ ``event: {type}`` / ``data: {事件 JSON}``；会话空闲
+    帧：``id: {seq}``（llm.delta 没有）/ ``event: {type}`` / ``data: {事件 JSON}``（``error`` 事件的帧名为
+    ``agent.error``，``data.type`` 仍是 ``error``）；会话空闲
     （回放完没有轮次在运行，或正在运行的这一轮结束）后发送 ``event: idle`` 并关闭。
     请求头 ``Last-Event-ID`` 与 ``after_seq`` 同时给出时取较大者。
     """
@@ -150,7 +158,7 @@ async def stream_session(
             if isinstance(item, Idle):
                 yield format_sse({"status": "idle", "last_seq": item.last_seq}, event="idle")
             else:
-                yield format_sse(item.to_wire(), event=item.type, id=item.seq)
+                yield format_sse(item.to_wire(), event=sse_event_name(item.type), id=item.seq)
 
     return sse_response(frames())
 

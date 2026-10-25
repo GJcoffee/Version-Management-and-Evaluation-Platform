@@ -272,6 +272,11 @@ function AssistantMessage({
               <BlobLoadBar pending={blob.pending} loading={blob.loading} error={blob.error} onLoad={blob.load} label="回复内容较大，已转存" />
             )}
             <Markdown streaming={m.streaming}>{content}</Markdown>
+            {m.partial && (
+              <p className="mt-1.5 text-xs text-muted-foreground" data-testid="partial-mark">
+                {turn.status === 'cancelled' ? '已取消，以上为已生成的部分内容' : '执行中断，以上为已生成的部分内容'}
+              </p>
+            )}
           </div>
         )}
         {m.toolCalls.length > 0 && (

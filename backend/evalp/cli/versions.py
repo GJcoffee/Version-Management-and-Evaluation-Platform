@@ -49,8 +49,8 @@ def versions(
 
 @cli_errors
 def diff(
-    left: Annotated[str, typer.Argument(help="左侧版本：v12、标签或版本 id")],
-    right: Annotated[str, typer.Argument(help="右侧版本")],
+    left: Annotated[str, typer.Argument(help="左侧版本：v12、标签、版本 id，或草稿 @main")],
+    right: Annotated[str, typer.Argument(help="右侧版本（同左；@草稿名 取服务端已保存的草稿）")],
     agent: AgentOpt = None,
     data_dir: DataDirOpt = None,
 ) -> None:

@@ -1,5 +1,11 @@
-/** 前端侧的 Spec 对比：统计草稿相对基础版本的改动数（后端 versions/diff 只接受版本，不接受草稿）。 */
-import type { AgentSpec } from '@/api/types'
+/**
+ * 草稿相对基础版本的改动数。
+ *
+ * 首选服务端的 `GET /versions/diff`（右侧传草稿 id，口径与版本 diff 页一致：按身份键匹配列表、子树新增 / 删除算一处），
+ * 但它只能看到已保存的草稿内容；编辑器里有未保存的修改时，回退为这里的前端计算（`countSpecChanges`，按叶子路径统计，
+ * 口径略有不同，所以界面上标"约"）。
+ */
+import type { AgentSpec, VersionDiff } from '@/api/types'
 
 /** 不参与哈希、不存入版本的显示字段 */
 const DISPLAY_KEYS = new Set(['name', 'description', 'notes'])
@@ -51,4 +57,32 @@ export function unpinSpec<T>(spec: T): T {
     return Object.fromEntries(Object.entries(o).map(([k, v]) => [k, unpinSpec(v)])) as T
   }
   return spec
+}
+
+/** 服务端 diff 的改动数（summary 各项之和） */
+export function diffChangeCount(diff: Pick<VersionDiff, 'summary'>): number {
+  return Object.values(diff.summary).reduce((a, b) => a + b, 0)
+}
+
+export interface ChangeCount {
+  /** null：没有基础版本（全部为新增）；undefined：暂时算不出来 */
+  count: number | null | undefined
+  /** 前端估算（含未保存修改 / 服务端结果不可用），口径与版本 diff 页略有差异 */
+  approx: boolean
+}
+
+/**
+ * 选择状态栏要显示的改动数。
+ * @param server 服务端 diff（仅在编辑器内容与已保存草稿一致时才有意义）
+ * @param local 前端按干跑校验预览算出的改动数（预览不可用时为 undefined）
+ */
+export function pickChangeCount(opts: {
+  hasBase: boolean
+  saved: boolean
+  server: Pick<VersionDiff, 'summary'> | undefined
+  local: number | undefined
+}): ChangeCount {
+  if (!opts.hasBase) return { count: null, approx: false }
+  if (opts.saved && opts.server) return { count: diffChangeCount(opts.server), approx: false }
+  return { count: opts.local, approx: opts.local !== undefined }
 }

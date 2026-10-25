@@ -7,7 +7,7 @@ from typing import Any
 from rich.console import Console
 from rich.markup import escape
 
-from evalp.render import _ref_text
+from evalp.render import _ref_text, diff_side_label
 
 OP_STYLE = {
     "add": ("+", "green"),
@@ -21,7 +21,9 @@ def print_diff(console: Console, data: dict[str, Any], *, max_lines: int | None 
     """打印版本 diff：每个变更一行，文本 diff 按 +/-/@@ 着色。"""
     left, right = data.get("left") or {}, data.get("right") or {}
     changes = data.get("changes") or []
-    console.print(f"[bold]版本 diff[/bold]  v{left.get('seq')} -> v{right.get('seq')}")
+    console.print(
+        f"[bold]版本 diff[/bold]  {escape(diff_side_label(left))} -> {escape(diff_side_label(right))}"
+    )
     if not changes:
         console.print("[dim]两个版本的内容完全相同。[/dim]")
         return

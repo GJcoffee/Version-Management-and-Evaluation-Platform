@@ -110,12 +110,19 @@ def diff_change_lines(ch: dict[str, Any]) -> str:
     return f"~ {path}: {_ref_text(ch.get('left'))} -> {_ref_text(ch.get('right'))}"
 
 
+def diff_side_label(side: dict[str, Any]) -> str:
+    """diff 一侧的名称：版本为 ``v12``，草稿为 ``草稿 main(r3)``。"""
+    if side.get("draft"):
+        return f"草稿 {side.get('name')}(r{side.get('revision')})"
+    return f"v{side.get('seq')}"
+
+
 def render_diff_md(data: dict[str, Any], max_lines: int = 200, web_url: str | None = None) -> str:
     """版本 diff 的 Markdown：变更列表加文本 diff，文本 diff 总行数超过 max_lines 时截断。"""
     left, right = data.get("left") or {}, data.get("right") or {}
     summ = data.get("summary") or {}
     changes = data.get("changes") or []
-    head = f"## 版本 diff：v{left.get('seq')} -> v{right.get('seq')}"
+    head = f"## 版本 diff：{diff_side_label(left)} -> {diff_side_label(right)}"
     if not changes:
         return head + "\n\n两个版本的内容完全相同（没有变更）。"
     parts = [head, ""]
