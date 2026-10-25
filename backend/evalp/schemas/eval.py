@@ -8,7 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from evalp.schemas.asset import CaseFilter
 
-RunStatus = Literal["queued", "running", "paused", "completed", "completed_with_errors", "cancelled"]
+RunStatus = Literal[
+    "queued", "running", "paused", "completed", "completed_with_errors", "cancelled", "failed"
+]
 ItemStatus = Literal["pending", "running", "scoring", "done", "failed", "cancelled"]
 TERMINAL_RUN_STATUSES = ("completed", "completed_with_errors", "cancelled")
 
@@ -44,6 +46,7 @@ class EvalCreate(BaseModel):
 class RunRef(BaseModel):
     id: str
     version_id: str
+    status: str = "queued"
 
 
 class EvalCreated(BaseModel):
@@ -52,7 +55,7 @@ class EvalCreated(BaseModel):
     dry_run: bool = False
     batch_id: str | None = None
     runs: list[RunRef] = Field(default_factory=list)
-    estimate: dict[str, Any]
+    estimate: dict[str, Any] | None = None
 
 
 class DatasetBrief(BaseModel):
@@ -65,12 +68,16 @@ class DatasetBrief(BaseModel):
 class EvalRunOut(BaseModel):
     id: str
     batch_id: str
+    name: str | None = None  # 批次名称（契约字段；同 batch_name）
     batch_name: str | None = None
     agent_id: str
     agent_name: str | None = None
     version_id: str
     version_seq: int | None = None
     dataset: DatasetBrief
+    dataset_rev_id: str | None = None  # 契约字段：dataset 的扁平形式
+    dataset_name: str | None = None
+    dataset_rev: int | None = None
     case_filter: dict[str, Any]
     evaluators: list[dict[str, Any]]
     evaluators_hash: str
@@ -122,6 +129,13 @@ class ItemOut(BaseModel):
     id: str
     run_id: str
     case: CaseBrief
+    # 契约字段（case 的扁平形式 + 预览）
+    case_id: str | None = None
+    case_key: str | None = None
+    input_preview: str | None = None
+    expected: Any = None
+    tags: list[str] = Field(default_factory=list)
+    output_preview: str | None = None
     repeat_idx: int
     status: ItemStatus
     passed: bool | None = None

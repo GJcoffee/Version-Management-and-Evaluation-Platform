@@ -207,3 +207,76 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 - `turn.end.status=completed` 与 `Turn.status=ok` 在前端统一映射为 `ok`。
 - SSE 业务事件 `event: error` 与 `EventSource.onerror` 同名，前端已区分处理（带 data 视为业务事件）。
 - 超过 32KB 的事件在库中是整个 payload 被替换为 `{$blob, ...}` 存根（不是字段级），前端按整 payload 存根按需加载。
+
+## 对比与重放 — 重放在同一次重放内逐轮串行，不同重放之间最多并发 4 个
+
+契约 3 节要求"各轮相互独立，在后台并发执行（并发上限 4）"。但 `SessionService` 约束同一会话同一时间只能执行一轮
+（`_running` 按 session_id 占位，`EventSink` 的 seq 也按会话单调分配），而契约又要求一次重放只产生一个新会话，
+因此一次重放内的各轮无法真正并发。实际：每次重放一个后台 asyncio 任务，按原轮次 idx 升序逐轮执行；不同重放之间用
+`Semaphore(4)` 限制并发。各轮的上下文仍取自原会话（`history_override`），互不依赖，结果与并发执行等价，只是总耗时更长。
+未改动 `services/session.py`。若以后需要真正的轮内并发，需要让 `SessionService` 支持同一会话并行轮次（或重放改为每轮一个会话）。
+
+## 对比与重放 — replay 对比组的轮次选择存在 compare_groups.notes
+
+`turns` 子集重放时，对齐结果只应包含被选中的轮次。`compare_groups` 没有对应字段，所以把 `{"replay_turns": [...]}`
+以 JSON 写进 `notes` 列（该列的"备注编辑"功能在 BACKLOG 中尚未实现，API 也不返回 notes）。以后做备注编辑时需另加字段或迁移这个用法。
+
+## 对比与重放 — 对齐结果的附加字段与 step_id 约定
+
+在契约字段之外增加：`turns[].status`（两侧轮次状态）、`turns[].input`（两侧用户输入文本）、`tool_args_diff[].changes[].op`。
+`message.assistant`（final 步骤）没有 step_id，对齐输出里固定为 `"final"`；其他没有 step_id 的步骤记为 `"e{seq}"`。
+步骤对齐用 `difflib.SequenceMatcher` 的最长连续匹配，不保证"前缀相同的步骤优先对齐"。
+
+## 评测（收窄版对接）— 仓库里已有完整版实现，按契约补齐字段，未删除 BACKLOG 能力
+
+开始收窄版开发时，`runtime/scheduler.py`、`evaluators/`、`services/eval.py`、`api/v1/evals.py` 等已是按详设 8 完成的完整版实现
+（含 80 个测试）。没有推倒重写，而是对照 `docs/contract-eval.md` 补齐：
+
+- 响应字段只增不减：Run 增加 `name`、`dataset_rev_id`、`dataset_name`、`dataset_rev`；Item 增加 `case_id`、`case_key`、`input_preview`、
+  `expected`、`tags`、`output_preview`；`status` 增加契约里的 `failed`；创建响应的 `runs[]` 增加 `status`。
+- 列表参数按契约命名为 `agent_id`、`batch_id`（旧名 `agent`、`batch` 保留）；Item 列表增加 `passed`，`q` 同时匹配输出。
+- SSE：`eval.item_done` 增加 `item`（完整 EvalItem；原有扁平字段保留）；结束帧由 `end` 改为契约的 `idle`；Run 已结束时只发 `eval.status` + `idle`。
+- 对比：响应改为契约结构（`cases.items`、`summary.metric_deltas`、字符串数组 `warnings`）；原先的顶层 `items` / `next_cursor` 移入 `cases`，
+  `summary.metrics` 保留。`exact_match` 增加 `values`，`regex.flags` 同时接受字符串。
+- llm_judge 的 `score.detail.samples[]` 增加 `request_preview` / `reply_preview`（评审请求与回复摘要）。
+- 修复测试 `test_a4_restart_resumes_without_rerun_or_double_billing` 的竞态：快照恰好落在"Item 已标记 running、会话尚未创建"之间时，
+  废弃会话数小于 running Item 数，属于测试断言过严，已改为只统计有会话的 running Item。
+
+**与收窄范围不一致、但已存在于代码中的部分（未删除，需总控决定是否裁剪）**：
+
+- BACKLOG 中的能力：暂停 / 继续、`retry-failed`、`rescore`、`dry_run` 与预算上限、评估器 `json_schema` / `trace` / `python` / `human`
+  （含 `human-scores`）、`samples>1`、pass@k 与 flaky 标记、`by_tag`、对比的 bootstrap 置信区间和符号检验、`gate` 接口。
+  它们有各自的测试，接口上都是契约的超集；前端 / CLI 可以忽略。
+- llm_judge 没有"直接调用 `LLMClient.chat`"，而是把评审配置发布为隐藏 agent（`evalp-judge`）的版本并建 `Session(mode=judge)` 执行
+  （BACKLOG 中的"judge 会话"）。好处是评审 trace 可回看、复用限流与重试；代价是库里多了 judge 会话和一个隐藏 agent。
+  若要改为直连，只需重写 `evaluators/llm_judge.py::_sample`，对外字段不变。
+- `repeats` 缺省值为 3（契约示例写的是 1）；评估器 `key` 缺省时按类型自动生成，契约要求显式给出的写法同样可用。
+
+## CLI / MCP / 工作区客户端（收窄版）— 模块划分与对详设 10、12、13 的取舍
+
+**文件**：`evalp/client.py`（REST 薄客户端）、`evalp/workspace_client.py`（`.evalp.toml`、state、push / pull）、
+`evalp/cli/{common,init,workspace,versions,diffview,chat,eval,mcp_cmd}.py`、`evalp/mcp/server.py`。
+任务之外**新增**两个 CLI 与 MCP 共用的模块：`evalp/actions.py`（发布、发起 / 等待评测、取报告与对比、单轮对话）和
+`evalp/render.py`（把版本 diff / 评测报告 / 对比渲染成 Markdown）。客户端是异步的（`httpx.AsyncClient`），CLI 用 `asyncio.run` 调用。
+
+- **mcp SDK 是 2.x**：`FastMCP` 更名为 `mcp.server.mcpserver.MCPServer`，`mcp.server.fastmcp` 导入会直接报错。`evalp/mcp/server.py` 优先导入
+  `MCPServer`，失败再退回 1.x 的 `FastMCP`。工具失败抛 `ToolError`（客户端看到 `isError=true` 和中文原因）。
+- **评测的默认值**：`.evalp.toml` 的 `[eval]`（BACKLOG）不实现，所以 `dataset` 必填；评估器配置默认读项目根目录的 `evals.yaml`（`evalp init` 会生成），
+  也可以 `--evaluators` 指定；MCP 的 `evaluators` 还可以直接传对象列表。`--repeats` 缺省时不传，由服务端取默认值。
+- **基线约定**：`eval run` / `run_eval` 增加 `--baseline`。给了 baseline 时它排在第一位（对比的左侧）；没给且有多个版本时以第一个版本为基线；
+  每个非基线版本各与基线做一次对比。详设示例 `--versions v13,baseline` 的顺序在这个约定下会把 v13 当基线，请用 `--baseline baseline`。
+- **`eval run` 的 `--wait` 默认关闭**（与 13 节的 `[--wait]` 一致）；不带时只打印 run id 和链接。MCP 的 `run_eval` 默认 `wait=true`，最多等 10 分钟，超时不取消评测。
+  等待用轮询（`GET /evals/{id}`，CLI 1 秒、MCP 2 秒）而不是 SSE，Run 进入 `paused` 时也结束等待。
+- **新增的选项**（均为小增量）：`init --name/--force`（init 还会生成示例数据集 `datasets/regression.jsonl` 和 `evals.yaml`，让 push → eval 的流程能直接跑通）、
+  `pull --force`、`chat -m/--message`（单条消息后退出）、`eval run --name`、`evalp mcp --project-dir`（Cursor 等不在项目目录启动 MCP 的客户端使用）。
+  所有访问服务的命令都有 `--data-dir`（也读 `EVALP_DATA_DIR`），服务地址取 `.evalp.toml` 的 `[server].url`，没有时取数据目录配置的 host:port。
+- **push 的细节**：① 本地 spec、文件哈希都没变，且 `GET /drafts/{id}` 的 revision 与 state 一致时不调用 `/workspace/push`（避免空推送让 revision 空涨），
+  `--force` 总是推送；② 只对哈希有变化的文件带 `content`，服务端报 `CONTENT_MISSING`（如数据目录被重置）时自动补传内容重试一次；
+  ③ push 成功后调用 `/drafts/{id}/validate` 并展示结果（失败不影响 push）；④ 代码型 agent 的相对 `source.repo` / `subprocess.cwd` 在 push 时转为绝对路径
+  （api.md 要求客户端传绝对路径），pull 时位于项目目录内的绝对路径还原为相对路径。
+- **`[assets]` 的 `{stem}`** 会规范化为合法资产名（小写，非字母数字转连字符），如 `Query_Order.yaml` → `query-order`。
+  精确路径（不含通配符）的映射在本地文件被删除时仍参与 pull，用于还原文件；通配符映射只匹配本地已存在的文件。
+- **pull 的保护**：本地文件或 `agent.yaml` 相对上次同步有未推送的修改、且与服务端内容不同时，pull 拒绝覆盖并列出文件，`--force` 才覆盖
+  （详设没有这一步；避免 MCP / 误操作丢失本地修改）。pull 重写 `agent.yaml` 时不保留注释；内容没变则不重写。
+- **未做**（BACKLOG）：MCP 启动时自动拉起 `evalp serve`；`list_agents` 等其余工具；`asset` / `dataset import` / `replay` 等命令。
+  chat 只能选已发布的版本（会话基于版本），不能直接和草稿对话。

@@ -12,8 +12,10 @@ from evalp.runtime.llm.registry import LLMRegistry
 from evalp.runtime.scheduler import Scheduler
 from evalp.services.eval import EvalService, start_eval_runtime
 from evalp.services.session import SessionService
-from evalp.store.models import EvalItem, Job as JobRow, Session
+from evalp.store.models import EvalItem, Session
+from evalp.store.models import Job as JobRow
 from sqlalchemy import func, select
+
 from tests.fixtures.fake_openai import StreamingASGITransport
 
 from .conftest import API, make_cases
@@ -164,6 +166,14 @@ async def test_a4_restart_resumes_without_rerun_or_double_billing(ev, tmp_path, 
             statuses = dict(
                 (await s.execute(select(EvalItem.status, func.count()).group_by(EvalItem.status))).all()
             )
+            # 刚被领取、还没来得及建会话的 running Item 没有废弃会话可标记
+            running_with_session = (
+                await s.execute(
+                    select(func.count())
+                    .select_from(EvalItem)
+                    .where(EvalItem.status == "running", EvalItem.session_id.is_not(None))
+                )
+            ).scalar_one()
             running_jobs = (
                 await s.execute(select(func.count()).select_from(JobRow).where(JobRow.status == "running"))
             ).scalar_one()
@@ -194,7 +204,7 @@ async def test_a4_restart_resumes_without_rerun_or_double_billing(ev, tmp_path, 
         assert len({round(c, 8) for c in costs}) == 1 and d.stats["cost"] == pytest.approx(total * costs[0])
         assert d.progress["cost_new"] == pytest.approx(total * costs[0])
         # 崩溃时在跑的 Item 留下的废弃会话被标记为 error，浪费的成本单独记账
-        assert abandoned == statuses["running"]
+        assert abandoned == running_with_session
         assert d.stats["cost_wasted"] >= 0
         items = await svc2.list_items(rid, limit=200)
         interrupted = [i for i in items.items if i.usage and i.usage.get("failed_attempts")]

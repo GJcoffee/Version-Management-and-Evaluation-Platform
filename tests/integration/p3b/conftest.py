@@ -49,7 +49,7 @@ class EvalWorld(World):
         r = await self.client.post(
             f"{API}/datasets/import", json={"name": name, "content": jl(*cases), "format": "jsonl"}
         )
-        assert r.status_code == 201, r.text
+        assert r.status_code in (200, 201), r.text  # 同名数据集追加修订时为 200
         return r.json()
 
     async def create(

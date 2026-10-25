@@ -557,3 +557,136 @@ HTTP 状态恒为 200（版本不存在 404），agent 的任何问题都体现�
 检查项顺序：`health`（健康检查）、`single`（单轮成功且回复非空）、`multi_turn`（第二轮带着历史；agent 在 `turn.start` 里报告的 `history_len` 要等于传入的条数，
 没有报告则看 `llm.request` 是否带上了上一轮内容，都没有给 `warn`）、`timeout`（极短超时后以 `timeout` 结束并终止进程）、`cancel`（执行中取消后以 `cancelled` 结束并终止进程）、
 `events`（逐条列出事件顺序 / 成对 / 协议违例等问题，`details.problems`）。agent 响应得比探测超时还快时 `timeout` / `cancel` 为 `skip`；`single` 失败时后续项为 `skip`。`ok` 表示没有 `fail`。
+
+## 对比与重放（P3-C）
+
+契约来源 `docs/contract-eval.md` 第 3 节；这里补充实现细节。对比组 id 前缀 `cmp_`。
+
+### POST /compare → 201 CompareGroup
+```json
+{"kind": "session", "mode": "live", "left": {"version_id": "ver_a"}, "right": {"version_id": "customer-support:v13"}, "title": "…"}
+{"kind": "session", "mode": "history", "left": {"session_id": "ses_x"}, "right": {"session_id": "ses_y"}}
+```
+- `live`：`version_id` 可写版本 id、`agent:vN`、`agent:标签`；自动创建两个 `mode=chat` 的会话（出现在会话列表里）。两侧可以是不同的 agent。
+- `history`：两侧是已有会话（任意 mode），会话不存在返回 404。
+- `replay` 模式只能由重放生成，不能直接创建。`kind` 目前只支持 `session`。
+- 响应：`{id, kind, mode, left:{session_id, version_id, version_seq, agent_name}, right:{…}, title, created_at}`。
+
+### GET /compare、GET /compare/{id}
+列表按新到旧分页（只含 `kind=session`）；详情结构同上。
+
+### POST /compare/{id}/turns → 202（仅 live 模式）
+请求 `{"input": "…" | Message, "variables"?: {}}`，响应 `{"pair_index": 3, "left_turn_id": "trn_…", "right_turn_id": "trn_…"}`。
+- 两侧并发执行，立即返回；前端分别订阅两侧的 `GET /sessions/{id}/stream`（可用响应里的 turn id 区分，或用 `after_seq` = 发送前的 `last_seq`）。
+- `pair_index` = 两侧已有 pair_index 的最大值 + 1（从 0 开始）；两侧的轮次共享同一个 `pair_index`。
+- 任意一侧会话正在执行 → **409 `SESSION_BUSY`**（`details.session_id` 是忙的那一侧；此时两侧都不会启动）。
+- 非 live 模式 → 409 `INVALID_STATE`。一侧执行出错不影响另一侧（看各自 turn 的 `status`）。
+
+### GET /compare/{id}/alignment
+```json
+{"turns": [{
+  "pair": 0, "left_turn_id": "trn_…", "right_turn_id": "trn_…",
+  "steps": [{"op": "equal", "left": "s1", "right": "s3", "sig": "llm"},
+            {"op": "insert", "right": "s2", "sig": "tool:query_order"},
+            {"op": "delete", "left": "s2", "sig": "tool:knowledge_search"}],
+  "tool_args_diff": [{"left": "s2", "right": "s2",
+                      "changes": [{"path": "order_id", "left": "A1", "right": "A2", "op": "change"}]}],
+  "metrics": {"left":  {"latency_ms": 2100, "ttft_ms": 400, "tokens": 1830, "cost": 0.01, "llm_calls": 2, "tool_calls": 1},
+              "right": {"latency_ms": 3400, "ttft_ms": 380, "tokens": 2410, "cost": 0.02, "llm_calls": 3, "tool_calls": 2}},
+  "final_text": {"left": "…", "right": "…"},
+  "status": {"left": "ok", "right": "error"},
+  "input": {"left": "用户输入", "right": "用户输入"}
+}]}
+```
+- **轮次对齐**：live 按 `pair_index`；history 按 `idx`；replay 时左侧（原会话）按 `idx`、右侧（新会话）按 `pair_index`（等于原轮次 idx）。`pair_index` 为空的轮次（单侧消息）不参与。只有一侧有的轮次，另一侧的 `*_turn_id`、`metrics`、`final_text`、`status` 为 null，`steps` 全为 delete 或 insert。
+- **步骤对齐**：对两侧步骤签名序列（`llm` / `tool:{name}` / `span:{name}` / `final`）做 LCS（`difflib.SequenceMatcher`，取最长连续匹配，所以多出来的步骤不一定出现在开头），只有 `equal / insert / delete` 三种 op；签名不同的步骤是一个 delete 加一个 insert（delete 在前）。
+- **step_id**：每轮从 `s1` 开始，必须与 turn id 组合才唯一；`message.assistant`（`final`）通常没有 step_id，这里固定记为 `"final"`；没有 step_id 的其他步骤记为 `"e{seq}"`。
+- **tool_args_diff**：只列出参数有差异的、已对齐的工具调用；`changes[].path` 形如 `a.b`、`items[0]`，`op` 为 `change / add / remove`（缺的一侧值为 null）。工具结果的文本 diff 与 llm/final 的字符级 diff 由前端用 `final_text` 和 trace 自行完成。
+- **metrics**：`tokens` = 输入 + 输出 token；轮次尚未结束时 `latency_ms` / `ttft_ms` 为 null，其余为已累计的值（结束前通常为 0）。
+- 每次请求都会重新计算，包含正在执行的轮次的当前进度；前端可在两侧 `turn.end` 后重新拉取。
+
+### POST /sessions/{id}/replay → 201
+请求 `{"target_version_id": "ver_b | agent:v13 | agent:标签", "turns"?: [0, 2], "mode"?: "anchored"}`，响应 `{"session_id": "ses_new", "compare_id": "cmp_…"}`。
+- 只支持锚定模式（`mode` 传 `free` 返回 400）。`turns` 是原会话的轮次 `idx`，缺省为全部（不含仍在执行的轮次）；不存在的 idx 返回 400。
+- 立即返回；新会话（`mode=replay`、`source_session_id`=原会话、`replay_mode=anchored`、变量沿用原会话）和 `CompareGroup(mode=replay, left=原会话, right=新会话)` 在返回时已创建，前端可立刻打开对比页，随后订阅新会话的 SSE / 轮询 alignment 看到逐轮完成。尚未执行的轮次在 alignment 中 `right_turn_id` 为 null。
+- 第 k 轮的上下文 = 原会话前 k 轮的历史（只含 `status=ok` 的轮次）；新轮次的 `anchored_from_turn_id` = 原轮次 id，`pair_index` = 原轮次 `idx`。某一轮失败不影响后面的轮次。
+- 执行方式：后台 asyncio 任务，不经过调度器。同一次重放内按原轮次顺序**逐轮串行**（一个会话同一时间只能执行一轮），不同重放之间最多同时执行 4 个；服务关闭时取消未完成的重放。
+- 没有"重放进度"接口：看新会话的 `turns` 数量与 `GET /sessions/{id}` 的 `status`，或订阅其 SSE。
+
+## 评测（P3-B）
+
+接口契约见 `docs/contract-eval.md` 第 1、2 节；下面只写实际行为和契约之外新增的内容。所有路径都在 `/api/v1` 下。
+
+### 评估器配置（`evaluators[]`）
+
+| type | 字段（括号内为默认值） |
+|---|---|
+| `exact_match` | `values`（空 = 与用例 `expected` 比较）、`normalize`（`["strip"]`；可选 `strip` `lower` `nfkc` `punct`）、`field`（`final`） |
+| `contains` | `values`（空 = `expected`）、`mode`（`all` / `any`，默认 `all`）、`negate`（false）、`case_sensitive`（true） |
+| `regex` | `pattern`、`flags`（字符串 `"im"` 或数组 `["i","m"]`，可选 `i m s x a`） |
+| `llm_judge` | `provider`、`model`、`prompt`（默认 `asset://prompt/judge-default@latest`）、`scale`（`[1,5]`）、`pass_threshold`（缺省为量程的 60% 处，默认量程即 3.4 分）、`params` |
+
+- 公共字段：`key`（缺省按类型生成，同一次评测内必须唯一）、`gate`（默认 true）。非法配置返回 400 `VALIDATION_ERROR`，`details.errors[].path` 形如 `evaluators[1].pattern`。
+- 创建评测时，`llm_judge` 的 `prompt` 引用会被固化为具体修订（`asset://prompt/judge-default@1`），`GET /evals/{id}` 返回的是固化后的值。
+- 内置评审 prompt `prompt/judge-default` 在应用首次启动时自动创建（中文；变量 `input`、`output`、`expected`、`rubric`，另有 `transcript`、`scale_min`、`scale_max`），要求模型只输出 `{"score": 整数, "reason": "…"}`。输出无法解析时重试 1 次，仍失败则该评分 `status=error`（不参与通过判定，计入 `stats.evaluators[key].errors`）。
+- `score.detail.samples[0]` 含评审的请求摘要 `request_preview`（各变量前 200 字）、回复摘要 `reply_preview`、`attempts`、`raw` 和 `reason`；`detail.judge_sessions` 是评审会话 id。
+
+### 接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/evals` | 创建，201 `{batch_id, runs:[{id, version_id, status:"queued"}], estimate}`；每个版本一个 Run |
+| GET | `/evals?agent_id=&version_id=&batch_id=&status=&limit=&cursor=` | 列表，新的在前；`status` 可逗号分隔；旧参数名 `agent`、`batch` 仍可用 |
+| GET | `/evals/{id}` | Run 详情，带 `batch_runs`（同批次其他 Run） |
+| GET | `/evals/{id}/items?status=&passed=&q=&class=&tag=&limit=&cursor=` | Item 列表（按用例顺序、重复序号）；`passed=true/false`（false 含执行失败）；`q` 模糊匹配 case_key、输入、输出 |
+| GET | `/evals/{id}/items/{item_id}` | 单条，结构同上，另带 `output`（完整回复）、`turns`、`case_detail` |
+| POST | `/evals/{id}/cancel` | 返回 Run；未开始的 Item 置 `cancelled`，正在执行的被取消，已完成的结果保留 |
+| GET | `/evals/{id}/stream` | SSE |
+| GET | `/evals/compare?left=&right=&threshold=0.05&class=&limit=&cursor=` | 两次评测逐用例对比 |
+
+契约之外保留的接口（详设 8，一期前端 / CLI 不依赖）：`pause`、`resume`、`retry-failed`、`rescore`、`human-scores`、`gate`，以及 `POST /evals?dry_run=true`。
+
+### EvalRun / EvalItem 的附加字段
+
+- Run：`name`（同 `batch_name`）、`dataset_rev_id` / `dataset_name` / `dataset_rev`（另有嵌套的 `dataset`）、`case_filter`、`seed`、`budget`、`evaluators_hash`、`error`。`status` 在契约的取值之外还有 `paused`。
+- `progress`：`total`、`pending`、`running`、`scoring`、`done`、`failed`、`cancelled`、`cached`、`cost_new`。`done` 不含 `failed`；缓存命中的 Item 在重新评分完成后同样计入 `done`。
+- Item：契约字段之外有 `run_id`、嵌套的 `case`、`score`（门禁评估器分数的平均值；执行失败为 0）、`reused_from_item_id`、`started_at`、`finished_at`；`scores[]` 另带 `evaluator_type`、`gate`、`detail`、`judge_session_id`。
+- `input_preview` / `output_preview` 最长 200 字符，超出加 `…`；`output_preview` 取会话最后一个成功轮次的最终回复。
+- `error` 为 `{code, message, retriable}`。重试中的 Item 保持 `running`，`attempts` 递增。
+
+### stats
+
+契约字段之外：`cancelled`、`cost_new`（不含缓存命中）、`cost_wasted`（失败尝试的成本）、`pass_at_k`、`flaky_cases`、`by_tag`、`score_error_rate`；`evaluators[key]` 另有 `std`、`n`、`parse_failures`、`pending_human`。口径：
+
+- 用例通过率 = 通过的重复次数 / 参与判定的重复次数；执行失败的 Item 算未通过；没有任何可用门禁评分（如评审解析失败）的 Item 不参与判定；`pass_rate` 是各用例通过率的平均值。
+- `latency_ms`、`tokens` 只统计 `done` 的 Item，缓存命中的沿用来源 Item 的数值。
+
+### SSE
+
+事件的 `data` 都带 `run_id`：
+
+- `eval.status`：`{status, stats, progress, started_at, finished_at, pause_reason}`；连接建立时先发一次当前快照，每次状态变化再发；
+- `eval.progress`：`{progress}`，每个 Run 每秒最多 4 条；
+- `eval.item_done`：`{item}`（完整 EvalItem），另有 `item_id`、`case_key`、`repeat_idx`、`status`、`passed`、`cached`、`latency_ms`、`cost`、`error`、`scores`（以 key 为索引的简表）；
+- Run 到达终态（`completed` / `completed_with_errors` / `cancelled`）后发 `idle` 并关闭；连接时 Run 已结束的，只发 `eval.status` 和 `idle`。
+- 另有 `eval.budget_exceeded`（预算暂停，一期不用）。
+
+### 缓存
+
+`cache_key = sha256(spec_hash | case_hash | repeat_idx | seed)`。`cache_policy=reuse`（默认）时，已有 `done` 状态的同 key Item 会被复用：新 Item 直接引用它的会话（`cached=true`，`reused_from_item_id`），不再调用被测 agent，只重新执行评估器；`refresh` 不复用。`seed` 不同则不命中。
+
+### 调度、重试与重启恢复
+
+- 任务持久化在 `jobs` 表；worker 数取设置 `scheduler.workers`，每个 Run 的并发上限为请求里的 `concurrency`；
+- 可重试的错误（`TurnOut.error.retriable`，如模型 429 / 超时）按指数退避重新入队，最多 `scheduler.max_attempts` 次，超过后 Item 为 `failed`，Run 为 `completed_with_errors`；
+- 进程重启：`running` 的任务和 Item 回到 `pending` 继续执行，已完成的 Item 不会重跑；被中断的会话标记为 `error`，其成本记在 `usage.failed_attempts` / `stats.cost_wasted`，不重复计入 `cost`；
+- `GET /health` 的 `workers.busy` 为正在执行任务的 worker 数。
+
+### 对比（`GET /evals/compare`）
+
+返回契约结构（`left` / `right` 带 `stats`，`warnings` 为字符串数组，`summary`，`cases.items` / `cases.next_cursor`）。附加：
+
+- `threshold` 回显；`class` 还接受 `unscored`（某一侧没有可用分数）和 `flaky`；另有 `tag`、`q`（case_key 模糊匹配）参数；`cursor` 为上一页最后一条的 `case_key`；
+- `summary` 另有 `ci95`（配对 bootstrap 95% 置信区间）、`sign_test_p`、`wins` / `ties` / `losses`、`unscored`、`flaky`，以及 `metrics`（各指标 `{left, right, delta}` 的完整版）；契约的 `metric_deltas` 均为 `right - left`，`tokens_total` 为 prompt + completion；
+- 用例行另有 `flaky`；`left` / `right` 的 `pass_rate` 为该用例通过的重复次数占比；
+- 用例分数 = 各 gate 评估器分数的平均值（执行失败记 0 分），再对重复次数取平均；`|Δ| < threshold` 为 unchanged；排序：regressed、improved、unchanged、new、missing、unscored，同类按 `|Δ|` 从大到小。

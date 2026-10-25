@@ -77,6 +77,7 @@ def pick_field(text: str, field: str) -> tuple[str | None, str | None]:
 class ExactMatchConfig(EvaluatorConfig):
     type: Literal["exact_match"]
     field: str = "final"
+    values: list[str] = Field(default_factory=list)  # 为空时与用例的 expected 比较
     normalize: list[NormalizeOp] = Field(default_factory=lambda: ["strip"])
 
     @field_validator("field")
@@ -95,9 +96,9 @@ class ExactMatchEvaluator(Evaluator):
 
     async def evaluate(self, case: CaseView, transcript: Transcript, events: list[AgentEvent]) -> ScoreResult:
         cfg: ExactMatchConfig = self.config
-        candidates = expected_list(case.expected)
+        candidates = cfg.values or expected_list(case.expected)
         if not candidates:
-            return ScoreResult.error("用例没有 expected，无法做精确匹配")
+            return ScoreResult.error("没有配置 values，用例也没有 expected，无法做精确匹配")
         got, err = pick_field(transcript.final, cfg.field)
         if got is None:
             return ScoreResult.of(False, err or "没有可比较的内容")
@@ -154,6 +155,12 @@ class RegexConfig(EvaluatorConfig):
     type: Literal["regex"]
     pattern: str = Field(min_length=1)
     flags: list[Literal["i", "m", "s", "x", "a"]] = Field(default_factory=list)
+
+    @field_validator("flags", mode="before")
+    @classmethod
+    def _flags(cls, v: Any) -> Any:
+        """契约里 flags 写成字符串（``"i"``、``"im"``），这里同时接受字符串和数组。"""
+        return list(v) if isinstance(v, str) else v
 
     @field_validator("pattern")
     @classmethod

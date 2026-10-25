@@ -181,7 +181,8 @@ async def test_case_variables_and_tool_mocks(ev):
     await ev.api.asset(
         "tool",
         "q",
-        "name: query_order\ndescription: 查订单\nparameters: {type: object, properties: {order_id: {type: string}}}\n"
+        "name: query_order\ndescription: 查订单\n"
+        "parameters: {type: object, properties: {order_id: {type: string}}}\n"
         "impl: {type: mock, responses: [{default: {status: 真实结果}}]}\n",
     )
     v = await ev.config_version(

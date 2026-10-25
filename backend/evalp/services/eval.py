@@ -83,6 +83,7 @@ from evalp.services.eval_stats import (
     case_scores,
     compute_passed,
     compute_stats,
+    item_outcome,
 )
 from evalp.services.judge import JudgeService
 from evalp.services.provider import ProviderService
@@ -98,6 +99,7 @@ from evalp.store.models import (
     EvalItem,
     EvalRun,
     EvalScore,
+    Turn,
     Version,
 )
 from evalp.store.models import Job as JobRow
@@ -600,12 +602,16 @@ class EvalService:
                 EvalRunOut(
                     id=r.id,
                     batch_id=r.batch_id,
+                    name=batches.get(r.batch_id),
                     batch_name=batches.get(r.batch_id),
                     agent_id=r.agent_id,
                     agent_name=agents.get(r.agent_id),
                     version_id=r.version_id,
                     version_seq=seqs.get(r.version_id),
                     dataset=DatasetBrief(revision_id=r.dataset_rev_id, asset_id=asset_id, name=name, rev=rev),
+                    dataset_rev_id=r.dataset_rev_id,
+                    dataset_name=name,
+                    dataset_rev=rev,
                     case_filter=r.case_filter or {},
                     evaluators=r.evaluators or [],
                     evaluators_hash=r.evaluators_hash,
@@ -815,9 +821,9 @@ class EvalService:
                     "stats": detail.stats,
                 },
             )
-            yield EvalEvent("eval.progress", {"run_id": run_id, "progress": detail.progress})
             if detail.status in TERMINAL_RUN_STATUSES:
                 return
+            yield EvalEvent("eval.progress", {"run_id": run_id, "progress": detail.progress})
             async for item in sub:
                 yield item
                 if item.event == "eval.status" and item.data.get("status") in TERMINAL_RUN_STATUSES:
@@ -1325,10 +1331,20 @@ class EvalService:
                 return
             it, case_key = row
             scores = (await s.execute(select(EvalScore).where(EvalScore.item_id == item_id))).scalars().all()
+            run = await self._run_row(s, it.run_id)
+            case_row = await s.get(EvalCase, it.case_id)
+            assert case_row is not None
+            outputs = await self._outputs(s, [it.session_id])
+        score_map = await self._score_outs(list(scores), run.evaluators)
+        gates = [c["key"] for c in run.evaluators if c.get("gate")]
+        dto = self._item_out(
+            it, case_row, score_map.get(it.id, []), gates, output=outputs.get(it.session_id or "")
+        )
         self._publish(
             it.run_id,
             "eval.item_done",
             {
+                "item": dto.model_dump(mode="json"),
                 "item_id": it.id,
                 "case_key": case_key,
                 "repeat_idx": it.repeat_idx,
@@ -1650,6 +1666,20 @@ class EvalService:
 
     # ================================================================ Item 查询
 
+    async def _outputs(self, s: AsyncSession, session_ids: list[str | None]) -> dict[str, str]:
+        """会话最后一个成功轮次的最终回复文本（给 ``output_preview`` 用）。"""
+        ids = sorted({x for x in session_ids if x})
+        if not ids:
+            return {}
+        rows = (
+            await s.execute(
+                select(Turn.session_id, Turn.output)
+                .where(Turn.session_id.in_(ids), Turn.status == "ok")
+                .order_by(Turn.session_id, Turn.idx)
+            )
+        ).all()
+        return {sid: _final_text(out) for sid, out in rows}  # 后面的轮次覆盖前面的
+
     async def _score_outs(
         self, scores: list[EvalScore], configs: list[dict[str, Any]]
     ) -> dict[str, list[ScoreOut]]:
@@ -1683,6 +1713,7 @@ class EvalService:
         scores: list[ScoreOut],
         gate_keys: list[str],
         cls: type[ItemOut] = ItemOut,
+        output: str | None = None,
     ) -> ItemOut:
         vals = [
             s.score
@@ -1699,6 +1730,12 @@ class EvalService:
                 tags=list(case_row.tags or []),
                 input=case_row.input,
             ),
+            case_id=case_row.id,
+            case_key=case_row.case_key,
+            input_preview=_preview(_input_text(case_row.input)),
+            expected=case_row.expected,
+            tags=list(case_row.tags or []),
+            output_preview=_preview(output),
             repeat_idx=it.repeat_idx,
             status=it.status,  # type: ignore[arg-type]
             passed=_b(it.passed),
@@ -1724,6 +1761,7 @@ class EvalService:
         cls: str | None = None,
         tag: str | list[str] | None = None,
         q: str | None = None,
+        passed: bool | None = None,
         limit: int = 50,
         cursor: str | None = None,
     ) -> Page[ItemOut]:
@@ -1754,9 +1792,19 @@ class EvalService:
                 stmt = stmt.where(select(je.c.value).where(je.c.value.in_(tags)).exists())
             if q:
                 like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                out_hit = exists().where(
+                    Turn.session_id == EvalItem.session_id, cast(Turn.output, Text).like(like, escape="\\")
+                )
                 stmt = stmt.where(
                     EvalCase.case_key.like(like, escape="\\")
                     | cast(EvalCase.input, Text).like(like, escape="\\")
+                    | out_hit
+                )
+            if passed is True:
+                stmt = stmt.where(EvalItem.status == "done", EvalItem.passed == 1)
+            elif passed is False:
+                stmt = stmt.where(
+                    or_(EvalItem.status == "failed", and_(EvalItem.status == "done", EvalItem.passed == 0))
                 )
             if cls == "passed":
                 stmt = stmt.where(EvalItem.status == "done", EvalItem.passed == 1)
@@ -1801,10 +1849,20 @@ class EvalService:
                 if items
                 else []
             )
+            outputs = await self._outputs(s, [i.session_id for i in items])
         score_map = await self._score_outs(scores, run.evaluators)
         gates = [c["key"] for c in run.evaluators if c.get("gate")]
         return Page(
-            items=[self._item_out(i, case_rows[i.case_id], score_map.get(i.id, []), gates) for i in items],
+            items=[
+                self._item_out(
+                    i,
+                    case_rows[i.case_id],
+                    score_map.get(i.id, []),
+                    gates,
+                    output=outputs.get(i.session_id or ""),
+                )
+                for i in items
+            ],
             next_cursor=page.next_cursor,
         )
 
@@ -1820,8 +1878,10 @@ class EvalService:
             scores = list((await s.execute(select(EvalScore).where(EvalScore.item_id == item_id))).scalars())
         score_map = await self._score_outs(scores, run.evaluators)
         gates = [c["key"] for c in run.evaluators if c.get("gate")]
-        base = self._item_out(it, case_row, score_map.get(item_id, []), gates)
         transcript, _, loaded = await self._load_transcript(it, False)
+        base = self._item_out(
+            it, case_row, score_map.get(item_id, []), gates, output=transcript.final if loaded else None
+        )
         turns = [
             {
                 "idx": t.idx,
@@ -1959,42 +2019,46 @@ class EvalService:
         summary = summarize_deltas(deltas)
         tags_by_case: dict[str, list[str]] = {}
         item_ids: dict[tuple[str, str], list[str]] = {}
+        outcomes: dict[tuple[str, str], list[int]] = {}
         for side, name in ((a, "left"), (b, "right")):
             for it in side["items"]:
                 tags_by_case.setdefault(it.case_key, it.tags)
                 if it.status in ("done", "failed"):
                     item_ids.setdefault((name, it.case_key), []).append(it.id)
-        warnings: list[dict[str, Any]] = []
+                if (o := item_outcome(it)) is not None:
+                    outcomes.setdefault((name, it.case_key), []).append(o)
+
+        def case_pass_rate(name: str, case_key: str) -> float | None:
+            o = outcomes.get((name, case_key))
+            return sum(o) / len(o) if o else None
+
+        warnings: list[str] = []
         if a["run"].dataset_rev_id != b["run"].dataset_rev_id:
+            ra, rb = a["out"], b["out"]
             warnings.append(
-                {
-                    "code": "DATASET_REVISION_DIFFERS",
-                    "message": "两次评测使用的数据集修订不同，按 case_key 关联对比",
-                    "left": a["run"].dataset_rev_id,
-                    "right": b["run"].dataset_rev_id,
-                }
+                f"两次评测的数据集修订不同（rev {ra.dataset.rev} vs {rb.dataset.rev}），按 case_key 关联对比"
             )
-        for side, name in ((a, "left"), (b, "right")):
+        for side, name in ((a, "左侧"), (b, "右侧")):
             if side["run"].status not in TERMINAL_RUN_STATUSES:
-                warnings.append(
-                    {
-                        "code": "RUN_NOT_FINISHED",
-                        "message": f"{name} 评测尚未结束（{side['run'].status}），结果是暂时的",
-                        "side": name,
-                    }
-                )
+                warnings.append(f"{name}评测尚未结束（{side['run'].status}），结果是暂时的")
         if a["gates"] != b["gates"]:
-            warnings.append(
-                {"code": "GATES_DIFFER", "message": "两次评测的门禁评估器不同，分数口径可能不一致"}
-            )
+            warnings.append("两次评测的门禁评估器不同，分数口径可能不一致")
 
         rows = [
             {
                 "case_key": d.case_key,
                 "class": d.cls,
                 "flaky": d.flaky,
-                "left": {"score": d.left, "item_ids": item_ids.get(("left", d.case_key), [])},
-                "right": {"score": d.right, "item_ids": item_ids.get(("right", d.case_key), [])},
+                "left": {
+                    "score": d.left,
+                    "pass_rate": case_pass_rate("left", d.case_key),
+                    "item_ids": item_ids.get(("left", d.case_key), []),
+                },
+                "right": {
+                    "score": d.right,
+                    "pass_rate": case_pass_rate("right", d.case_key),
+                    "item_ids": item_ids.get(("right", d.case_key), []),
+                },
                 "delta": d.delta,
                 "tags": tags_by_case.get(d.case_key, []),
             }
@@ -2030,16 +2094,31 @@ class EvalService:
                 "status": o.status,
                 "dataset": o.dataset.model_dump(),
                 "pass_rate": side["stats"]["pass_rate"],
+                "stats": side["stats"],
             }
 
+        def diff(x: Any, y: Any) -> float | None:
+            return None if x is None or y is None else y - x
+
+        ls, rs = a["stats"], b["stats"]
+        metric_deltas = {
+            "pass_rate": diff(ls["pass_rate"], rs["pass_rate"]),
+            "latency_p50_ms": diff(ls["latency_ms"]["p50"], rs["latency_ms"]["p50"]),
+            "cost": diff(ls["cost"], rs["cost"]),
+            "tokens_total": (rs["tokens"]["prompt"] + rs["tokens"]["completion"])
+            - (ls["tokens"]["prompt"] + ls["tokens"]["completion"]),
+        }
         return {
             "left": brief(a),
             "right": brief(b),
             "threshold": threshold,
             "warnings": warnings,
-            "summary": {**summary, "metrics": _metric_deltas(a["stats"], b["stats"])},
-            "items": page,
-            "next_cursor": next_cursor,
+            "summary": {
+                **summary,
+                "metric_deltas": metric_deltas,
+                "metrics": _metric_deltas(ls, rs),
+            },
+            "cases": {"items": page, "next_cursor": next_cursor},
         }
 
     async def gate(
@@ -2095,7 +2174,7 @@ class EvalService:
                 sign_test_p=sm["sign_test_p"],
                 regressed_cases=[
                     {"case_key": r["case_key"], "delta": r["delta"], "item_ids": r["right"]["item_ids"]}
-                    for r in cmp["items"]
+                    for r in cmp["cases"]["items"]
                 ][:50],
             )
             if sm["regressed"] > max_regressions:
@@ -2123,6 +2202,33 @@ def _clean_usage(usage: dict[str, Any] | None) -> dict[str, Any] | None:
     if usage is None:
         return None
     return {k: v for k, v in usage.items() if k not in ("failed_attempts", "wasted_cost")}
+
+
+PREVIEW_LEN = 200
+
+
+def _preview(text: str | None) -> str | None:
+    """预览文本：超过 200 字符时截断并加省略号。"""
+    if text is None:
+        return None
+    return text if len(text) <= PREVIEW_LEN else text[:PREVIEW_LEN] + "…"
+
+
+def _input_text(inp: Any) -> str:
+    """用例输入的文本形式：单轮为原文，多轮用换行拼接。"""
+    turns = inp.get("turns", []) if isinstance(inp, dict) else []
+    return "\n".join(t if isinstance(t, str) else json.dumps(t, ensure_ascii=False) for t in turns)
+
+
+def _final_text(output: Any) -> str:
+    """从 turns.output（``{final: Message, messages}``）取最终回复文本。"""
+    final = output.get("final") if isinstance(output, dict) else None
+    content = final.get("content") if isinstance(final, dict) else None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+    return ""
 
 
 def _case_view(c: EvalCase) -> CaseView:

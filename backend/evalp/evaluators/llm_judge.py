@@ -40,6 +40,7 @@ from evalp.services.session import SessionService
 
 PARSE_ATTEMPTS = 2  # 首次 + 重试 1 次
 OUTPUT_PREVIEW = 300
+REQUEST_PREVIEW = 200
 TRANSCRIPT_LIMIT = 4000
 _NUM_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 
@@ -200,6 +201,8 @@ class LLMJudgeEvaluator(Evaluator):
                 out["error"] = msg
                 return out
             text = turn.output.final.text() if turn.output and turn.output.final else ""
+            out["request_preview"] = {k: v[:REQUEST_PREVIEW] for k, v in variables.items() if v}
+            out["reply_preview"] = text[:OUTPUT_PREVIEW]
             try:
                 raw, reason = parse_judge_output(text, cfg.lo, cfg.hi)
             except JudgeParseError as e:

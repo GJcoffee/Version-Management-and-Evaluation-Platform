@@ -15,7 +15,13 @@ from __future__ import annotations
 import typer
 
 from evalp import __version__
+from evalp.cli import chat as chat_cmd
+from evalp.cli import eval as eval_cmd
+from evalp.cli import init as init_cmd
+from evalp.cli import mcp_cmd
 from evalp.cli import serve as serve_cmd
+from evalp.cli import versions as versions_cmd
+from evalp.cli import workspace as workspace_cmd
 
 app = typer.Typer(
     name="evalp",
@@ -41,6 +47,15 @@ def _root(
 def register_commands() -> None:
     """集中注册子命令。后续阶段在此追加 add_typer / command 调用。"""
     app.command("serve")(serve_cmd.serve)
+    app.command("init")(init_cmd.init)
+    app.command("push")(workspace_cmd.push)
+    app.command("pull")(workspace_cmd.pull)
+    app.command("publish")(workspace_cmd.publish)
+    app.command("versions")(versions_cmd.versions)
+    app.command("diff")(versions_cmd.diff)
+    app.command("chat")(chat_cmd.chat)
+    app.add_typer(eval_cmd.app, name="eval")
+    app.command("mcp")(mcp_cmd.mcp)
     # --- 后续阶段在此处追加，例如：
     # app.add_typer(agent_cmd.app, name="agent")
 

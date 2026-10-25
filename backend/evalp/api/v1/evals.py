@@ -54,16 +54,23 @@ async def create_eval(
 
 @router.get("", response_model=Page[EvalRunOut])
 async def list_evals(
-    agent: str | None = Query(None, description="agent 名称或 id"),
+    agent_id: str | None = Query(None, description="agent 名称或 id"),
     version_id: str | None = None,
-    batch: str | None = Query(None, description="批次 id（evb_…）"),
+    batch_id: str | None = Query(None, description="批次 id（evb_…）"),
+    agent: str | None = Query(None, description="同 agent_id（旧名称）"),
+    batch: str | None = Query(None, description="同 batch_id（旧名称）"),
     status: str | None = Query(None, description="状态，可用逗号分隔多个"),
     p: PageParams = Depends(page_params),
     ctx: AppContext = Depends(get_ctx),
 ):
     """评测列表（新的在前）。"""
     return await ctx.svc(EvalService).list(
-        agent=agent, version_id=version_id, batch=batch, status=status, limit=p.limit, cursor=p.cursor
+        agent=agent_id or agent,
+        version_id=version_id,
+        batch=batch_id or batch,
+        status=status,
+        limit=p.limit,
+        cursor=p.cursor,
     )
 
 
@@ -136,13 +143,14 @@ async def list_items(
         None, alias="class", description="passed | failed | error | flaky | pending_human"
     ),
     tag: list[str] = Query(default=[], description="含任一标签"),
-    q: str | None = Query(None, description="case_key / 输入的模糊匹配"),
+    passed: bool | None = Query(None, description="true 只看通过的，false 只看未通过（含执行失败）的"),
+    q: str | None = Query(None, description="case_key / 输入 / 输出的模糊匹配"),
     p: PageParams = Depends(page_params),
     ctx: AppContext = Depends(get_ctx),
 ):
     """Item 列表（按用例顺序、重复序号排序），带各评估器的分数。"""
     return await ctx.svc(EvalService).list_items(
-        eval_id, status=status, cls=cls, tag=tag, q=q, limit=p.limit, cursor=p.cursor
+        eval_id, status=status, cls=cls, tag=tag, q=q, passed=passed, limit=p.limit, cursor=p.cursor
     )
 
 
@@ -184,7 +192,8 @@ async def stream_eval(eval_id: str, ctx: AppContext = Depends(get_ctx)):
     """SSE：先推一次当前快照（``eval.status`` + ``eval.progress``），再推送实时事件。
 
     事件：``eval.progress``（至多每秒 4 条）、``eval.item_done``、``eval.status``、``eval.budget_exceeded``；
-    评测到达终态（completed / completed_with_errors / cancelled）后发送 ``end`` 帧并关闭。
+    评测到达终态（completed / completed_with_errors / cancelled）后发送 ``idle`` 帧并关闭；
+    连接时评测已结束的，只发一条 ``eval.status`` 再发 ``idle``。
     """
     svc = ctx.svc(EvalService)
     await svc.get(eval_id)  # 不存在时返回 404，而不是一个空的流
@@ -192,6 +201,6 @@ async def stream_eval(eval_id: str, ctx: AppContext = Depends(get_ctx)):
     async def frames() -> AsyncIterator[str]:
         async for ev in svc.stream(eval_id):
             yield format_sse(ev.data, event=ev.event)
-        yield format_sse({"run_id": eval_id}, event="end")
+        yield format_sse({"run_id": eval_id}, event="idle")
 
     return sse_response(frames())
