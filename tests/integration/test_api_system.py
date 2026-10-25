@@ -32,7 +32,7 @@ async def test_health_counts_jobs_and_providers(client, ctx):
     now = now_iso()
     async with ctx.db.write() as s:
         for status in ("pending", "pending", "running", "done", "failed"):
-            s.add(Job(id=new_id("job"), kind="eval_item", ref_id="x", status=status, run_after=now,
+            s.add(Job(id=new_id("job"), kind="noop_test", ref_id="x", status=status, run_after=now,
                       created_at=now, updated_at=now))  # fmt: skip
     await client.post("/api/v1/providers", json={"name": "zeta", "base_url": "http://x"})
     await client.post("/api/v1/providers", json={"name": "alpha", "base_url": "http://x"})

@@ -63,7 +63,8 @@ class AppContext:
 
     async def close(self) -> None:
         """关闭总线与数据库连接；有 ``aclose()`` 的服务也会被关闭。"""
-        for inst in list(self._services.values()):
+        # 按 close_order 升序关闭（缺省 0；调度器为 -10，先让后台任务收尾，再关闭会话服务等）
+        for inst in sorted(self._services.values(), key=lambda i: getattr(i, "close_order", 0)):
             aclose = getattr(inst, "aclose", None)
             if aclose is not None:
                 await aclose()

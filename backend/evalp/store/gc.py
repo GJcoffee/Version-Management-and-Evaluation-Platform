@@ -5,7 +5,10 @@
    （eval_runs.dataset_rev_id）引用，则连同解析出的用例（eval_cases）一并删除，并释放对 blob 的引用；
    修订清空后的资产记录也一并删除；
 2. 删除 refcount=0 且创建时间超过 24 小时的 blob（先删库记录、再删文件）；
-3. 清理没有对应 blobs 记录且超过 24 小时的孤儿文件，以及遗留的临时文件。
+3. 清理没有对应 blobs 记录且超过 24 小时的孤儿文件，以及遗留的临时文件；
+4. ``eval_sessions_days`` > 0（设置 ``retention.eval_sessions_days``）时，删除超过保留期的评测 / 评审会话
+   及其轮次、事件（释放事件大 payload 的 blob 引用）。评测汇总指标保留，Item 的 ``session_id`` 置空；
+   仍有未结束 Item 在用的会话不删。
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from evalp.logging import get_logger
 from evalp.store.blobstore import TMP_DIRNAME, BlobStore
@@ -24,7 +27,12 @@ from evalp.store.models import (
     AssetRevision,
     Blob,
     EvalCase,
+    EvalItem,
     EvalRun,
+    EvalScore,
+    Event,
+    Session,
+    Turn,
     VersionAssetRef,
 )
 from evalp.utils.time import iso_ago
@@ -32,6 +40,7 @@ from evalp.utils.time import iso_ago
 log = get_logger(__name__)
 
 GRACE_HOURS = 24
+SESSION_BATCH = 50
 
 
 @dataclass
@@ -40,6 +49,7 @@ class GCResult:
     bytes_freed: int = 0
     revisions_deleted: int = 0
     assets_deleted: int = 0
+    eval_sessions_deleted: int = 0
 
 
 async def _purge_deleted_assets(db: Database, blobs: BlobStore, result: GCResult) -> None:
@@ -73,6 +83,64 @@ async def _purge_deleted_assets(db: Database, blobs: BlobStore, result: GCResult
             if remaining == 0:
                 await s.execute(delete(Asset).where(Asset.id == asset_id))
                 result.assets_deleted += 1
+
+
+async def _purge_eval_sessions(db: Database, blobs: BlobStore, result: GCResult, days: int) -> None:
+    """删除超过保留期的评测 / 评审会话（连同轮次与事件），评测的汇总指标不受影响。"""
+    cutoff = iso_ago(hours=days * 24)
+    while True:
+        async with db.write() as s:
+            active = select(EvalItem.session_id).where(
+                EvalItem.session_id.is_not(None), EvalItem.status.in_(("pending", "running", "scoring"))
+            )
+            ids = (
+                (
+                    await s.execute(
+                        select(Session.id)
+                        .where(
+                            Session.mode.in_(("eval", "judge")),
+                            Session.updated_at < cutoff,
+                            Session.status != "running",
+                            Session.id.not_in(active),
+                        )
+                        .order_by(Session.updated_at)
+                        .limit(SESSION_BATCH)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not ids:
+                return
+            # 解除引用：Item / 评分 / 其他会话（重放来源）/ 其他轮次（锚点）
+            await s.execute(update(EvalItem).where(EvalItem.session_id.in_(ids)).values(session_id=None))
+            await s.execute(
+                update(EvalScore).where(EvalScore.judge_session_id.in_(ids)).values(judge_session_id=None)
+            )
+            await s.execute(
+                update(Session).where(Session.source_session_id.in_(ids)).values(source_session_id=None)
+            )
+            turn_ids = select(Turn.id).where(Turn.session_id.in_(ids))
+            await s.execute(
+                update(Turn)
+                .where(Turn.anchored_from_turn_id.in_(turn_ids))
+                .values(anchored_from_turn_id=None)
+            )
+            # 释放事件里大 payload 的 blob 引用（每个事件登记时 incref 一次）
+            payloads = (await s.execute(select(Event.payload).where(Event.session_id.in_(ids)))).scalars()
+            hashes: dict[str, int] = {}
+            for payload in payloads:
+                if isinstance(payload, dict) and isinstance(payload.get("$blob"), str):
+                    hashes[payload["$blob"]] = hashes.get(payload["$blob"], 0) + 1
+            for h, n in hashes.items():
+                try:
+                    await blobs.decref(h, n, session=s)
+                except Exception:  # noqa: BLE001 - blob 记录已不存在时忽略
+                    log.warning("gc.eval_session_decref_failed", blob=h)
+            await s.execute(delete(Event).where(Event.session_id.in_(ids)))
+            await s.execute(delete(Turn).where(Turn.session_id.in_(ids)))
+            await s.execute(delete(Session).where(Session.id.in_(ids)))
+            result.eval_sessions_deleted += len(ids)
 
 
 async def _purge_unreferenced_blobs(
@@ -123,9 +191,17 @@ async def _purge_orphan_files(db: Database, blobs: BlobStore, result: GCResult, 
                 pass
 
 
-async def run_gc(db: Database, blobs: BlobStore, *, grace_hours: float = GRACE_HOURS) -> GCResult:
-    """执行一次 GC，返回统计。"""
+async def run_gc(
+    db: Database,
+    blobs: BlobStore,
+    *,
+    grace_hours: float = GRACE_HOURS,
+    eval_sessions_days: int = 0,
+) -> GCResult:
+    """执行一次 GC，返回统计。``eval_sessions_days`` > 0 时同时清理过期的评测 / 评审会话。"""
     result = GCResult()
+    if eval_sessions_days > 0:
+        await _purge_eval_sessions(db, blobs, result, eval_sessions_days)
     await _purge_deleted_assets(db, blobs, result)
     await _purge_unreferenced_blobs(db, blobs, result, grace_hours)
     await _purge_orphan_files(db, blobs, result, grace_hours)
@@ -134,5 +210,6 @@ async def run_gc(db: Database, blobs: BlobStore, *, grace_hours: float = GRACE_H
         blobs_deleted=result.blobs_deleted,
         bytes_freed=result.bytes_freed,
         revisions_deleted=result.revisions_deleted,
+        eval_sessions_deleted=result.eval_sessions_deleted,
     )
     return result

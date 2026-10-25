@@ -80,3 +80,96 @@
     background-clip: content-box;
   }
 }
+
+/* 会话：Markdown 正文与流式光标 */
+@layer components {
+  .md-body {
+    @apply break-words text-sm leading-6;
+  }
+  .md-body > :first-child {
+    @apply mt-0;
+  }
+  .md-body > :last-child {
+    @apply mb-0;
+  }
+  .md-body p,
+  .md-body ul,
+  .md-body ol,
+  .md-body pre,
+  .md-body blockquote,
+  .md-body table {
+    @apply my-2;
+  }
+  .md-body h1,
+  .md-body h2,
+  .md-body h3,
+  .md-body h4 {
+    @apply mb-1.5 mt-3 font-semibold leading-snug;
+  }
+  .md-body h1 {
+    @apply text-base;
+  }
+  .md-body h2 {
+    @apply text-[15px];
+  }
+  .md-body ul {
+    @apply list-disc pl-5;
+  }
+  .md-body ol {
+    @apply list-decimal pl-5;
+  }
+  .md-body li > p {
+    @apply my-0.5;
+  }
+  .md-body a {
+    @apply text-primary underline underline-offset-2;
+  }
+  .md-body code {
+    @apply rounded bg-muted px-1 py-0.5 font-mono text-[0.85em];
+  }
+  .md-body pre {
+    @apply overflow-x-auto rounded-md bg-muted p-2.5 text-xs leading-5;
+  }
+  .md-body pre code {
+    @apply bg-transparent p-0;
+  }
+  .md-body blockquote {
+    @apply border-l-2 border-border pl-3 text-muted-foreground;
+  }
+  .md-body hr {
+    @apply my-3 border-border;
+  }
+  .md-body table {
+    @apply block overflow-x-auto text-xs;
+  }
+  .md-body th,
+  .md-body td {
+    @apply border border-border px-2 py-1;
+  }
+
+  .stream-cursor {
+    display: inline-block;
+    width: 0.5em;
+    height: 1.05em;
+    margin-left: 1px;
+    vertical-align: text-bottom;
+    background: currentColor;
+    animation: stream-blink 1s steps(2, start) infinite;
+  }
+  .md-streaming > :last-child:not(ul):not(ol):not(pre):not(table)::after,
+  .md-streaming > :is(ul, ol):last-child > li:last-child::after {
+    content: '';
+    display: inline-block;
+    width: 0.5em;
+    height: 1.05em;
+    margin-left: 1px;
+    vertical-align: text-bottom;
+    background: currentColor;
+    animation: stream-blink 1s steps(2, start) infinite;
+  }
+  @keyframes stream-blink {
+    to {
+      visibility: hidden;
+    }
+  }
+}

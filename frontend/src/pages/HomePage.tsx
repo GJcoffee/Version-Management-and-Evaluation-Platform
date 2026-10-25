@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react'
-import { Activity, Cpu, Database, ListChecks } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Activity, Cpu, Database, ListChecks, MessagesSquare } from 'lucide-react'
+import { useSessions } from '@/api/queries/sessions'
 import { useHealth } from '@/api/queries/health'
 import { ApiError } from '@/api/client'
 import { Badge } from '@/components/ui/Badge'
@@ -10,6 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { cn } from '@/lib/cn'
 import { formatBytes } from '@/lib/format'
 import type { HealthOut } from '@/api/types'
+import { RecentSessionList } from './session/SessionList'
 
 function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: ReactNode }) {
   return (
@@ -118,7 +121,39 @@ function HealthCards({ h }: { h: HealthOut }) {
   )
 }
 
-/** 首页（框架）：健康状态卡片，每 5 秒轮询。「最近的 agent / 运行中的评测 / 最近的会话」待后续实现 */
+function RecentSessionsCard() {
+  const { data, isLoading, error } = useSessions({ limit: 6 })
+  const items = data?.items ?? []
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitleRow icon={MessagesSquare}>最近会话</CardTitleRow>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <LoadingBlock className="py-6" />
+        ) : error ? (
+          <p className="py-4 text-sm text-danger">加载失败：{error instanceof ApiError ? error.message : String(error)}</p>
+        ) : items.length === 0 ? (
+          <EmptyState
+            icon={MessagesSquare}
+            title="还没有会话"
+            description={
+              <>
+                在 <Link to="/agents" className="text-primary underline">Agent</Link> 的版本列表中点击“对话”即可开始。
+              </>
+            }
+            className="py-6"
+          />
+        ) : (
+          <RecentSessionList sessions={items} />
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+/** 首页（框架）：健康状态卡片，每 5 秒轮询；最近会话。「最近的 agent / 运行中的评测」待后续实现 */
 export default function HomePage() {
   const { data, error, isLoading } = useHealth()
   return (
@@ -133,6 +168,7 @@ export default function HomePage() {
         </Card>
       )}
       {data && <HealthCards h={data} />}
+      <RecentSessionsCard />
       <Card>
         <CardHeader>
           <CardTitle>最近活动</CardTitle>
@@ -140,7 +176,7 @@ export default function HomePage() {
         <CardContent>
           <EmptyState
             title="开发中"
-            description="最近的 agent、正在运行的评测、最近的会话将在后续阶段显示在这里。"
+            description="最近的 agent、正在运行的评测将在后续阶段显示在这里。"
             className="py-6"
           />
         </CardContent>

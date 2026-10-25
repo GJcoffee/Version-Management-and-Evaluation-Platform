@@ -579,25 +579,29 @@ export interface DatasetImportResult {
   created: boolean
 }
 
-// ───────────────────────────── Session / Turn ─────────────────────────────
+// ───────────────────────────── Session / Turn（docs/api.md §8） ─────────────────────────────
 
 export type SessionMode = 'chat' | 'eval' | 'replay' | 'judge'
 export type SessionStatus = 'idle' | 'running' | 'error'
 export type ReplayMode = 'anchored' | 'free'
 
+/** 会话累计指标 */
 export interface SessionStats {
-  tokens?: number
+  turns?: number
   prompt_tokens?: number
   completion_tokens?: number
+  llm_calls?: number
+  tool_calls?: number
   cost?: number
-  turns?: number
   [k: string]: unknown
 }
 
 export interface Session {
   id: string
   agent_id: string
+  agent_name: string | null
   version_id: string
+  version_seq: number | null
   mode: SessionMode
   title: string | null
   /** 重放来源 */
@@ -606,8 +610,30 @@ export interface Session {
   status: SessionStatus
   last_seq: number
   stats: SessionStats
+  /** 会话级模板变量（优先级：Spec < 会话 < 单轮） */
+  variables: Record<string, unknown>
   created_at: ISODateTime
   updated_at: ISODateTime
+}
+
+/** POST /sessions：`version_id` 与 `agent`（+ `tag`）二选一 */
+export interface SessionCreate {
+  version_id?: string
+  agent?: string
+  /** 标签、v12 或 latest（缺省 latest） */
+  tag?: string
+  title?: string
+  variables?: Record<string, unknown>
+}
+
+export interface SessionListParams {
+  /** agent 的 id 或名称 */
+  agent_id?: string
+  version_id?: string
+  /** 缺省为 chat,replay（不含 eval / judge） */
+  mode?: string
+  q?: string
+  limit?: number
 }
 
 export type TurnStatus = 'running' | 'ok' | 'error' | 'cancelled' | 'timeout'
@@ -625,6 +651,13 @@ export interface TurnOutput {
   messages: Message[]
 }
 
+/** 轮次错误；agent 报错、超时都以 200 + turn.status 返回，原因在这里 */
+export interface TurnError {
+  code: string
+  message: string
+  retriable: boolean
+}
+
 export interface Turn {
   id: string
   session_id: string
@@ -638,14 +671,42 @@ export interface Turn {
   cost: number
   latency_ms: number | null
   ttft_ms: number | null
-  error: string | null
+  error: TurnError | null
+  anchored_from_turn_id: string | null
   started_at: ISODateTime
   finished_at: ISODateTime | null
 }
 
+export interface SessionDetail {
+  session: Session
+  turns: Turn[]
+  events: EventEnvelope[] | null
+}
+
+/** POST /sessions/{id}/turns 的请求体 */
+export interface TurnCreate {
+  input: string | Message
+  /** 单轮变量，覆盖会话变量 */
+  variables?: Record<string, unknown>
+  tool_mocks?: Record<string, unknown>
+  pair_index?: number | null
+  wait?: boolean
+}
+
+/** 默认 202：轮次已在后台执行，用 stream_url 订阅过程 */
+export interface TurnAccepted {
+  turn_id: string
+  stream_url: string
+  turn: Turn
+}
+
 // ───────────────────────────── 事件协议 evalp-event/1（6.2） ─────────────────────────────
 
-/** 事件 payload 超过 32KB 的部分会转存为 blob，此时字段值为 `{ $blob: hash }` */
+/**
+ * 大 payload（> events.payload_inline_limit_kb）转存为 blob：库里（也就是回放时）的整个 payload 被换成
+ * `{ $blob: hash, ...体积很小的顶层字段 }`；`GET /blobs/{hash}` 返回完整的 payload。
+ * 实时推送的事件仍是完整内容。
+ */
 export interface BlobRef {
   $blob: string
 }
@@ -655,12 +716,13 @@ export interface TurnStartPayload {
   history_len: number
 }
 export interface LlmRequestPayload {
-  provider: string
+  provider: string | null
   model: string
   params: Record<string, unknown>
   messages: Message[] | BlobRef
-  tools: unknown[] | BlobRef
+  tools: unknown[] | BlobRef | null
 }
+/** `{index, id?, name?, arguments?}`：name / arguments 是需要按 index 拼接的片段 */
 export interface ToolCallDelta {
   index?: number
   id?: string
@@ -669,7 +731,7 @@ export interface ToolCallDelta {
 }
 /** 只推送、不落库、没有 seq */
 export interface LlmDeltaPayload {
-  step_id: string
+  step_id?: string | null
   text?: string
   tool_call_delta?: ToolCallDelta
 }
@@ -677,10 +739,10 @@ export interface LlmResponsePayload {
   content: string | null
   tool_calls: ToolCall[] | null
   finish_reason: string | null
-  usage: { prompt_tokens: number; completion_tokens: number }
-  latency_ms: number
+  usage: { prompt_tokens: number; completion_tokens: number; estimated?: boolean } | null
+  latency_ms: number | null
   ttft_ms: number | null
-  cost: number
+  cost: number | null
 }
 export interface ToolCallPayload {
   call_id: string
@@ -692,7 +754,7 @@ export interface ToolResultPayload {
   name: string
   output: unknown
   is_error: boolean
-  latency_ms: number
+  latency_ms: number | null
   mocked: boolean
 }
 export interface SpanStartPayload {
@@ -702,7 +764,7 @@ export interface SpanStartPayload {
 export interface SpanEndPayload {
   name: string
   attrs?: Record<string, unknown>
-  latency_ms: number
+  latency_ms: number | null
 }
 export type LogLevel = 'debug' | 'info' | 'warning' | 'error'
 export interface LogPayload {
@@ -717,12 +779,14 @@ export interface ErrorPayload {
   message: string
   retriable: boolean
 }
+/** 事件里的轮次状态：completed 对应 Turn.status 的 ok */
+export type TurnEndStatus = 'completed' | 'error' | 'timeout' | 'cancelled'
 export interface TurnEndPayload {
-  status: TurnStatus
+  status: TurnEndStatus
   output: TurnOutput | null
-  usage: Usage
-  cost: number
-  latency_ms: number
+  usage: Usage | null
+  cost: number | null
+  latency_ms: number | null
   ttft_ms: number | null
 }
 
@@ -762,13 +826,14 @@ export const SESSION_EVENT_TYPES = [
 interface EventEnvelopeBase<T extends EventType> {
   /** 平台分配，同一会话内单调递增；llm.delta 没有 seq */
   seq?: number | null
-  turn_id: string
+  turn_id?: string | null
   ts: ISODateTime
   type: T
   /** 同一个步骤的开始和结束事件共用同一个 step_id */
   step_id?: string | null
   parent_step_id?: string | null
-  payload: EventPayloadMap[T]
+  /** 转存为 blob 时只剩 `$blob` 和小字段，见 BlobRef */
+  payload: EventPayloadMap[T] & Partial<BlobRef>
 }
 
 /** 事件外层结构，按 type 区分 payload（可判别联合） */

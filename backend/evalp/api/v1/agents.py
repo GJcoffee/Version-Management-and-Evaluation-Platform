@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 
 from evalp.api.deps import get_ctx
 from evalp.api.pagination import Page, PageParams, page_params
@@ -16,14 +16,20 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 @router.get("", response_model=Page[AgentOut])
 async def list_agents(
     include_archived: bool = False,
+    include_hidden: bool = Query(False, description="包含平台内部的隐藏 agent（如评审 agent evalp-judge）"),
     kind: str | None = None,
     q: str | None = None,
     p: PageParams = Depends(page_params),
     ctx: AppContext = Depends(get_ctx),
 ):
-    """列出 agent（默认不含已归档的）。"""
+    """列出 agent（默认不含已归档的和平台内部的隐藏 agent）。"""
     return await ctx.svc(AgentService).list(
-        include_archived=include_archived, kind=kind, q=q, limit=p.limit, cursor=p.cursor
+        include_archived=include_archived,
+        include_hidden=include_hidden,
+        kind=kind,
+        q=q,
+        limit=p.limit,
+        cursor=p.cursor,
     )
 
 

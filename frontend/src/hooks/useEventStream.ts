@@ -151,7 +151,10 @@ export function useEventStream<S, E extends StreamEvent>(
         shutdown()
         setStatus('idle')
       })
-      source.onerror = () => {
+      source.onerror = (e: Event) => {
+        // 业务事件 `event: error`（如会话的 error 事件）同样会触发 onerror，但它带 data，
+        // 不是连接故障：交给上面的监听器当作普通事件处理，不要断开重连
+        if (e instanceof MessageEvent && typeof e.data === 'string') return
         shutdown()
         if (stopped) return
         const base = optsRef.current.retryDelayMs ?? 1000

@@ -143,8 +143,20 @@ class AgentService:
 
     # ------------------------------------------------------------ 接口
 
+    @staticmethod
+    def _check_reserved(name: str | None) -> None:
+        """平台内部使用的 agent 名称（如评审 agent ``evalp-judge``）不能被用户占用。"""
+        from evalp.services.judge import HIDDEN_AGENTS  # 延迟导入：judge 依赖本模块
+
+        if name in HIDDEN_AGENTS:
+            raise ValidationFailed(
+                f"agent 名称 {name} 是平台保留名称",
+                {"errors": [{"path": "name", "message": "保留名称，请换一个"}]},
+            )
+
     async def create(self, body: AgentCreate) -> AgentCreated:
         """创建 agent，同时创建 main 草稿（可带初始 spec，没带时生成该 kind 的最小模板）。"""
+        self._check_reserved(body.name)
         async with self.ctx.db.write() as s:
             spec = (
                 check_draft_spec(body.spec, body.kind)
@@ -177,13 +189,18 @@ class AgentService:
         self,
         *,
         include_archived: bool = False,
+        include_hidden: bool = False,
         kind: str | None = None,
         q: str | None = None,
         limit: int = 50,
         cursor: str | None = None,
     ) -> Page[AgentOut]:
-        """分页列出 agent（最新创建在前），默认不含已归档的。"""
+        """分页列出 agent（最新创建在前），默认不含已归档的和平台内部的隐藏 agent（评审 agent）。"""
+        from evalp.services.judge import HIDDEN_AGENTS
+
         stmt = select(Agent)
+        if not include_hidden:
+            stmt = stmt.where(Agent.name.not_in(HIDDEN_AGENTS))
         if not include_archived:
             stmt = stmt.where(Agent.archived == 0)
         if kind:
@@ -207,6 +224,8 @@ class AgentService:
     async def update(self, ref: str, body: AgentUpdate) -> AgentOut:
         """修改名称 / 描述 / 归档状态。"""
         fields = body.model_fields_set
+        if "name" in fields:
+            self._check_reserved(body.name)
         async with self.ctx.db.write() as s:
             a = await self.get_orm(s, ref)
             if "name" in fields and body.name is not None:

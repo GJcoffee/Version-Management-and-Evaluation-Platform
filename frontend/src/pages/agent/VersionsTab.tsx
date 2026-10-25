@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { GitCompare, History, FilePlus2, Tag, X } from 'lucide-react'
+import { GitCompare, History, FilePlus2, MessageSquarePlus, Tag, X } from 'lucide-react'
 import { ApiError } from '@/api/client'
+import { useCreateSession } from '@/api/queries/sessions'
 import { useAddTag, useRemoveTag, useVersionToDraft } from '@/api/queries/versions'
 import type { Agent, VersionSummary } from '@/api/types'
 import { Badge } from '@/components/ui/Badge'
@@ -46,6 +47,21 @@ export function VersionsTab({
   const [toDraft, setToDraft] = useState<VersionSummary | null>(null)
   const [untag, setUntag] = useState<{ v: VersionSummary; tag: string } | null>(null)
   const removeTag = useRemoveTag()
+  const createSession = useCreateSession()
+  const [chatting, setChatting] = useState<string | null>(null)
+
+  /** 与该版本开始一次对话：创建会话后直接进入会话页 */
+  const startChat = async (v: VersionSummary) => {
+    setChatting(v.id)
+    try {
+      const { session } = await createSession.mutateAsync({ version_id: v.id })
+      navigate(`/sessions/${session.id}`)
+    } catch (e) {
+      toast.error('创建会话失败', { description: e instanceof ApiError ? e.message : undefined })
+    } finally {
+      setChatting(null)
+    }
+  }
 
   const toggle = (id: string) =>
     setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : cur.length >= 2 ? [cur[1], id] : [...cur, id]))
@@ -127,6 +143,17 @@ export function VersionsTab({
               </TableCell>
               <TableCell>
                 <div className="flex justify-end gap-1">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void startChat(v)}
+                    loading={chatting === v.id}
+                    disabled={chatting !== null}
+                    data-testid={`chat-v${v.seq}`}
+                  >
+                    {chatting !== v.id && <MessageSquarePlus className="h-3.5 w-3.5" />}
+                    对话
+                  </Button>
                   <Button size="sm" variant="ghost" onClick={() => setTagging(v)}>
                     <Tag className="h-3.5 w-3.5" />
                     打标签

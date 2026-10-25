@@ -10,6 +10,7 @@ from evalp import __version__
 from evalp.context import AppContext
 from evalp.errors import EvalpError
 from evalp.runtime.llm.registry import LLMRegistry
+from evalp.runtime.scheduler import Scheduler
 from evalp.services.settings import SettingsService
 from evalp.store.gc import run_gc
 from evalp.store.models import Job, Provider
@@ -21,7 +22,7 @@ class SystemService:
 
     async def health(self) -> dict[str, Any]:
         """GET /health 的响应体。providers 的 inflight / rpm_left / tpm_left 来自 LLM 限流器的实时状态；
-        workers.busy 待调度器接入后补充真实数据。"""
+        workers.busy 是调度器当前正在执行任务的 worker 数。"""
         async with self.ctx.db.read() as s:
             counts = dict(
                 (
@@ -40,7 +41,7 @@ class SystemService:
             "version": __version__,
             "db_size": self.ctx.db.file_size(),
             "queue": {"pending": counts.get("pending", 0), "running": counts.get("running", 0)},
-            "workers": {"busy": 0, "total": workers_total},
+            "workers": {"busy": self.ctx.svc(Scheduler).busy, "total": workers_total},
             "providers": providers,
         }
 
@@ -53,6 +54,11 @@ class SystemService:
         return {"name": name, **{k: st[k] for k in ("inflight", "rpm_left", "tpm_left")}}
 
     async def gc(self) -> dict[str, int]:
-        """POST /system/gc：清理无引用 blob 与已软删除的资产修订。"""
-        result = await run_gc(self.ctx.db, self.ctx.blobs)
-        return {"blobs_deleted": result.blobs_deleted, "bytes_freed": result.bytes_freed}
+        """POST /system/gc：清理无引用 blob、已软删除的资产修订，以及超过保留期的评测会话。"""
+        days = await self.ctx.svc(SettingsService).get("retention.eval_sessions_days")
+        result = await run_gc(self.ctx.db, self.ctx.blobs, eval_sessions_days=int(days))
+        return {
+            "blobs_deleted": result.blobs_deleted,
+            "bytes_freed": result.bytes_freed,
+            "eval_sessions_deleted": result.eval_sessions_deleted,
+        }

@@ -198,3 +198,12 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 
 - `tests/fixtures/fake_openai.py` 的 `StreamingASGITransport` 把请求头名转成小写再放入 ASGI scope（ASGI 规定小写，否则 Starlette 的 `Headers` 取不到 `Authorization`，SSE 流式测试会 401）。
 - `tests/fixtures/sample_tools.py` 增加 `slow_double`。
+
+## 前端会话页 — 若干取舍（总控代记）
+
+- 会话标题只读（后端暂无 `PATCH /sessions/{id}`）。
+- `useSessionStream` 基于通用 `useEventStream` + reducer 实现，返回值比 14.3 多 `turns/running/runningTurn/loading`。
+- 草稿编辑器改为：输入防抖干跑校验；手动保存（按钮 / Ctrl+S）+ 闲置 5 秒自动保存。
+- `turn.end.status=completed` 与 `Turn.status=ok` 在前端统一映射为 `ok`。
+- SSE 业务事件 `event: error` 与 `EventSource.onerror` 同名，前端已区分处理（带 data 视为业务事件）。
+- 超过 32KB 的事件在库中是整个 payload 被替换为 `{$blob, ...}` 存根（不是字段级），前端按整 payload 存根按需加载。

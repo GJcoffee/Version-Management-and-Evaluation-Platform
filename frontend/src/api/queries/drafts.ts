@@ -55,9 +55,11 @@ export function saveDraft(id: string, spec: AgentSpec, expectedRevision: number)
   return api.put<{ draft: Draft }>(`/drafts/${id}`, { body: { spec, expected_revision: expectedRevision } })
 }
 
-/** 校验服务端保存的草稿内容（接口无请求体，所以需要先保存） */
-export function validateDraft(id: string): Promise<ValidateResult> {
-  return api.post<ValidateResult>(`/drafts/${id}/validate`)
+/**
+ * 校验草稿。传 `spec` 时对它做干跑校验（不保存、不改 revision）；不传则校验服务端已保存的内容。
+ */
+export function validateDraft(id: string, spec?: AgentSpec): Promise<ValidateResult> {
+  return api.post<ValidateResult>(`/drafts/${id}/validate`, spec ? { body: { spec } } : undefined)
 }
 
 export function publishDraft(id: string, body: PublishRequest): Promise<PublishResult> {

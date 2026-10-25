@@ -45,7 +45,7 @@ export default function DraftEditorPage() {
 
 const STATE_TEXT: Record<SaveState, { text: string; tone: string }> = {
   saved: { text: '已保存', tone: 'text-success' },
-  dirty: { text: '有未保存的修改…', tone: 'text-warning' },
+  dirty: { text: '未保存', tone: 'text-warning' },
   saving: { text: '保存中…', tone: 'text-muted-foreground' },
   error: { text: '保存失败', tone: 'text-danger' },
   conflict: { text: '保存冲突', tone: 'text-danger' },
@@ -132,7 +132,8 @@ function DraftEditor({ draft, agent }: { draft: Draft; agent?: Agent }) {
 
   const errors = ed.validation?.errors ?? []
   const warnings = ed.validation?.warnings ?? []
-  const canPublish = !yamlInvalid && !ed.conflict && !!ed.validation?.ok && !ed.validating && ed.state !== 'saving'
+  const canPublish =
+    !yamlInvalid && !ed.conflict && !!ed.validation?.ok && ed.validationFresh && !ed.validating && ed.state !== 'saving'
 
   const jumpTo = useCallback(
     (path: string) => {
@@ -196,13 +197,14 @@ function DraftEditor({ draft, agent }: { draft: Draft; agent?: Agent }) {
             variant="outline"
             size="sm"
             onClick={() => void ed.saveNow()}
-            disabled={yamlInvalid || ed.state === 'saving'}
-            title="Ctrl/⌘ + S"
+            disabled={yamlInvalid || ed.state === 'saving' || ed.state === 'saved'}
+            title="Ctrl/⌘ + S（停止输入 5 秒后也会自动保存）"
+            data-testid="save-button"
           >
             <Save className="h-3.5 w-3.5" />
             保存
           </Button>
-          <Button size="sm" onClick={() => setPublishOpen(true)} disabled={!canPublish} title={canPublish ? undefined : '校验通过且已保存后才能发布'}>
+          <Button size="sm" onClick={() => setPublishOpen(true)} disabled={!canPublish} title={canPublish ? undefined : '校验通过后才能发布（发布前会自动保存）'}>
             <Rocket className="h-3.5 w-3.5" />
             发布
           </Button>

@@ -33,6 +33,8 @@ from evalp.context import AppContext
 from evalp.errors import EvalpError, Forbidden, InternalError, NotFound, ValidationFailed
 from evalp.ids import _ulid_str
 from evalp.logging import get_logger, setup_logging, shutdown_logging
+from evalp.runtime.scheduler import Scheduler
+from evalp.services.eval import start_eval_runtime
 
 log = get_logger(__name__)
 
@@ -184,11 +186,13 @@ def create_app(
         app_ctx = ctx if ctx is not None else await AppContext.create(config)
         app.state.ctx = app_ctx
         await _recover_sessions(app_ctx)
+        await start_eval_runtime(app_ctx, seed_builtin=owned)
         log.info("app.started", version=evalp.__version__, data_dir=str(config.data_dir))
         try:
             yield
         finally:
             log.info("app.stopping")
+            await app_ctx.svc(Scheduler).stop()  # 优雅等待在跑的任务，超时后取消；任务回到 pending 等下次启动
             if owned:
                 await app_ctx.close()
             shutdown_logging()

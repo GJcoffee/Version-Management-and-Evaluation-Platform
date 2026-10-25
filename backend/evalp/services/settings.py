@@ -88,4 +88,8 @@ class SettingsService:
                         s.add(Setting(key=key, value=json.dumps(value)))
                     else:
                         row.value = json.dumps(value)
+            if "scheduler.workers" in clean:  # 调度器按新的 worker 数伸缩（延迟导入避免循环依赖）
+                from evalp.runtime.scheduler import Scheduler
+
+                await self.ctx.svc(Scheduler).apply_settings()
         return await self.get_all()

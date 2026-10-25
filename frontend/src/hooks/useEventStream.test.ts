@@ -9,7 +9,7 @@ class MockEventSource {
   withCredentials: boolean
   closed = false
   onopen: (() => void) | null = null
-  onerror: (() => void) | null = null
+  onerror: ((e?: Event) => void) | null = null
   private listeners = new Map<string, Array<(m: MessageEvent) => void>>()
 
   constructor(url: string, init?: { withCredentials?: boolean }) {
@@ -26,10 +26,12 @@ class MockEventSource {
   /** 测试辅助：模拟服务端推送一帧 */
   emit(type: string, data: unknown, lastEventId = '') {
     const m = new MessageEvent(type, { data: typeof data === 'string' ? data : JSON.stringify(data), lastEventId })
+    // 浏览器行为：名为 error 的 SSE 业务事件同样会触发 onerror 处理器
+    if (type === 'error') this.onerror?.(m)
     this.listeners.get(type)?.forEach((fn) => fn(m))
   }
   fail() {
-    this.onerror?.()
+    this.onerror?.(new Event('error'))
   }
   static get last() {
     return MockEventSource.instances[MockEventSource.instances.length - 1]
@@ -42,7 +44,7 @@ interface Ev {
   text?: string
 }
 const reducer = (s: Ev[], e: Ev) => [...s, e]
-const TYPES = ['turn.start', 'llm.delta', 'turn.end']
+const TYPES = ['turn.start', 'llm.delta', 'turn.end', 'error']
 const build = (after: number) => `/api/v1/sessions/ses_1/stream?after_seq=${after}`
 
 function setup(extra: Partial<Parameters<typeof useEventStream<Ev[], Ev>>[0]> = {}) {
@@ -90,6 +92,24 @@ describe('useEventStream', () => {
     const { result } = setup()
     act(() => MockEventSource.last.emit('turn.start', {}, '7'))
     expect(result.current.state[0]).toMatchObject({ type: 'turn.start', seq: 7 })
+  })
+
+  it('名为 error 的业务事件不是连接故障：不断开、不重连，正常派发', () => {
+    const { result } = setup()
+    const es = MockEventSource.last
+    act(() => {
+      es.onopen?.()
+      es.emit('turn.start', { seq: 1, type: 'turn.start' })
+      es.emit('error', { seq: 2, type: 'error', text: 'PROVIDER_ERROR' })
+    })
+    expect(es.closed).toBe(false)
+    expect(result.current.status).toBe('open')
+    act(() => vi.advanceTimersByTime(5000))
+    expect(MockEventSource.instances).toHaveLength(1)
+    expect(result.current.state.map((e) => e.type)).toEqual(['turn.start', 'error'])
+    // 真正的连接故障仍然会重连
+    act(() => es.fail())
+    expect(result.current.status).toBe('reconnecting')
   })
 
   it('忽略无法解析的数据', () => {
