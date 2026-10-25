@@ -25,3 +25,13 @@ def parse_iso(value: str) -> datetime:
 def iso_ago(*, hours: float = 0, days: float = 0) -> str:
     """返回距今 hours/days 之前的时间（ISO 字符串），便于与库中时间字段比较。"""
     return to_iso(datetime.now(UTC) - timedelta(hours=hours, days=days))
+
+
+def fmt_local(iso: str | None) -> str:
+    """把 UTC ISO 时间转为本机时区的 "YYYY-MM-DD HH:MM"（CLI / MCP 展示用）。"""
+    if not iso:
+        return ""
+    try:
+        return parse_iso(iso).astimezone().strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return iso[:16].replace("T", " ")

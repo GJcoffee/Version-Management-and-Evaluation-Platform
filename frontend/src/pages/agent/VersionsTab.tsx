@@ -1,10 +1,12 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { GitCompare, History, FilePlus2, MessageSquarePlus, Tag, X } from 'lucide-react'
+import { Columns2, FlaskConical, GitCompare, History, FilePlus2, MessageSquarePlus, Tag, X } from 'lucide-react'
 import { ApiError } from '@/api/client'
+import { useCreateCompare } from '@/api/queries/compare'
 import { useCreateSession } from '@/api/queries/sessions'
 import { useAddTag, useRemoveTag, useVersionToDraft } from '@/api/queries/versions'
 import type { Agent, VersionSummary } from '@/api/types'
+import { NewEvalDialog } from '@/components/eval/NewEvalDialog'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -46,6 +48,7 @@ export function VersionsTab({
   const [tagging, setTagging] = useState<VersionSummary | null>(null)
   const [toDraft, setToDraft] = useState<VersionSummary | null>(null)
   const [untag, setUntag] = useState<{ v: VersionSummary; tag: string } | null>(null)
+  const [evalFor, setEvalFor] = useState<VersionSummary | null>(null)
   const removeTag = useRemoveTag()
   const createSession = useCreateSession()
   const [chatting, setChatting] = useState<string | null>(null)
@@ -60,6 +63,24 @@ export function VersionsTab({
       toast.error('创建会话失败', { description: e instanceof ApiError ? e.message : undefined })
     } finally {
       setChatting(null)
+    }
+  }
+
+  const createCompare = useCreateCompare()
+  /** 两个版本的双栏对话（live 对比）：左旧右新，创建后直接进入对比页 */
+  const dualChat = async () => {
+    const [a, b] = selected.map((id) => versions.find((v) => v.id === id)!)
+    const [left, right] = a.seq <= b.seq ? [a, b] : [b, a]
+    try {
+      const g = await createCompare.mutateAsync({
+        kind: 'session',
+        mode: 'live',
+        left: { version_id: left.id },
+        right: { version_id: right.id },
+      })
+      navigate(`/compare/${g.id}`)
+    } catch (e) {
+      toast.error('创建双栏对话失败', { description: e instanceof ApiError ? e.message : undefined })
     }
   }
 
@@ -81,10 +102,23 @@ export function VersionsTab({
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-xs text-muted-foreground">勾选两个版本可对比差异（已选 {selected.length}/2）</p>
-        <Button size="sm" variant="outline" disabled={selected.length !== 2} onClick={compare}>
-          <GitCompare className="h-3.5 w-3.5" />
-          对比所选版本
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" disabled={selected.length !== 2} onClick={compare}>
+            <GitCompare className="h-3.5 w-3.5" />
+            对比所选版本
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={selected.length !== 2}
+            loading={createCompare.isPending}
+            onClick={() => void dualChat()}
+            data-testid="dual-chat"
+          >
+            {!createCompare.isPending && <Columns2 className="h-3.5 w-3.5" />}
+            双栏对话
+          </Button>
+        </div>
       </div>
       <Table>
         <TableHeader>
@@ -154,6 +188,10 @@ export function VersionsTab({
                     {chatting !== v.id && <MessageSquarePlus className="h-3.5 w-3.5" />}
                     对话
                   </Button>
+                  <Button size="sm" variant="outline" onClick={() => setEvalFor(v)} data-testid={`eval-v${v.seq}`}>
+                    <FlaskConical className="h-3.5 w-3.5" />
+                    评测
+                  </Button>
                   <Button size="sm" variant="ghost" onClick={() => setTagging(v)}>
                     <Tag className="h-3.5 w-3.5" />
                     打标签
@@ -176,6 +214,7 @@ export function VersionsTab({
         </div>
       )}
 
+      {evalFor && <NewEvalDialog agentId={agent.id} defaultVersionIds={[evalFor.id]} onClose={() => setEvalFor(null)} />}
       {tagging && <AddTagDialog version={tagging} onClose={() => setTagging(null)} />}
       {toDraft && (
         <ToDraftDialog

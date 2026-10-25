@@ -1,15 +1,24 @@
-import { PagePlaceholder } from '@/components/PagePlaceholder'
+import { Link, useParams } from 'react-router-dom'
+import { ApiError } from '@/api/client'
+import { useCompare } from '@/api/queries/compare'
+import { LoadingBlock } from '@/components/ui/Spinner'
+import { CompareView } from './compare/CompareView'
 
-/** 占位页：实现时直接替换本文件内容（路由已在 src/routes.tsx 注册） */
+/** 双栏对比页（`/compare/:id`）：live / history / replay 三种模式共用，见 compare/CompareView */
 export default function ComparePage() {
-  return (
-    <PagePlaceholder
-      title="对比"
-      spec="详设 9 / 14.2 DualCompare"
-      planned={[
-        '双栏对话（live / history / replay 共用）',
-        '步骤对齐视图与字符级文本 diff',
-      ]}
-    />
-  )
+  const { id } = useParams()
+  const group = useCompare(id)
+  if (group.isLoading) return <LoadingBlock label="加载对比…" className="py-24" />
+  if (group.error || !group.data) {
+    const notFound = group.error instanceof ApiError && group.error.status === 404
+    return (
+      <div className="p-6 text-sm text-danger">
+        {notFound ? '对比不存在' : `无法加载对比：${group.error instanceof ApiError ? group.error.message : '未知错误'}`}
+        <Link to="/agents" className="ml-3 text-primary underline">
+          返回 Agents
+        </Link>
+      </div>
+    )
+  }
+  return <CompareView key={group.data.id} group={group.data} />
 }

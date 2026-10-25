@@ -4,6 +4,7 @@ import { Activity, Cpu, Database, ListChecks, MessagesSquare } from 'lucide-reac
 import { useSessions } from '@/api/queries/sessions'
 import { useHealth } from '@/api/queries/health'
 import { ApiError } from '@/api/client'
+import { RunningEvalsCard } from '@/components/eval/RunningEvalsCard'
 import { Badge } from '@/components/ui/Badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -12,6 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { cn } from '@/lib/cn'
 import { formatBytes } from '@/lib/format'
 import type { HealthOut } from '@/api/types'
+import { RecentComparesCard } from '@/components/compare/RecentComparesCard'
 import { RecentSessionList } from './session/SessionList'
 
 function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: ReactNode }) {
@@ -168,7 +170,9 @@ export default function HomePage() {
         </Card>
       )}
       {data && <HealthCards h={data} />}
+      <RunningEvalsCard />
       <RecentSessionsCard />
+      <RecentComparesCard />
       <Card>
         <CardHeader>
           <CardTitle>最近活动</CardTitle>
@@ -176,7 +180,7 @@ export default function HomePage() {
         <CardContent>
           <EmptyState
             title="开发中"
-            description="最近的 agent、正在运行的评测将在后续阶段显示在这里。"
+            description="最近的 agent 将在后续阶段显示在这里。"
             className="py-6"
           />
         </CardContent>

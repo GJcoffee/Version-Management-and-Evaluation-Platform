@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from evalp.utils.time import fmt_local
+
 TERMINAL_STATUSES = {"completed", "completed_with_errors", "cancelled", "failed"}
 
 STATUS_TEXT = {
@@ -84,7 +86,7 @@ def render_versions(agent: str, items: list[dict[str, Any]], base_url: str = "")
     for v in items:
         tags = ", ".join(v.get("tags") or []) or "-"
         lines.append(
-            f"| v{v.get('seq')} | {tags} | {(v.get('created_at') or '')[:16].replace('T', ' ')} "
+            f"| v{v.get('seq')} | {tags} | {fmt_local(v.get('created_at'))} "
             f"| {v.get('created_via') or '-'} | {truncate(v.get('notes') or '-', 40)} | `{v.get('id')}` |"
         )
     return "\n".join(lines)

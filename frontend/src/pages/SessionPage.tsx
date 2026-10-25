@@ -7,6 +7,7 @@ import { sessionKeys, useCancelTurn, useSendTurn, useSession } from '@/api/queri
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { LoadingBlock } from '@/components/ui/Spinner'
+import { SessionCompareActions } from '@/components/compare/SessionCompareActions'
 import { ChatPane, MessageInput, TraceViewer, totalMetrics, useSessionStream } from '@/components/session'
 import { cn } from '@/lib/cn'
 import { formatCost, formatTokens } from '@/lib/format'
@@ -177,6 +178,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
           <span title="LLM 调用 / 工具调用">
             LLM ×{metrics.llm} · 工具 ×{metrics.tools}
           </span>
+          <SessionCompareActions session={session} />
           <Button
             size="sm"
             variant="outline"

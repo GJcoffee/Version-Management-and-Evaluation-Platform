@@ -11,6 +11,7 @@ from rich.table import Table
 from evalp import actions
 from evalp.cli.common import AgentOpt, DataDirOpt, agent_name, cli_errors, console, open_client, run
 from evalp.cli.diffview import print_diff
+from evalp.utils.time import fmt_local
 
 
 @cli_errors
@@ -38,7 +39,7 @@ def versions(
         table.add_row(
             f"v{v['seq']}",
             ", ".join(v.get("tags") or []),
-            (v.get("created_at") or "")[:16].replace("T", " "),
+            fmt_local(v.get("created_at")),
             v.get("created_via") or "",
             escape(v.get("notes") or ""),
             (v.get("spec_hash") or "")[:10],

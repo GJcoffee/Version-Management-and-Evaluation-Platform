@@ -1,14 +1,26 @@
-import { PagePlaceholder } from '@/components/PagePlaceholder'
+import { useState } from 'react'
+import { FlaskConical } from 'lucide-react'
+import { EvalRunList } from '@/components/eval/EvalRunList'
+import { NewEvalDialog } from '@/components/eval/NewEvalDialog'
+import { Button } from '@/components/ui/Button'
 
-/** 占位页：实现时直接替换本文件内容（路由已在 src/routes.tsx 注册） */
+/** 评测列表页：全部 Agent 的评测，可按状态筛选，勾选两个对比 */
 export default function EvalsPage() {
+  const [open, setOpen] = useState(false)
+  const newButton = (
+    <Button size="sm" onClick={() => setOpen(true)} data-testid="new-eval">
+      <FlaskConical className="h-3.5 w-3.5" />
+      发起评测
+    </Button>
+  )
   return (
-    <PagePlaceholder
-      title="评测"
-      spec="详设 8 / 17（W6 评测列表页）"
-      planned={[
-        '评测批次与 Run 列表、发起评测、进度显示',
-      ]}
-    />
+    <div className="mx-auto max-w-6xl space-y-4 p-6">
+      <div>
+        <h1 className="text-lg font-semibold">评测</h1>
+        <p className="text-xs text-muted-foreground">用数据集批量运行 Agent 版本，按评估器打分；勾选两个评测可逐用例对比。</p>
+      </div>
+      <EvalRunList actions={newButton} emptyAction={newButton} />
+      {open && <NewEvalDialog onClose={() => setOpen(false)} />}
+    </div>
   )
 }
