@@ -13,6 +13,8 @@ export interface DiffEditorProps {
   /** 默认只读 */
   readOnly?: boolean
   onModifiedChange?: (value: string) => void
+  /** 滚动到某一行；side 指定左侧（original）或右侧（modified）；`key` 变化才会触发 */
+  reveal?: { line: number; side: 'original' | 'modified'; key: number } | null
   className?: string
 }
 

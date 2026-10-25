@@ -145,7 +145,7 @@ DELETE → 204；已有版本时返回 409 `AGENT_IN_USE`，请改为归档。
 
 ### POST /drafts/{id}/validate
 
-无请求体。返回结构校验 + 业务校验的结果；通过时 `resolved_preview` 是固化后的规范化 Spec（即发布时会存储的内容），有错误时为 `null`。
+请求体可选：`{"spec": {...}}` 时对传入的 spec 做**干跑校验**（不保存、不改 revision）；无请求体时校验已保存的草稿。返回结构校验 + 业务校验的结果；通过时 `resolved_preview` 是固化后的规范化 Spec（即发布时会存储的内容），有错误时为 `null`。
 
 ```json
 {
@@ -480,3 +480,80 @@ CSV 需要 `column_map`（`{字段名: 列名}`）；字段名可用 `case_key /
 
 `local_spec` 是把 `asset_map` 中有映射的 `@latest` 引用还原为 `file:路径` 后的 Spec（指定了修订号的引用保持原样）；`assets` 是映射中各资产的最新内容（二进制为 `base64`）；
 不存在或已删除的资产列在 `missing` 里。agent 或草稿不存在 → 404。
+
+## 8. 会话与对话（P3-A）
+
+设计依据：详设 6、7、9.4。前缀同样是 `/api/v1`；以下接口的错误码补充：
+
+| HTTP | code | 场景 |
+|---|---|---|
+| 409 | `SESSION_BUSY` | 会话正在执行一轮，不能同时执行第二轮（`details.turn_id`） |
+| 404 | `NOT_FOUND` | 会话 / 轮次 / 版本 / blob 不存在，或 blob 不允许读取 |
+| 400 | `VALIDATION_ERROR` | 请求体不合法、`include` 取值不支持、blob 哈希格式不对 |
+
+**执行失败不是 HTTP 错误**：agent 报错、超时都以 `200/202 + turn.status="error"|"timeout"` 返回，原因在 `turn.error = {code, message, retriable}`
+（`code` 如 `TIMEOUT`、`AGENT_PROTOCOL_ERROR`、`MAX_STEPS_EXCEEDED`、`LLM_*`、`INTERRUPTED`）。会话 `status`：`idle` | `running` | `error`（最近一轮失败）。
+
+### POST /sessions → 201
+```json
+{"version_id": "ver_…", "title": "可选", "variables": {"lang": "zh"}}
+{"agent": "客服助手", "tag": "prod", "title": "…"}        // tag 可为标签、v12、latest（缺省 latest）
+```
+`version_id` 与 `agent` 二选一（`version_id` 也接受 `agent:v3` 这样的引用）。返回 `{"session": SessionOut}`，
+`SessionOut = {id, agent_id, agent_name, version_id, version_seq, mode, title, status, last_seq, stats, variables, source_session_id, replay_mode, created_at, updated_at}`。
+通过本接口创建的会话 `mode` 恒为 `chat`；`stats = {turns, prompt_tokens, completion_tokens, llm_calls, tool_calls, cost}`。
+`variables` 是会话级模板变量（优先级：Spec < 会话 < 单轮）。标题缺省时取第一轮用户输入的前几十个字。
+
+### GET /sessions
+`?agent_id=（id 或名称）&version_id=&mode=chat,replay&q=标题关键字&limit=&cursor=`；`mode` 可逗号分隔，缺省为 `chat,replay`（**不含** `eval`、`judge`）。
+新的在前，分页同 0 节。
+
+### GET /sessions/{id}?include=turns,events
+`include` 缺省 `turns`；传空字符串则只要会话信息。返回 `{"session", "turns": [TurnOut], "events": [AgentEvent] | null}`。
+事件里超过 `events.payload_inline_limit_kb` 的字段以 `{"$blob": "<sha256>"}` 返回，用 `GET /blobs/{hash}` 读取完整内容。
+
+`TurnOut = {id, session_id, idx, pair_index, status: running|ok|error|cancelled|timeout, input: Message, output: {final, messages} | null, usage, cost, latency_ms, ttft_ms, error, anchored_from_turn_id, started_at, finished_at}`。
+`usage = {prompt_tokens, completion_tokens, llm_calls, tool_calls}`；`output.messages` 是本轮新增的 assistant / tool 消息（含工具调用），下一轮历史由它们拼接。
+
+### POST /sessions/{id}/turns
+```json
+{"input": "你好" | {"role": "user", "content": "…"},
+ "variables": {"lang": "en"},                       // 单轮变量，覆盖会话变量
+ "tool_mocks": {"query_order": [{"match": {"order_id": "A001"}, "output": {"status": "已发货"}}, {"default": {"status": "未找到"}}]},
+ "pair_index": null, "wait": false}
+```
+- 默认 **202**：轮次已创建并在后台执行，响应 `{"turn_id", "stream_url", "turn"}`（`turn.status="running"`）；`stream_url` 是带 `after_seq` 的 SSE 地址，用它订阅过程。
+- `wait=true`（请求体或 `?wait=true`）：阻塞到本轮结束，返回 **200**，`turn` 是最终状态。客户端断开连接时本轮会被取消。
+- 会话正在执行时返回 409 `SESSION_BUSY`。
+
+### POST /turns/{id}/cancel → TurnOut
+取消执行中的轮次，等它收尾后返回（`status="cancelled"`，没有 `error`；子进程型 agent 的整个进程树会被终止，HTTP 型会收到 `/evalp/cancel` 并断开连接）。
+轮次已结束时原样返回，不报错。
+
+### GET /sessions/{id}/stream（SSE）
+先回放库里 `seq > after_seq` 的事件，再订阅实时事件；回放与实时之间不会重复也不会丢失。`after_seq` 与请求头 `Last-Event-ID` 同时给出时取较大者，断线重连时浏览器会自动带上它。
+帧格式：
+```
+id: 12                       // 事件 seq；llm.delta 没有 id（不落库、重连后不重放）
+event: tool.call             // 事件类型：turn.start / llm.request / llm.delta / llm.response / tool.call / tool.result / span.* / log / message.assistant / error / turn.end
+data: {"seq":12,"turn_id":"trn_…","ts":"…","type":"tool.call","step_id":"s2","parent_step_id":"s1","payload":{…}}
+
+event: idle                  // 没有轮次在运行（或正在运行的这一轮已结束且 turn.end 已落库）后发送，随后服务端关闭连接
+data: {"status":"idle","last_seq":12}
+```
+空闲的会话回放完立即收到 `idle`。每 15 秒有一次 `: ping` 心跳注释帧。订阅者消费太慢（积压超过 1000 条）会被断开且没有 `idle` 帧——带 `Last-Event-ID` 重连即可从库里补齐。
+
+### GET /blobs/{hash}[?session_id=]
+读取被事件引用（`{"$blob": hash}`）的大 payload（`application/json`），或资产修订的内容（作为附件下载）。其他 blob 一律 404，避免枚举任意内容。
+
+### POST /versions/{ref}/adapter-check → CheckReport
+对一个版本跑 Adapter 协议合规自检（`ref` 同"版本引用"）。不写库、不产生会话，但会真实调用 agent（配置型会真实调用 LLM，产生少量费用）；耗时一般几秒到十几秒。
+HTTP 状态恒为 200（版本不存在 404），agent 的任何问题都体现在报告里：
+```json
+{"version_id": "ver_…", "agent_name": "…", "kind": "code", "transport": "http", "ok": true,
+ "summary": {"pass": 5, "skip": 1}, "duration_ms": 1234,
+ "items": [{"name": "health", "title": "健康检查", "status": "pass|fail|warn|skip", "message": "…", "details": {}, "duration_ms": 8}]}
+```
+检查项顺序：`health`（健康检查）、`single`（单轮成功且回复非空）、`multi_turn`（第二轮带着历史；agent 在 `turn.start` 里报告的 `history_len` 要等于传入的条数，
+没有报告则看 `llm.request` 是否带上了上一轮内容，都没有给 `warn`）、`timeout`（极短超时后以 `timeout` 结束并终止进程）、`cancel`（执行中取消后以 `cancelled` 结束并终止进程）、
+`events`（逐条列出事件顺序 / 成对 / 协议违例等问题，`details.problems`）。agent 响应得比探测超时还快时 `timeout` / `cancel` 为 `skip`；`single` 失败时后续项为 `skip`。`ok` 表示没有 `fail`。

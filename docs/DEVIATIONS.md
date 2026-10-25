@@ -149,3 +149,52 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 
 本模块直接使用 `python-multipart`（`POST /assets/upload` 的 multipart 解析）和 `jsonschema`（校验工具的 `parameters`）。二者当前由 `mcp` 间接依赖带入，
 未在 `backend/pyproject.toml` 显式声明。建议总控把它们加入 dependencies（我无权修改 pyproject）。
+
+## P3-A 存储 — 迁移 0002 与 turns.error 的存储格式
+
+- 迁移 `0002`：`sessions.variables`（JSON，默认 `{}`）、`turns.anchored_from_turn_id`（外键 → `turns.id`）。详设 3.3 未列出这两列：会话级变量（9.4 的创建接口要求）与锚定重放需要记录"对应原会话的哪一轮"。
+- `turns.error` 列仍是 TEXT，内容约定为 JSON 字符串 `{"code","message","retriable"}`（服务层 `error_to_text` / `error_from_text` 负责编解码，读取旧的纯文本值时降级为 `{"code":"ERROR","message":原文}`）。API / `TurnOut.error` 一律是对象。
+- SQLite 的 batch 重建 `sessions` 表会丢失 `ix_sessions_agent_mode` 的 `created_at DESC`（反射不出表达式索引的方向），迁移里在 batch 之后（升级和降级都）按 0001 的定义重建索引，并有测试守住。
+
+## P3-A 运行时 — Runner 与事件
+
+- Adapter 产出的 `turn.end` 只是"提示"：Runner 吸收其 status / output / usage / cost，但最终的 `turn.end` 始终由 Runner 汇总后产出（用量以 `llm.response` 汇总为准），保证每一轮恰好一个 `turn.start` 和一个 `turn.end`；`turn.end` 之后的事件被丢弃。
+- `turn.start` 的 `history_len` 与 `input` 由 Runner 覆盖为平台实际传入的值；Adapter 自己报告的 `history_len` 只用于 `adapter-check` 的历史校验（读取原始事件）。
+- 本轮新增的消息通过 `RunContext.new_messages` 收集（ConfigAdapter 追加 assistant(tool_calls) / tool / final）；代码型 agent 缺省只记录最终回复 `[final]`，L1 响应可用可选字段 `messages` 提供完整消息。下一轮的历史（6.1）因此对代码型 agent 不含工具调用细节。
+- 错误码：`AGENT_PROTOCOL_ERROR`（agent 输出不符合 evalp-agent/1，不可重试）、`MAX_STEPS_EXCEEDED`、`TIMEOUT`、`INTERRUPTED`（进程重启时遗留的 running 轮次，`retriable=true`）。HTTP 429/502/503/504 以及连接失败标记 `retriable=true`。
+- `llm.delta` 只发布不落库，没有 `seq`（SSE 帧也没有 `id:`）。事件先发布到总线、再按 50ms / 100 条批量落库；`turn.end` / `error` 立即落库。为保证 SSE 回放不丢事件，`stream()` 在订阅之后、回放之前会先让正在执行的轮次把缓冲刷库，并在发 `idle` 之前等本轮 `turn.end` 落库。
+- 大 payload（> `events.payload_inline_limit_kb`）转存 blob：事件里留 `{"$blob": hash}`（`incref` 一次），`get_events(resolve_blobs=True)` 才展开；落库前先 `redact()` 脱敏。
+
+## P3-A 会话 — SessionService 的取舍
+
+- 同一会话单槽位（内存）：`SESSION_BUSY` 只在本进程内保证（单进程部署）。槽位在 `turn.end` 落库后释放；轮次行与 `sessions.stats / status` 在 `turn.end` 发布前就已更新。
+- `wait=True` 的调用方任务被取消时，本轮同步被取消（置位 cancel、等 Runner 收尾后再抛 CancelledError），避免孤儿轮次。
+- `get_history` 只拼接 `status=ok` 的轮次（失败 / 取消 / 超时的轮次不进历史）；`history_override` 非空时整体代替会话自身的历史，且不落库。
+- 会话 `status`：最近一轮 `error | timeout` 置 `error`，否则 `idle`；下一轮成功后恢复 `idle`。启动恢复（`recover()`，应用 lifespan 里调用，首次使用服务时也会惰性调用）把遗留 running 轮次标记为 `error/INTERRUPTED`，补写 `error` + `turn.end` 事件，会话置 `idle`。
+- `GET /sessions` 缺省 `mode` 过滤为 `chat,replay`（排除 `eval`、`judge`）；`agent_id` 参数同时接受 id 和名称。`POST /sessions` 只创建 `chat` 模式，其他模式由评测 / 重放模块直接调用服务。
+- 空字符串输入不报错（原样交给 agent）。
+- SSE 订阅者的总线队列溢出（1000）时流直接结束且不发 `idle`，客户端用 `Last-Event-ID` 续传；`Idle.last_seq` 是已发送的最后一个 seq。
+- `GET /blobs/{hash}` 只开放事件引用的 blob 与资产修订 blob；事件 blob 按 JSON 返回，资产 blob 作为附件。
+
+## P3-A Adapter — 代码型 agent 的 `subprocess.cwd` 与其他细节
+
+- P2 发布流程没有把代码型 agent 的相对 `subprocess.cwd` 固化为绝对路径（draft / validate / publish 里都没有处理 `cwd`）。SubprocessAdapter 在执行时把相对 `cwd` 按 `source.repo`（发布时记录的仓库根）解析；`source.repo` 本身是相对路径时相对平台进程的当前目录；目录不存在报 `AGENT_START_FAILED`。命令里的相对可执行路径不做处理（走 PATH）。
+- SubprocessAdapter：每轮一个进程；`stdout` 按 NDJSON 逐行解析，不是 JSON 的行记为 `log` 事件（上限 500 条）；`stderr` 按行记为 warn 级别的 `log` 事件；整个进程树在超时 / 取消 / 异常时被 psutil 终止；注入 `EVALP_SESSION_ID`、`EVALP_TURN_ID`。`turn.end` 之后到管道 EOF 之前（最长 2s）的 stderr 仍会被收集，所以最终 `turn.end` 会稍晚于 agent 的 `turn.end`。
+- 子进程退出码非 0 但已经输出了合法的 L1 响应时按成功处理（日志里记 warn）；没有输出合法响应则 `AGENT_ERROR` 错误（`exit_code`），附 stderr 最后 20 行。
+- HttpAdapter：响应 `Content-Type` 含 `ndjson` 走 L2，否则按 L1（JSON）；`${env:NAME}` 在 headers / base_url 中于执行时解析；执行中被取消 / 超时时调用 `POST /evalp/cancel` 并断开连接（尽力而为，不等待）。
+- ConfigAdapter：Jinja2 沙箱 + `StrictUndefined`，渲染变量为 `variables`（Spec < 会话 < 单轮）、`knowledge[名称]`、`now`；也可把 Spec 变量直接用作顶层名字（`{{ tone }}`）；并行工具调用时先产出全部 `tool.call`，结果按完成顺序产出 `tool.result`，但追加到 messages 的顺序与调用顺序一致。
+
+## P3-A evalp-sdk — 独立包
+
+- `sdk/` 是独立的 Python 包（`sdk/pyproject.toml`，Python ≥ 3.11，零运行时依赖），用 `pip install -e sdk` 安装。HTTP 服务用标准库 `ThreadingHTTPServer` + 独立事件循环线程；`stdio` 模式默认把 fd 1 重定向到 stderr，事件走复制出来的 stdout，handler 里的 `print` 不会污染协议。
+- 同步 handler 在线程里执行（emit 线程安全）；`start_http(port=0)` 返回带 `.url` / `.close()` 的句柄，测试里用它起示例 agent。
+
+## P3-A Adapter 自检 — 探测方式
+
+- `timeout` 探测使用 50ms 的预算、`cancel` 探测在 50ms 后取消；agent 更快完成时给 `skip`（无法验证），不当作失败。子进程型额外用 `psutil` 确认 `last_pid` 已退出。被探测主动中断的执行不参与 `events` 的成对检查。
+- 自检复用 Runner 与真实 Adapter，不写库；因此配置型 agent 会真实消耗 LLM 额度（约 3–4 次调用）。
+
+## P3-A 测试 — 对共享测试夹具的小修改
+
+- `tests/fixtures/fake_openai.py` 的 `StreamingASGITransport` 把请求头名转成小写再放入 ASGI scope（ASGI 规定小写，否则 Starlette 的 `Headers` 取不到 `Authorization`，SSE 流式测试会 401）。
+- `tests/fixtures/sample_tools.py` 增加 `slow_double`。

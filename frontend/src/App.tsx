@@ -24,7 +24,7 @@ export default function App() {
   return (
     <QueryClientProvider client={client}>
       <BootstrapGate>
-        <RouterProvider router={router} />
+        <RouterProvider router={router} future={{ v7_startTransition: true }} />
       </BootstrapGate>
     </QueryClientProvider>
   )

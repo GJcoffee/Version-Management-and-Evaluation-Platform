@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from typing import Any
+
+from fastapi import APIRouter, Body, Depends
+from pydantic import BaseModel
 
 from evalp.api.deps import get_ctx
 from evalp.context import AppContext
@@ -43,10 +46,18 @@ async def save_draft(draft_id: str, body: DraftSave, ctx: AppContext = Depends(g
     return DraftWrapper(draft=await ctx.svc(DraftService).save(draft_id, body.spec, body.expected_revision))
 
 
+class DraftValidateIn(BaseModel):
+    """可选：传入 spec 时做"干跑校验"（不保存、不改 revision）。"""
+
+    spec: dict[str, Any] | None = None
+
+
 @router.post("/drafts/{draft_id}/validate", response_model=DraftValidateOut)
-async def validate_draft(draft_id: str, ctx: AppContext = Depends(get_ctx)):
-    """校验草稿，返回 errors / warnings 与固化后的 Spec 预览。"""
-    return await ctx.svc(DraftService).validate(draft_id)
+async def validate_draft(
+    draft_id: str, body: DraftValidateIn | None = Body(default=None), ctx: AppContext = Depends(get_ctx)
+):
+    """校验草稿，返回 errors / warnings 与固化后的 Spec 预览。请求体带 spec 时校验该 spec 而非已保存内容。"""
+    return await ctx.svc(DraftService).validate(draft_id, spec=body.spec if body else None)
 
 
 @router.post("/drafts/{draft_id}/publish", response_model=PublishOut)

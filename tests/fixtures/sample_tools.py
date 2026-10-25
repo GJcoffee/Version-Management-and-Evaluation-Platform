@@ -57,3 +57,9 @@ def cwd_and_path(args):
 
 def read_env(args):
     return os.environ.get(args["name"])
+
+
+def slow_double(args):
+    """睡 0.5 秒后返回 n*2（测试并行工具调用）。"""
+    time.sleep(0.5)
+    return args["n"] * 2

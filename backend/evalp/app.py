@@ -153,6 +153,16 @@ def install_exception_handlers(app: FastAPI) -> None:
 # ---------------------------------------------------------------- 应用工厂
 
 
+async def _recover_sessions(app_ctx: AppContext) -> None:
+    """启动恢复：把上次退出时遗留的 running 轮次标记为 INTERRUPTED（失败只记录日志，不阻止启动）。"""
+    from evalp.services.session import SessionService
+
+    try:
+        await app_ctx.svc(SessionService).recover()
+    except Exception as e:  # noqa: BLE001
+        log.error("app.session_recovery_failed", error=f"{type(e).__name__}: {e}")
+
+
 def create_app(
     config: Config,
     *,
@@ -173,6 +183,7 @@ def create_app(
         owned = ctx is None
         app_ctx = ctx if ctx is not None else await AppContext.create(config)
         app.state.ctx = app_ctx
+        await _recover_sessions(app_ctx)
         log.info("app.started", version=evalp.__version__, data_dir=str(config.data_dir))
         try:
             yield

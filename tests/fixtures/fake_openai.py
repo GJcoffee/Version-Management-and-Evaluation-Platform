@@ -616,7 +616,7 @@ class StreamingASGITransport(httpx.AsyncBaseTransport):
             "asgi": {"version": "3.0", "spec_version": "2.3"},
             "http_version": "1.1",
             "method": request.method,
-            "headers": list(request.headers.raw),
+            "headers": [(k.lower(), v) for k, v in request.headers.raw],  # ASGI 要求小写
             "scheme": url.scheme,
             "path": unquote(url.path),
             "raw_path": url.raw_path.split(b"?")[0],

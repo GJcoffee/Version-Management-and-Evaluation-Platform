@@ -109,13 +109,18 @@ class DraftService:
 
     # ------------------------------------------------------------ 校验
 
-    async def validate(self, draft_id: str) -> DraftValidateOut:
-        """校验草稿：返回 errors / warnings，以及固化后的 Spec 预览（有错误时为 null）。"""
+    async def validate(self, draft_id: str, spec: dict | None = None) -> DraftValidateOut:
+        """校验草稿：返回 errors / warnings，以及固化后的 Spec 预览（有错误时为 null）。
+
+        spec 不为空时做干跑校验：校验传入的 spec，不读取也不修改已保存的草稿内容。
+        """
         async with self.ctx.db.read() as s:
             draft = await self.get_orm(s, draft_id)
             agent = await s.get(Agent, draft.agent_id)
             assert agent is not None
-            report = await validate_spec(self.ctx, s, draft.spec, agent_kind=agent.kind)
+            report = await validate_spec(
+                self.ctx, s, spec if spec is not None else draft.spec, agent_kind=agent.kind
+            )
         return DraftValidateOut(**report.to_dict())
 
     # ------------------------------------------------------------ 发布

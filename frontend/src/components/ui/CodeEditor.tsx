@@ -24,6 +24,8 @@ export interface CodeEditorProps {
   markers?: CodeMarker[]
   wordWrap?: boolean
   lineNumbers?: boolean
+  /** 滚动并定位到某一行；`key` 变化才会触发（同一行可重复定位） */
+  reveal?: { line: number; key: number } | null
   /** 同一页面有多个编辑器且需要各自 undo 栈时，给每个传不同的 path */
   path?: string
   className?: string

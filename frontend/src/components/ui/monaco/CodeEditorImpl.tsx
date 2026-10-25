@@ -20,6 +20,7 @@ export default function CodeEditorImpl({
   wordWrap = true,
   lineNumbers = true,
   path,
+  reveal,
 }: CodeEditorProps) {
   const theme = useThemeStore((s) => s.theme)
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null)
@@ -47,6 +48,16 @@ export default function CodeEditorImpl({
   }
 
   useEffect(applyMarkers) // 每次渲染后同步标注（markers 通常很短）
+
+  const revealKey = reveal?.key
+  const revealLine = reveal?.line
+  useEffect(() => {
+    const ed = editorRef.current
+    if (!ed || revealKey === undefined || !revealLine) return
+    ed.revealLineInCenter(revealLine)
+    ed.setPosition({ lineNumber: revealLine, column: 1 })
+    ed.focus()
+  }, [revealKey, revealLine])
 
   return (
     <Editor

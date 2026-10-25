@@ -37,6 +37,12 @@ export type ErrorCode =
   | 'DRAFT_CONFLICT'
   | 'SESSION_BUSY'
   | 'ASSET_IN_USE'
+  | 'ASSET_DELETED'
+  | 'AGENT_IN_USE'
+  | 'CONTENT_MISSING'
+  | 'CONFLICT'
+  | 'FORBIDDEN'
+  | 'INTERNAL_ERROR'
   | 'INVALID_STATE'
   | 'DATASET_PARSE_ERROR'
   | 'PROVIDER_ERROR'
@@ -154,34 +160,50 @@ export interface Message {
   name?: string | null
 }
 
-// ───────────────────────────── AgentSpec（4.1 / 4.2） ─────────────────────────────
+// ───────────────────────────── AgentSpec（4.1 / 4.2，依据 docs/api.md §1） ─────────────────────────────
 
-/** 资产引用：`asset://{kind}/{name}@{latest|rev}`；发布后固化为 `{$asset: …}` */
+/** 发布后固化的资产引用：`{$asset: {kind, name, rev, hash}}` */
 export interface ResolvedAssetRef {
   $asset: { kind: AssetKind; name: string; rev: number; hash: string }
 }
 
-export interface ConfigSpec {
+/** 草稿中的引用是字符串 `asset://{kind}/{name}@{latest|rev}`；版本中是固化形式 */
+export type AssetRefValue = string | ResolvedAssetRef
+
+export interface BuiltinKnowledgeTool {
+  builtin: 'knowledge_search'
+  with?: { sources?: AssetRefValue[]; top_k?: number }
+}
+
+export type ToolEntry = AssetRefValue | BuiltinKnowledgeTool
+
+export interface SpecDisplayFields {
+  /** 仅用于显示，不参与哈希，也不存入版本 */
+  name?: string | null
+  description?: string | null
+  notes?: string | null
+}
+
+export interface ModelParams {
+  temperature?: number | null
+  top_p?: number | null
+  max_tokens?: number | null
+  seed?: number | null
+  /** 允许额外字段，原样透传 */
+  [k: string]: unknown
+}
+
+export interface ConfigSpec extends SpecDisplayFields {
   schema: 'evalp/v1'
   kind: 'config'
-  model: {
-    provider: string
-    name: string
-    params?: {
-      temperature?: number
-      top_p?: number
-      max_tokens?: number
-      seed?: number
-      [k: string]: unknown
-    }
-  }
+  model: { provider: string; name: string; params?: ModelParams }
   prompts?: {
-    system?: string | ResolvedAssetRef
+    /** 内联文本或资产引用 */
+    system?: AssetRefValue
     variables?: Record<string, unknown>
   }
-  /** 字符串为资产引用；对象为内置工具（`{builtin, with}`）或固化后的引用 */
-  tools?: Array<string | ResolvedAssetRef | { builtin: string; with?: Record<string, unknown> }>
-  knowledge?: { inject?: Array<string | ResolvedAssetRef> }
+  tools?: ToolEntry[]
+  knowledge?: { inject?: AssetRefValue[] }
   runtime?: {
     max_steps?: number
     turn_timeout_s?: number
@@ -190,22 +212,75 @@ export interface ConfigSpec {
   }
 }
 
-export interface CodeSpec {
+export interface CodeSpec extends SpecDisplayFields {
   schema: 'evalp/v1'
   kind: 'code'
   transport: 'http' | 'subprocess'
-  http?: { base_url: string; headers?: Record<string, string>; timeout_s?: number }
-  subprocess?: { command: string[]; cwd?: string; env?: Record<string, string> }
-  source?: { repo?: string; capture_git?: boolean; allow_dirty?: boolean }
+  http?: { base_url: string; headers?: Record<string, string>; timeout_s?: number } | null
+  subprocess?: { command: string[]; cwd?: string; env?: Record<string, string> } | null
+  source?: {
+    repo?: string
+    capture_git?: boolean
+    allow_dirty?: boolean
+    /** 发布时由服务端写入，勿手写 */
+    git?: { commit: string; patch_hash?: string | null } | null
+  }
   params?: Record<string, unknown>
   runtime?: { turn_timeout_s?: number }
 }
 
 export type AgentSpec = ConfigSpec | CodeSpec
 
-// ───────────────────────────── Agent / Draft / Version ─────────────────────────────
+/** `GET /spec/schema`：JSON Schema（oneOf + discriminator），仅用到最小子集 */
+export interface JsonSchemaNode {
+  type?: string | string[]
+  title?: string
+  description?: string
+  default?: unknown
+  enum?: unknown[]
+  const?: unknown
+  minimum?: number
+  maximum?: number
+  exclusiveMinimum?: number
+  minLength?: number
+  properties?: Record<string, JsonSchemaNode>
+  required?: string[]
+  items?: JsonSchemaNode
+  additionalProperties?: boolean | JsonSchemaNode
+  anyOf?: JsonSchemaNode[]
+  oneOf?: JsonSchemaNode[]
+  $ref?: string
+  readOnly?: boolean
+}
+export interface SpecSchema extends JsonSchemaNode {
+  $defs: Record<string, JsonSchemaNode>
+  discriminator?: { propertyName: string; mapping: Record<string, string> }
+}
+
+/** `POST /drafts/{id}/validate` */
+export interface SpecIssue {
+  /** 点号路径，数组下标可写成 `tools[0]` 或 `tools.0` */
+  path: string
+  message: string
+}
+export interface ValidateResult {
+  ok: boolean
+  errors: SpecIssue[]
+  warnings: SpecIssue[]
+  /** 通过时为固化后的规范化 Spec（即发布时会存储的内容） */
+  resolved_preview: AgentSpec | null
+}
+
+// ───────────────────────────── Agent / Draft / Version（docs/api.md §2-4） ─────────────────────────────
 
 export type AgentKind = 'config' | 'code'
+
+export interface AgentLatestVersion {
+  id: string
+  seq: number
+  spec_hash: string
+  created_at: ISODateTime
+}
 
 export interface Agent {
   id: string
@@ -215,6 +290,20 @@ export interface Agent {
   archived: boolean
   created_at: ISODateTime
   updated_at: ISODateTime
+  latest_version: AgentLatestVersion | null
+}
+
+export interface AgentCreate {
+  name: string
+  kind: AgentKind
+  description?: string
+  spec?: Partial<AgentSpec>
+}
+
+export interface AgentUpdate {
+  name?: string
+  description?: string
+  archived?: boolean
 }
 
 export interface Draft {
@@ -236,20 +325,35 @@ export interface VersionSource {
   patch_blob?: string
 }
 
-export interface Version {
+/** 版本列表条目：没有 spec 和 assets */
+export interface VersionSummary {
   id: string
   agent_id: string
   /** 展示为 v{seq} */
   seq: number
   spec_hash: string
-  /** 已固化、规范化的 Spec */
-  spec: AgentSpec
   source: VersionSource
   parent_version_id: string | null
   from_draft_id: string | null
   notes: string | null
   created_via: CreatedVia
   created_at: ISODateTime
+  tags: string[]
+}
+
+export interface VersionAssetRef {
+  spec_path: string
+  kind: AssetKind
+  name: string
+  rev: number
+  asset_revision_id: string
+}
+
+/** `GET /versions/{ref}` 与发布结果里的 version */
+export interface Version extends VersionSummary {
+  /** 已固化、规范化的 Spec */
+  spec: AgentSpec
+  assets: VersionAssetRef[]
 }
 
 /** 标签可以移动到其他版本 */
@@ -262,24 +366,43 @@ export interface VersionTag {
 
 export interface PublishResult {
   version: Version
+  /** spec_hash 已存在：返回已有版本，没有创建新版本 */
   existed: boolean
 }
 
-// ───────────────────────────── 资产 ─────────────────────────────
+export interface PublishRequest {
+  expected_revision: number
+  notes?: string
+  via?: CreatedVia
+}
+
+export type DiffOp = 'add' | 'remove' | 'replace' | 'asset_changed'
+
+export interface ContentDiff {
+  format: 'unified'
+  /** 从 `@@` 开始，不含文件头 */
+  text: string
+}
+
+export interface SpecChange {
+  /** 点号连接；列表元素按身份键：`tools[query-order]`、`knowledge.inject[faq]`，其余按下标 `a[1]` */
+  path: string
+  op: DiffOp
+  left?: unknown
+  right?: unknown
+  content_diff?: ContentDiff
+}
+
+export interface VersionDiff {
+  left: { id: string; seq: number; spec_hash: string }
+  right: { id: string; seq: number; spec_hash: string }
+  changes: SpecChange[]
+  summary: Record<DiffOp, number>
+}
+
+// ───────────────────────────── 资产（docs/api.md §5-6） ─────────────────────────────
 
 export type AssetKind = 'prompt' | 'tool' | 'knowledge' | 'dataset' | 'file'
-
-export interface Asset {
-  id: string
-  kind: AssetKind
-  /** 小写字母、数字、连字符 */
-  name: string
-  description: string | null
-  latest_rev: number
-  /** 软删除时间 */
-  deleted_at: ISODateTime | null
-  created_at: ISODateTime
-}
 
 export interface AssetRevision {
   id: string
@@ -289,11 +412,128 @@ export interface AssetRevision {
   /** text/markdown、application/x-yaml、application/jsonl … */
   content_type: string
   size: number
-  /** dataset: {case_count, schema_warnings} */
-  meta: { case_count?: number; schema_warnings?: string[]; [k: string]: unknown }
+  /** prompt: {variables}；tool: {tool_name, impl_type}；dataset: {case_count, schema_warnings, format, column_map} */
+  meta: { case_count?: number; schema_warnings?: unknown[]; [k: string]: unknown }
   message: string | null
   created_at: ISODateTime
 }
+
+/** `GET /assets/revisions/{id}` 与 `GET /assets/{id}/revisions/{rev}`：带内容 */
+export interface AssetRevisionDetail extends AssetRevision {
+  kind: AssetKind
+  name: string
+  /** 非 UTF-8 或大于 5MB 时为 null */
+  content: string | null
+  content_available: boolean
+}
+
+export interface Asset {
+  id: string
+  kind: AssetKind
+  /** 小写字母、数字、连字符 */
+  name: string
+  description: string | null
+  /** 当前生效的修订号（不一定等于最大修订号） */
+  latest_rev: number
+  /** 软删除时间 */
+  deleted_at: ISODateTime | null
+  created_at: ISODateTime
+  latest: AssetRevision | null
+}
+
+export interface AssetCreate {
+  kind: AssetKind
+  name: string
+  description?: string
+  content?: string
+  blob_upload_id?: string
+  content_type?: string
+  message?: string
+}
+
+export interface AssetRevisionCreate {
+  content?: string
+  blob_upload_id?: string
+  content_type?: string
+  message?: string
+  column_map?: Record<string, string | string[]>
+}
+
+export interface AssetWriteResult {
+  asset: Asset
+  revision: AssetRevision
+  /** 内容与已有修订相同，没有新建修订 */
+  existed: boolean
+  created: boolean
+}
+
+export interface AssetDeleteResult {
+  deleted: 'soft' | 'hard'
+  id: string
+  versions?: number
+  evals?: number
+}
+
+export interface AssetReferences {
+  asset: Asset
+  versions: Array<{
+    version_id: string
+    agent_id: string
+    agent_name: string
+    seq: number
+    rev: number
+    revision_id: string
+    spec_path: string
+  }>
+  evals: Array<{
+    run_id: string
+    batch_id: string
+    status: string
+    agent_id: string
+    version_id: string
+    dataset_rev_id: string
+    rev: number
+  }>
+  drafts: Array<{ draft_id: string; draft_name: string; agent_id: string; agent_name: string }>
+  in_use: boolean
+}
+
+export interface DatasetCaseBrief {
+  case_key: string
+  input: { turns: string[] }
+  expected?: string | null
+  tags: string[]
+}
+
+interface AssetDiffBase {
+  kind: AssetKind
+  identical: boolean
+  left: AssetRevisionDetail | AssetRevision
+  right: AssetRevisionDetail | AssetRevision
+}
+export interface TextAssetDiff extends AssetDiffBase {
+  type: 'text'
+  content_diff: ContentDiff | null
+}
+export interface BinaryAssetDiff extends AssetDiffBase {
+  type: 'binary'
+  content_diff: null
+  sizes: { left: number; right: number }
+}
+export interface DatasetAssetDiff extends AssetDiffBase {
+  type: 'dataset'
+  summary: { added: number; removed: number; modified: number; unchanged: number; left_count: number; right_count: number }
+  added: DatasetCaseBrief[]
+  removed: DatasetCaseBrief[]
+  modified: Array<{
+    case_key: string
+    changed_fields: Array<'input' | 'expected' | 'rubric' | 'tags' | 'metadata'>
+    left: Record<string, unknown>
+    right: Record<string, unknown>
+  }>
+  truncated: boolean
+}
+export type AssetDiff = TextAssetDiff | BinaryAssetDiff | DatasetAssetDiff
 
 /** 数据集修订解析后的用例 */
 export interface EvalCase {
@@ -309,6 +549,34 @@ export interface EvalCase {
   /** 可含 tool_mocks / variables */
   metadata: { variables?: Record<string, unknown>; tool_mocks?: Record<string, unknown>; [k: string]: unknown }
   case_hash: string
+}
+
+export type DatasetFormat = 'jsonl' | 'csv'
+
+export interface DatasetImportRequest {
+  name: string
+  format: DatasetFormat
+  content: string
+  description?: string
+  message?: string
+  /** CSV：`{字段名: 列名}`；input 可为列名数组（多轮） */
+  column_map?: Record<string, string | string[]>
+}
+
+export interface DatasetWarning {
+  code: string
+  message: string
+  count?: number
+  lines?: number[]
+}
+
+export interface DatasetImportResult {
+  asset: Asset
+  revision: AssetRevision
+  case_count: number
+  warnings: DatasetWarning[]
+  existed: boolean
+  created: boolean
 }
 
 // ───────────────────────────── Session / Turn ─────────────────────────────

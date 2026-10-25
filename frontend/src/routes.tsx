@@ -97,4 +97,14 @@ export const routes: RouteObject[] = [
   },
 ]
 
-export const createAppRouter = () => createBrowserRouter(routes)
+/** future 标志：提前启用 React Router v7 的行为，避免控制台的升级警告 */
+export const createAppRouter = () =>
+  createBrowserRouter(routes, {
+    future: {
+      v7_relativeSplatPath: true,
+      v7_fetcherPersist: true,
+      v7_normalizeFormMethod: true,
+      v7_partialHydration: true,
+      v7_skipActionErrorRevalidation: true,
+    },
+  })

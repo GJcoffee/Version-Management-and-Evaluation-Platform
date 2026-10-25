@@ -225,6 +225,7 @@ class Session(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'idle'"), default="idle")
     last_seq: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"), default=0)
     stats: Mapped[dict[str, Any]] = _json_col("{}")  # 累计 tokens / cost / turns
+    variables: Mapped[dict[str, Any]] = _json_col("{}")  # 会话级变量（迁移 0002）
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -244,7 +245,9 @@ class Turn(Base):
     cost: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0"), default=0.0)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     ttft_ms: Mapped[int | None] = mapped_column(Integer)
-    error: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)  # 服务层序列化的 JSON：{code, message, retriable}
+    # 锚定重放：本轮的上下文取自原会话的哪一轮（迁移 0002）
+    anchored_from_turn_id: Mapped[str | None] = mapped_column(Text, ForeignKey("turns.id"))
     started_at: Mapped[str] = mapped_column(Text, nullable=False)
     finished_at: Mapped[str | None] = mapped_column(Text)
 
