@@ -50,6 +50,15 @@ export interface EvalEvaluatorStat {
   pending_human?: number
 }
 
+/** 单个工具的技术指标（来自 tool.call / tool.result 事件；"每用例"指每个已结束的 Item） */
+export interface EvalToolStat {
+  calls: number
+  calls_per_case: number
+  latency_ms: { p50: number | null; p95: number | null }
+  errors: number
+  error_rate: number
+}
+
 export interface EvalStatsOut {
   cases: number
   items: number
@@ -74,6 +83,8 @@ export interface EvalStatsOut {
   /** 评分出错的比例 */
   score_error_rate?: number
   by_tag?: Record<string, { pass_rate: number | null; cases: number }>
+  /** 按工具名聚合的指标，调用次数多的在前；旧版本生成的报告没有这个字段 */
+  tools?: Record<string, EvalToolStat>
 }
 
 /** 评估器配置（创建时的请求体 / 详情里返回的配置） */
@@ -337,6 +348,21 @@ export interface EvalCompareSide {
   [k: string]: unknown
 }
 
+/** 对比里的一项指标：左、右与右 - 左 */
+export interface EvalMetricDelta {
+  left: number | null
+  right: number | null
+  delta: number | null
+}
+
+/** 某个工具在两次评测间的指标变化；只出现在一侧的工具，调用次数记 0，耗时与失败率为 null */
+export interface EvalToolDelta {
+  calls: EvalMetricDelta
+  calls_per_case: EvalMetricDelta
+  latency_ms: { p50: EvalMetricDelta; p95: EvalMetricDelta }
+  error_rate: EvalMetricDelta
+}
+
 export interface EvalCompareSummary {
   improved: number
   regressed: number
@@ -356,6 +382,8 @@ export interface EvalCompareSummary {
   losses?: number
   /** 符号检验（双侧）p 值；没有胜负用例时为 null */
   sign_test_p?: number | null
+  /** 各指标的 {left, right, delta}；tools 为按工具的变化 */
+  metrics?: { tools?: Record<string, EvalToolDelta> }
   metric_deltas: {
     pass_rate?: number | null
     latency_p50_ms?: number | null

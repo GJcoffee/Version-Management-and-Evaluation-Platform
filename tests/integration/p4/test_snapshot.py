@@ -125,6 +125,20 @@ async def test_pull_does_not_write_snapshot_files_into_agent_yaml(project, evalp
     }
 
 
+async def test_snapshot_shorthand_string_keeps_form_across_push_and_pull(project, evalp_client):
+    (project / "agent.yaml").write_text(
+        AGENT_YAML.replace("snapshot:\n  dir: exports/current", "snapshot: exports/current"), encoding="utf-8"
+    )
+    ws = snap_ws(project)
+    r = await ws.push(evalp_client)
+    assert len(r.uploaded) == 3
+    pulled = await ws.pull(evalp_client)  # 本地没有未推送的修改，pull 不会报冲突
+    assert "agent.yaml" in pulled.unchanged
+    assert (
+        yaml.safe_load((project / "agent.yaml").read_text(encoding="utf-8"))["snapshot"] == "exports/current"
+    )
+
+
 async def test_missing_snapshot_dir_is_reported(project, evalp_client):
     (project / "agent.yaml").write_text(
         AGENT_YAML.replace("exports/current", "exports/nope"), encoding="utf-8"

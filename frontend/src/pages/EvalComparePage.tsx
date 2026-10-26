@@ -6,6 +6,7 @@ import type { EvalCompareCase, EvalRunOut } from '@/api/evalTypes'
 import { useEval, useEvalCompare, useEvals } from '@/api/queries/evals'
 import { CompareCaseDrawer } from '@/components/eval/CompareCaseDrawer'
 import { COMPARE_TABS, CompareSummary, WarningBar } from '@/components/eval/CompareSummary'
+import { ToolCompareTable } from '@/components/eval/ToolStats'
 import { EvalStatusBadge } from '@/components/eval/EvalStatus'
 import {
   TONE_CLASS,
@@ -145,6 +146,7 @@ export default function EvalComparePage() {
         <>
           <WarningBar warnings={first.warnings ?? []} />
           <CompareSummary data={first} />
+          <ToolCompareTable tools={first.summary.metrics?.tools} />
 
           <Tabs value={cls} onValueChange={setCls}>
             <TabsList>

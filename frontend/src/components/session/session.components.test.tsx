@@ -35,6 +35,21 @@ describe('ChatPane', () => {
     expect(metrics.querySelector('[data-metric="ttft"]')).toHaveTextContent('120ms')
   })
 
+  it('助手回复里的图片和视频直接渲染，原文链接仍可见', () => {
+    const text = '画好了 ![图](https://cdn.example.com/a.png) 视频：https://cdn.example.com/v.mp4'
+    const media = buildSessionState(
+      toolTurnEvents().map((e) =>
+        e.type === 'llm.response' && (e.payload as { content: string | null }).content
+          ? mk('llm.response', { ...(e.payload as object), content: text }, { seq: e.seq, step: e.step_id, at: 570 })
+          : e,
+      ),
+    )
+    render(wrap(<ChatPane turns={media.turns} />))
+    const final = screen.getAllByTestId('assistant-message')[1]
+    expect(within(final).getAllByTestId('media').map((m) => m.getAttribute('data-kind'))).toEqual(['image', 'video'])
+    expect(final).toHaveTextContent('https://cdn.example.com/v.mp4')
+  })
+
   it('工具卡片默认折叠，点击展开显示参数与结果', async () => {
     render(wrap(<ChatPane turns={state.turns} />))
     const card = screen.getByTestId('tool-card')

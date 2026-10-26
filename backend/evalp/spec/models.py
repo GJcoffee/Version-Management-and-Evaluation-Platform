@@ -30,6 +30,7 @@ from pydantic import (
     Tag,
     TypeAdapter,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
@@ -280,7 +281,15 @@ class CodeSpec(_SpecBase):
     source: SourceSpec = Field(default_factory=SourceSpec)
     params: dict[str, Any] = Field(default_factory=dict, description="原样透传给 agent")
     runtime: CodeRuntime = Field(default_factory=CodeRuntime)
-    snapshot: SnapshotSpec | None = Field(None, description="版本快照目录；为空时不出现在规范化结果中")
+    snapshot: SnapshotSpec | None = Field(
+        None, description="版本快照目录（可简写为目录字符串）；为空时不出现在规范化结果中"
+    )
+
+    @field_validator("snapshot", mode="before")
+    @classmethod
+    def _snapshot_shorthand(cls, v: Any) -> Any:
+        """``snapshot: exports/current`` 等价于 ``snapshot: {dir: exports/current}``。"""
+        return {"dir": v} if isinstance(v, str) else v
 
     @model_validator(mode="after")
     def _check_transport(self) -> CodeSpec:

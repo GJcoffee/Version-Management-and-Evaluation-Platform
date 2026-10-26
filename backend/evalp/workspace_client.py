@@ -359,7 +359,8 @@ class Workspace:
 
     def snapshot_files(self, spec: dict[str, Any]) -> dict[str, str]:
         """代码型 ``snapshot.dir`` 下的全部文件：目录内相对路径 -> 项目相对路径。"""
-        snap_dir = (spec.get("snapshot") or {}).get("dir")
+        snap = spec.get("snapshot")
+        snap_dir = snap.get("dir") if isinstance(snap, dict) else snap
         if not snap_dir:
             return {}
         base = self.root / snap_dir
@@ -415,9 +416,13 @@ class Workspace:
         """把快照目录下的文件登记到 ``snapshot.files``（引用 push 时上传的 file 资产）。"""
         out = copy.deepcopy(spec)
         if out.get("snapshot"):
-            out["snapshot"]["files"] = {
-                rel: f"asset://{snapshot_asset(self.project.agent_name, rel)}@latest"
-                for rel in self.snapshot_files(spec)
+            snap = out["snapshot"]
+            out["snapshot"] = {
+                "dir": snap["dir"] if isinstance(snap, dict) else snap,
+                "files": {
+                    rel: f"asset://{snapshot_asset(self.project.agent_name, rel)}@latest"
+                    for rel in self.snapshot_files(spec)
+                },
             }
         return out
 
@@ -572,6 +577,8 @@ class Workspace:
             raise
 
         local_spec = self._relativize(out["local_spec"])
+        if local_spec.get("snapshot") and isinstance(self.load_spec().get("snapshot"), str):
+            local_spec["snapshot"] = local_spec["snapshot"]["dir"]  # 保持本地 agent.yaml 的简写
         contents: dict[str, bytes] = {}
         for a in out["assets"]:
             raw = a["content"]

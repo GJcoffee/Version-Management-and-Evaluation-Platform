@@ -227,6 +227,8 @@ export interface CodeSpec extends SpecDisplayFields {
   }
   params?: Record<string, unknown>
   runtime?: { turn_timeout_s?: number }
+  /** 版本快照：dir 下的文件在 push 时上传为 file 资产，files 由 push 填充；只做记录，不参与运行 */
+  snapshot?: { dir: string; files?: Record<string, AssetRefValue> } | null
 }
 
 export type AgentSpec = ConfigSpec | CodeSpec

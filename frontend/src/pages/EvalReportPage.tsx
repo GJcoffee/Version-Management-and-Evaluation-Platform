@@ -12,6 +12,7 @@ import { GatePanel } from '@/components/eval/GatePanel'
 import { MetricCards } from '@/components/eval/MetricCards'
 import { PauseNotice, RunControls } from '@/components/eval/RunControls'
 import { StatsPanel } from '@/components/eval/StatsPanel'
+import { ToolStatsTable } from '@/components/eval/ToolStats'
 import { useEvalStream } from '@/components/eval/useEvalStream'
 import {
   compareHref,
@@ -255,6 +256,7 @@ function ReportView({ run }: { run: EvalRunDetailOut }) {
             onShowFlaky={() => setItemCls('flaky')}
             onPickTag={(t) => setItemTag((cur) => (cur === t ? '' : t))}
           />
+          <ToolStatsTable stats={stats} />
         </>
       ) : (
         <p className="text-xs text-muted-foreground">评测结束后显示通过率、评估器均值、延迟、tokens 和成本等汇总指标。</p>

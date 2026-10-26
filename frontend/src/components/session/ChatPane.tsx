@@ -110,6 +110,12 @@ export function ChatPane({
     if (el) el.scrollTop = el.scrollHeight
   }, [totalSize, virtual, autoScroll])
 
+  // 图片 / 视频异步加载完成会撑高内容：贴底状态下继续跟随，避免新内容被挤出视野
+  const onMediaLoad = useCallback(() => {
+    const el = scrollRef.current
+    if (el && autoScroll && stuckRef.current) el.scrollTop = el.scrollHeight
+  }, [autoScroll])
+
   const jump = () => {
     const el = scrollRef.current
     if (!el) return
@@ -121,7 +127,14 @@ export function ChatPane({
 
   return (
     <div className={cn('relative min-h-0', className)}>
-      <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-y-auto px-4 py-4" data-testid="chat-pane">
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        onLoadCapture={onMediaLoad}
+        onLoadedMetadataCapture={onMediaLoad}
+        className="h-full overflow-y-auto px-4 py-4"
+        data-testid="chat-pane"
+      >
         {turns.length === 0 ? (
           loading ? (
             <LoadingBlock label="加载会话…" className="py-16" />
