@@ -5,7 +5,7 @@ import { ApiError } from '@/api/client'
 import { useRevision } from '@/api/queries/assets'
 import { useAgent } from '@/api/queries/agents'
 import { useVersion, useVersionDiff, useVersions } from '@/api/queries/versions'
-import type { AssetKind, DiffOp, SpecChange, Version, VersionAssetRef } from '@/api/types'
+import type { DiffOp, SpecChange, Version, VersionAssetRef } from '@/api/types'
 import { Badge, type BadgeVariant } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { DiffEditor } from '@/components/ui/DiffEditor'
@@ -45,15 +45,9 @@ export function groupChanges(changes: SpecChange[]): Array<{ group: string; item
   return [...map.entries()].map(([group, items]) => ({ group, items }))
 }
 
-/** 从版本的资产清单里找出某个 asset_changed 路径对应的修订 */
+/** 从版本的资产清单里找出某个 asset_changed 路径对应的修订（`assets[].spec_path` 与 diff 的 path 同为身份键，直接相等） */
 export function findAssetForPath(assets: VersionAssetRef[], path: string): VersionAssetRef | undefined {
-  if (path === 'prompts.system') return assets.find((a) => a.kind === 'prompt')
-  const m = /\[([^\]]+)\]$/.exec(path)
-  if (!m) return undefined
-  const name = m[1]
-  const want: AssetKind = path.startsWith('knowledge') || path.includes('sources') ? 'knowledge' : 'tool'
-  const same = assets.filter((a) => a.name === name)
-  return same.find((a) => a.kind === want) ?? same[0]
+  return assets.find((a) => a.spec_path === path)
 }
 
 const KIND_LANG = { prompt: 'markdown', tool: 'yaml', knowledge: 'markdown', dataset: 'plaintext', file: 'plaintext' } as const

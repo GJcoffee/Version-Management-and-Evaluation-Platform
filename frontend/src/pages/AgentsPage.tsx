@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Archive, ArchiveRestore, Bot, Plus, Search } from 'lucide-react'
 import { ApiError } from '@/api/client'
-import { useAgentTags, useAgents, useCreateAgent, useUpdateAgent } from '@/api/queries/agents'
+import { useAgents, useCreateAgent, useUpdateAgent } from '@/api/queries/agents'
 import type { Agent, AgentKind } from '@/api/types'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -22,15 +22,14 @@ export const KIND_LABEL: Record<AgentKind, string> = { config: '配置型', code
 /** agent 名称：字母（含中文）、数字、_ . -，最长 64，不含空格和冒号 */
 export const AGENT_NAME_RE = /^[\p{L}\p{N}_.-]{1,64}$/u
 
-function TagsCell({ agent }: { agent: Agent }) {
-  const tags = useAgentTags(agent.id)
-  const items = tags.data ?? []
+export function TagsCell({ agent }: { agent: Agent }) {
+  const items = agent.tags ?? []
   if (items.length === 0) return <span className="text-muted-foreground">-</span>
   return (
     <div className="flex flex-wrap gap-1">
       {items.slice(0, 4).map((t) => (
-        <Badge key={t.tag} variant="outline" className="font-mono">
-          {t.tag}
+        <Badge key={t} variant="outline" className="font-mono">
+          {t}
         </Badge>
       ))}
       {items.length > 4 && <span className="text-xs text-muted-foreground">+{items.length - 4}</span>}

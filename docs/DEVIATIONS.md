@@ -280,3 +280,45 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
   （详设没有这一步；避免 MCP / 误操作丢失本地修改）。pull 重写 `agent.yaml` 时不保留注释；内容没变则不重写。
 - **未做**（BACKLOG）：MCP 启动时自动拉起 `evalp serve`；`list_agents` 等其余工具；`asset` / `dataset import` / `replay` 等命令。
   chat 只能选已发布的版本（会话基于版本），不能直接和草稿对话。
+
+## 后端改进（前端联调反馈）— SSE 的 `error` 帧改名为 `agent.error`，只在 SSE 输出层映射
+
+`error` 同时是**落库的事件类型**（`events.type`）、`EventType` 枚举和 agent 对外协议（SDK / HTTP / 子进程 Adapter）里的事件类型，
+改名会破坏已有数据和外部 agent。所以只改 `GET /sessions/{id}/stream` 帧里的 `event:` 一行（`evalp.api.sse.SSE_EVENT_NAMES`：`error` -> `agent.error`）；
+`data` 里的 `type` 仍是 `error`，库、`GET /sessions/{id}?include=events`、Adapter 协议、SDK 都不变，详设 6.2 / 7.4 里的事件类型表仍然成立。
+原因：名为 `error` 的 SSE 帧会同时触发浏览器 `EventSource.onerror`，客户端容易误判为断线。
+影响：监听 `error` 帧的外部客户端要改为监听 `agent.error`（仓库内只有前端 `SESSION_EVENT_TYPES` 和 CLI `chat`，已同步；CLI 同时兼容旧帧名）。
+评测的 SSE（`/evals/{id}/stream`）没有名为 `error` 的帧，不受影响。
+
+## 后端改进（前端联调反馈）— 取消 / 出错的轮次保存已流出的部分文本
+
+详设 6.2 / 7.2 规定 `llm.delta` 不落库。为了让刷新后仍能看到取消 / 出错前已生成的内容，Runner 累积每次 LLM 调用的流出文本（`llm.response` 到达后丢弃，
+因为内容已在事件里），轮次以 `cancelled | error | timeout` 结束时：
+
+- `TurnOutput` 增加可选字段 `partial_text`（`runtime/messages.py` 的跨模块契约，只增不减）；`turns.output` 存 `{"messages": [], "partial_text": "…"}`，
+  此时 `output` 非 null 但没有 `final`（`TurnOut.output.final` 在 TS 类型里变为可空）。不影响历史拼接（只取 `status=ok` 的轮次）、评测（只读 `final`）和对齐。
+- `turn.end` 事件的 payload 多一个额外字段 `partial_text`（与 `error` 一样放在 payload 的额外字段里，未改 `TurnEndPayload`），SSE 回放据此还原。
+- 上限 10000 个字符（超出截断并加 `…`），避免 `turn.end` 因体积超限被整个转存为 blob 存根。
+- 只保存"尚未被 `llm.response` 取代"的文本：取消发生在工具调用阶段时没有部分文本。外部 agent 只要发了带 `text` 的 `llm.delta` 同样适用。
+
+## 后端改进（前端联调反馈）— 版本 diff 的草稿一侧、`spec_path` 统一为身份键
+
+- `assets[].spec_path`（版本详情）与 `GET /assets/{id}/references` 的 `spec_path` 改为输出身份键路径（`tools[query-order]`），与版本 diff 的 `changes[].path` 一致。
+  库里的 `version_asset_refs.spec_path` **仍存下标路径**（`tools[0]`）：校验报错的路径（`validate.errors[].path`）指向草稿里的位置，保持下标；
+  这样不需要数据迁移，输出时按版本 Spec 换算（`spec.diff.identity_paths`，与 diff 共用身份键规则）。详设 3.3 注释里的 `tools[2]` 示例指的是库里的存储形式。
+- `GET /versions/diff` 的两侧新增草稿引用：`drf_…` 或 `agent名:@草稿名`（详设 4.5 只有版本）。草稿取**已保存**的内容并按发布流程固化 / 规范化，
+  涉及草稿时两侧都忽略代码型 Spec 的 `source.git`（发布时才采集）。草稿一侧的摘要为 `{id, draft: true, name, revision, spec_hash}`，没有 `seq`。
+- 前端草稿编辑器状态栏的改动数：编辑器内容与已保存草稿一致（`saved`）时用该接口（`summary` 各项之和，口径同版本 diff 页）；
+  有**未保存**的修改时服务端看不到，回退为原有的前端计算（`countSpecChanges`，按叶子路径，口径略有差异），界面上显示"约 N 处改动"。
+  没有整体替换成接口的原因：编辑器是手动 / 闲置 5 秒保存，用接口会让改动数滞后于输入。
+
+## 后端改进（前端联调反馈）— 大 payload 存根的实际行为写入 api.md（未改存储格式）
+
+详设 3.3 / 6.2 写的是"超过 32KB 的**部分**转存为 blob"，实际实现（`EventSink`）是整个 `payload` 转存、库里只留 `{"$blob": hash}` 加体积很小
+（序列化后 ≤ 256 字节）的顶层字段。没有改存储格式（改成字段级需要迁移已有事件，且前端 / 对比逻辑已按整 payload 存根实现），
+而是在 `docs/api.md` 第 8 节写明行为和取回方式（`GET /blobs/{hash}` 返回完整原始 payload）。字段级存根仍可作为后续优化。
+
+## 后端改进（前端联调反馈）— 小增量
+
+- `AgentOut` 增加 `tags: list[str]`（该 agent 全部版本标签名，字典序），`GET /agents` 一次查询批量取出；前端 `useAgentTags` 随之删除（`GET /agents/{ref}/tags` 保留）。
+- 新增 `PATCH /sessions/{id}`（只能改 `title`：去空白后 1 到 120 个字符，不可清空），返回 `{"session": SessionOut}`；详设 11.3 的会话接口里没有该项。

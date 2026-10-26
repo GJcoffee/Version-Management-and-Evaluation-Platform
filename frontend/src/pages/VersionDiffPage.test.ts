@@ -14,13 +14,20 @@ describe('变更导航', () => {
   it('asset_changed 路径对应到版本资产清单', () => {
     const assets: VersionAssetRef[] = [
       { spec_path: 'prompts.system', kind: 'prompt', name: 'sys', rev: 1, asset_revision_id: 'arv_p' },
-      { spec_path: 'tools[0]', kind: 'tool', name: 'faq', rev: 2, asset_revision_id: 'arv_t' },
-      { spec_path: 'knowledge.inject[0]', kind: 'knowledge', name: 'faq', rev: 3, asset_revision_id: 'arv_k' },
+      { spec_path: 'tools[faq]', kind: 'tool', name: 'faq', rev: 2, asset_revision_id: 'arv_t' },
+      { spec_path: 'knowledge.inject[faq]', kind: 'knowledge', name: 'faq', rev: 3, asset_revision_id: 'arv_k' },
+      {
+        spec_path: 'tools[knowledge_search].with.sources[faq]',
+        kind: 'knowledge',
+        name: 'faq',
+        rev: 3,
+        asset_revision_id: 'arv_s',
+      },
     ]
     expect(findAssetForPath(assets, 'prompts.system')?.asset_revision_id).toBe('arv_p')
     expect(findAssetForPath(assets, 'tools[faq]')?.asset_revision_id).toBe('arv_t')
     expect(findAssetForPath(assets, 'knowledge.inject[faq]')?.asset_revision_id).toBe('arv_k')
-    expect(findAssetForPath(assets, 'tools[knowledge_search].with.sources[faq]')?.asset_revision_id).toBe('arv_k')
+    expect(findAssetForPath(assets, 'tools[knowledge_search].with.sources[faq]')?.asset_revision_id).toBe('arv_s')
     expect(findAssetForPath(assets, 'tools[none]')).toBeUndefined()
   })
 })

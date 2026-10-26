@@ -62,7 +62,7 @@ class TurnPrinter:
             if isinstance(content, list):
                 content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
             self.final_text = content or ""
-        elif ev == "error":
+        elif ev in ("agent.error", "error"):  # 旧版服务端的帧名是 error
             self._newline()
             console.print(
                 f"[red]出错 {escape(str(payload.get('code', '')))}: "

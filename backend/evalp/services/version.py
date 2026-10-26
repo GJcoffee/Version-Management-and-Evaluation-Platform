@@ -2,6 +2,9 @@
 
 版本引用写法（diff、会话创建等处通用）：版本 id（``ver_…``）、``agent名:v12``、
 ``agent名:标签``、``agent名:latest``。
+
+diff 的两侧还可以是草稿（取已保存的内容）：草稿 id（``drf_…``）或 ``agent名:@草稿名``（如 ``bot:@main``）。
+标签名不能以 ``@`` 开头，所以不会与标签混淆。
 """
 
 from __future__ import annotations
@@ -26,9 +29,11 @@ from evalp.schemas.agent import (
 from evalp.services.agent import AgentService
 from evalp.services.asset import AssetService
 from evalp.services.convert import draft_out, version_summary
-from evalp.spec.diff import diff_specs
+from evalp.spec.canonical import canonicalize
+from evalp.spec.diff import diff_specs, identity_paths
 from evalp.spec.models import CodeSpec, ConfigSpec, parse_spec
 from evalp.spec.resolve import unresolve
+from evalp.spec.validate import validate_spec
 from evalp.store.models import Agent, AssetRevision, Draft, Version, VersionAssetRef, VersionTag
 from evalp.utils.time import now_iso
 
@@ -151,10 +156,12 @@ class VersionService:
             )
         ).all()
         # 资产名在 spec 里的 pin 上，这里通过 spec 反查 (spec_path -> kind/name)
+        # spec_path 对外用身份键路径（tools[query-order]），与 diff 的 path 一致；库里存的是下标路径
         names = _pin_names(v.spec)
+        xpaths = identity_paths(v.spec)
         assets = [
             VersionAssetRefOut(
-                spec_path=ref.spec_path,
+                spec_path=xpaths.get(ref.spec_path, ref.spec_path),
                 kind=names.get(ref.spec_path, ("", ""))[0],
                 name=names.get(ref.spec_path, ("", ""))[1],
                 rev=rev.rev,
@@ -250,11 +257,58 @@ class VersionService:
 
     # ------------------------------------------------------------ diff
 
+    async def _diff_side(self, s: AsyncSession, ref: str) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        """diff 一侧的引用 -> ``(摘要, 固化后的 Spec, 是否草稿)``。
+
+        版本摘要为 ``{id, seq, spec_hash}``；草稿摘要为 ``{id, draft: true, name, revision, spec_hash}``。
+        草稿按发布时的流程固化引用并规范化（补齐默认值）；
+        校验不通过时和发布一样抛错（原因在 ``details.errors``）。
+        """
+        if ref.startswith("drf_") or ref.partition(":")[2].startswith("@"):
+            if ref.startswith("drf_"):
+                draft = await s.get(Draft, ref)
+                if draft is None:
+                    raise NotFound(f"草稿不存在: {ref}", {"ref": ref})
+                agent = await s.get(Agent, draft.agent_id)
+                assert agent is not None
+            else:
+                agent_part, _, sel = ref.partition(":")
+                if not agent_part or len(sel) < 2:
+                    raise ValidationFailed(
+                        f"草稿引用格式不对: {ref!r}（应为 drf_… 或 agent名:@草稿名）",
+                        {"errors": [{"path": "ref", "message": "格式不对"}]},
+                    )
+                agent = await AgentService.get_orm(s, agent_part)
+                draft = (
+                    await s.execute(select(Draft).where(Draft.agent_id == agent.id, Draft.name == sel[1:]))
+                ).scalar_one_or_none()
+                if draft is None:
+                    raise NotFound(f"草稿不存在: {ref}", {"ref": ref})
+            report = await validate_spec(self.ctx, s, draft.spec, agent_kind=agent.kind)
+            report.raise_for_errors()
+            assert report.resolved is not None
+            canon = canonicalize(report.resolved)
+            info = {
+                "id": draft.id,
+                "draft": True,
+                "name": draft.name,
+                "revision": draft.revision,
+                "spec_hash": canon.hash,
+            }
+            return info, canon.data, True
+        v = await self.resolve_ref_orm(s, ref)
+        return {"id": v.id, "seq": v.seq, "spec_hash": v.spec_hash}, v.spec, False
+
     async def diff(self, left_ref: str, right_ref: str) -> dict[str, Any]:
-        """两个版本的 Spec diff（详设 4.5）。"""
+        """两个版本（或草稿）的 Spec diff（详设 4.5）。
+
+        草稿侧的 ``source.git`` 是发布时才采集的（草稿里没有），涉及草稿时两侧都忽略它，避免出现无意义的差异。
+        """
         async with self.ctx.db.read() as s:
-            lv = await self.resolve_ref_orm(s, left_ref)
-            rv = await self.resolve_ref_orm(s, right_ref)
+            left, lspec, ldraft = await self._diff_side(s, left_ref)
+            right, rspec, rdraft = await self._diff_side(s, right_ref)
+        if ldraft or rdraft:
+            lspec, rspec = _without_git(lspec), _without_git(rspec)
 
         assets = self.ctx.svc(AssetService)
 
@@ -264,12 +318,8 @@ class VersionService:
             except (NotFound, UnicodeDecodeError):
                 return None
 
-        result = await diff_specs(lv.spec, rv.spec, load_text)
-        return {
-            "left": {"id": lv.id, "seq": lv.seq, "spec_hash": lv.spec_hash},
-            "right": {"id": rv.id, "seq": rv.seq, "spec_hash": rv.spec_hash},
-            **result,
-        }
+        result = await diff_specs(lspec, rspec, load_text)
+        return {"left": left, "right": right, **result}
 
     async def next_seq(self, s: AsyncSession, agent_id: str) -> int:
         """下一个版本序号。"""
@@ -277,6 +327,14 @@ class VersionService:
             await s.execute(select(func.max(Version.seq)).where(Version.agent_id == agent_id))
         ).scalar_one()
         return (cur or 0) + 1
+
+
+def _without_git(spec: dict[str, Any]) -> dict[str, Any]:
+    """去掉代码型 Spec 的 ``source.git``（发布时采集）。"""
+    source = spec.get("source")
+    if isinstance(source, dict) and "git" in source:
+        return {**spec, "source": {k: v for k, v in source.items() if k != "git"}}
+    return spec
 
 
 def _pin_names(spec: dict[str, Any]) -> dict[str, tuple[str, str]]:

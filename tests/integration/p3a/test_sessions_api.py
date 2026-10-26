@@ -45,6 +45,30 @@ async def test_create_by_version_id_and_by_agent_tag(world, client):
     assert (await client.post(f"{API}/sessions", json={"agent": "nope"})).status_code == 404
 
 
+async def test_patch_session_title(world, client):
+    v = await world.config_version()
+    s = (await client.post(f"{API}/sessions", json={"version_id": v["id"], "title": "旧"})).json()["session"]
+    r = await client.patch(f"{API}/sessions/{s['id']}", json={"title": "  新标题  "})
+    assert r.status_code == 200, r.text
+    out = r.json()["session"]
+    assert out["title"] == "新标题" and out["id"] == s["id"] and out["agent_name"]
+    assert (await client.get(f"{API}/sessions/{s['id']}")).json()["session"]["title"] == "新标题"
+    assert (await client.patch(f"{API}/sessions/{s['id']}", json={"title": "x" * 120})).status_code == 200
+    # 空串、纯空白、越界、缺字段、null、多余字段都是 400 VALIDATION_ERROR；不存在是 404
+    for bad in (
+        {"title": ""},
+        {"title": "   "},
+        {"title": "x" * 121},
+        {},
+        {"title": None},
+        {"title": "a", "x": 1},
+    ):
+        r = await client.patch(f"{API}/sessions/{s['id']}", json=bad)
+        assert r.status_code == 400 and r.json()["error"]["code"] == "VALIDATION_ERROR", bad
+    assert (await client.get(f"{API}/sessions/{s['id']}")).json()["session"]["title"] == "x" * 120
+    assert (await client.patch(f"{API}/sessions/ses_nope", json={"title": "a"})).status_code == 404
+
+
 async def test_turn_wait_true_returns_200_and_detail_include(world, client, fake_openai):
     v = await world.config_version()
     s = (await client.post(f"{API}/sessions", json={"version_id": v["id"]})).json()["session"]
@@ -95,6 +119,55 @@ async def test_turn_202_cancel_and_error_not_http_error(world, client, fake_open
     assert t["status"] == "error" and t["error"]["code"] and "retriable" in t["error"]
     assert (await client.post(f"{API}/sessions/ses_nope/turns", json={"input": "x"})).status_code == 404
     assert (await client.post(f"{API}/sessions/{s['id']}/turns", json={})).status_code == 400
+
+
+async def test_error_turn_keeps_partial_text_in_db_and_events(world, client, fake_openai):
+    """流到一半断开：轮次 error，已流出的文本保存在 output.partial_text，并随 turn.end 事件重放。"""
+    v = await world.config_version()
+    s = (await client.post(f"{API}/sessions", json={"version_id": v["id"]})).json()["session"]
+    fake_openai.enqueue("一二三四五六七八九十")
+    fake_openai.break_stream(after_chunks=3)
+    r = await client.post(f"{API}/sessions/{s['id']}/turns", json={"input": "说长句", "wait": True})
+    t = r.json()["turn"]
+    assert t["status"] == "error"
+    partial = t["output"]["partial_text"]
+    assert partial and "一二三四五六七八九十".startswith(partial)
+    assert t["output"]["final"] is None and t["output"]["messages"] == []
+    # 刷新（重新读库）后仍在
+    d = (await client.get(f"{API}/sessions/{s['id']}", params={"include": "turns,events"})).json()
+    assert d["turns"][0]["output"]["partial_text"] == partial
+    assert d["events"][-1]["type"] == "turn.end" and d["events"][-1]["payload"]["partial_text"] == partial
+    # 出错的轮次不进入对话历史
+    assert await world.sessions.get_history(s["id"]) == []
+
+
+async def test_large_payload_is_replaced_by_blob_stub_and_blob_returns_original(world, client, fake_openai):
+    """api.md 写明的行为：超限事件整个 payload 换成 {"$blob": hash, …小字段}，GET /blobs/{hash} 取回原文。"""
+    world.ctx.config.events.payload_inline_limit_kb = 1
+    v = await world.config_version()
+    s = (await client.post(f"{API}/sessions", json={"version_id": v["id"]})).json()["session"]
+    big = "大" * 2000
+    fake_openai.enqueue("好的")
+    r = await client.post(f"{API}/sessions/{s['id']}/turns", json={"input": big, "wait": True})
+    assert r.status_code == 200
+    events = (await client.get(f"{API}/sessions/{s['id']}", params={"include": "turns,events"})).json()[
+        "events"
+    ]
+    stubs = [e for e in events if "$blob" in e["payload"]]
+    assert stubs, "应有被转存的事件"
+    start = events[0]
+    assert start["type"] == "turn.start"
+    # 整个 payload 被替换：input（大字段）不在库里，只剩 $blob 和体积很小的顶层字段（history_len）
+    assert set(start["payload"]) == {"$blob", "history_len"} and start["payload"]["history_len"] == 0
+    # 小事件（如 turn.end）原样内联
+    assert "$blob" not in events[-1]["payload"] and events[-1]["payload"]["status"] == "completed"
+    # 用 blob 取回完整原始 payload
+    h = start["payload"]["$blob"]
+    got = await client.get(f"{API}/blobs/{h}", params={"session_id": s["id"]})
+    assert got.status_code == 200 and got.headers["content-type"].startswith("application/json")
+    assert got.json() == {"input": {"role": "user", "content": big}, "history_len": 0}
+    # 轮次本身（GET turns）里的 input 始终是完整的，不受影响
+    assert (await client.get(f"{API}/sessions/{s['id']}")).json()["turns"][0]["input"]["content"] == big
 
 
 async def test_turn_variables_and_tool_mocks(world, client, fake_openai):

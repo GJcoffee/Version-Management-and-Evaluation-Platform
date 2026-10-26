@@ -13,6 +13,17 @@ from typing import Any
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+# 会话事件类型 -> SSE 的 ``event:`` 名。只改线上的帧名：库里的事件类型和 ``data`` 里的 ``type`` 仍是原值，
+# 因为 ``error`` 同时是落库类型和 agent 外部协议（SDK / HTTP / 子进程）里的事件类型。
+# ``error`` 与浏览器 ``EventSource.onerror`` 同名，客户端容易把业务错误事件误判为断线，所以在线上改名。
+SSE_EVENT_NAMES: dict[str, str] = {"error": "agent.error"}
+
+
+def sse_event_name(event_type: str) -> str:
+    """事件类型 -> SSE 帧的 ``event:`` 名。"""
+    return SSE_EVENT_NAMES.get(event_type, event_type)
+
+
 PING_FRAME = ": ping\n\n"
 HEARTBEAT_INTERVAL = 15.0
 

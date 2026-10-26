@@ -42,7 +42,12 @@ class Message(BaseModel):
 
 
 class TurnOutput(BaseModel):
-    """一轮的输出：final 为最终回复，messages 为本轮新增的全部 assistant/tool 消息。"""
+    """一轮的输出：final 为最终回复，messages 为本轮新增的全部 assistant/tool 消息。
+
+    轮次被取消 / 出错 / 超时时没有 final：若当时有一次 LLM 调用已经流出了部分文本（``llm.delta`` 不落库，
+    也没等到 ``llm.response``），这部分文本保存在 ``partial_text``（过长时截断）。它不属于对话历史。
+    """
 
     final: Message | None = None
     messages: list[Message] = []
+    partial_text: str | None = None

@@ -3,12 +3,12 @@ import { Link, useParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { PanelRightClose, PanelRightOpen, Variable, WifiOff } from 'lucide-react'
 import { ApiError } from '@/api/client'
-import { sessionKeys, useCancelTurn, useSendTurn, useSession } from '@/api/queries/sessions'
+import { sessionKeys, useCancelTurn, useRenameSession, useSendTurn, useSession } from '@/api/queries/sessions'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { SessionCompareActions } from '@/components/compare/SessionCompareActions'
-import { ChatPane, MessageInput, TraceViewer, totalMetrics, useSessionStream } from '@/components/session'
+import { ChatPane, EditableTitle, MessageInput, TraceViewer, totalMetrics, useSessionStream } from '@/components/session'
 import { cn } from '@/lib/cn'
 import { formatCost, formatTokens } from '@/lib/format'
 import { safeGet, safeSet } from '@/lib/safeStorage'
@@ -48,6 +48,15 @@ function SessionView({ sessionId }: { sessionId: string }) {
   const stream = useSessionStream(sessionId)
   const sendTurn = useSendTurn(sessionId)
   const cancel = useCancelTurn()
+  const rename = useRenameSession(sessionId)
+  const onRename = async (title: string) => {
+    try {
+      await rename.mutateAsync(title)
+    } catch (e) {
+      toast.error('修改标题失败', { description: e instanceof ApiError ? e.message : undefined })
+      throw e
+    }
+  }
 
   // 刚发出的轮次：POST 返回到 SSE 送来 turn.start 之间的空档里，也要显示为运行中
   const [awaitingTurnId, setAwaitingTurnId] = useState<string | null>(null)
@@ -136,9 +145,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
       {/* 顶部：标题、绑定的 agent 版本、模式、累计指标 */}
       <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-4 py-2">
         <div className="flex min-w-0 items-center gap-2">
-          <h1 className="truncate text-sm font-semibold" title="会话标题（后端暂不支持修改）" data-testid="session-title">
-            {sessionTitle(session)}
-          </h1>
+          <EditableTitle value={sessionTitle(session)} onSave={onRename} />
         </div>
         <div className="flex flex-wrap items-center gap-1.5 text-xs">
           <Link

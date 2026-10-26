@@ -1,7 +1,7 @@
 """版本 diff（详设 4.5）。"""
 
 import pytest
-from evalp.spec.diff import diff_specs, unified_diff_text
+from evalp.spec.diff import diff_specs, identity_paths, unified_diff_text
 from evalp.spec.models import dump_spec, parse_spec
 
 
@@ -186,3 +186,34 @@ async def test_no_loader_still_reports_asset_changed(loader):
     right = spec(tools=[pin("tool", "t", 2, "2")])
     c = by_path(await diff_specs(left, right, loader))["tools[t]"]
     assert c["op"] == "asset_changed" and "content_diff" not in c
+
+
+def test_identity_paths_map_index_to_identity_key():
+    s = spec(
+        prompts={"system": pin("prompt", "sys", 1, "a")},
+        tools=[
+            pin("tool", "q", 1, "b"),
+            {"builtin": "knowledge_search", "with": {"sources": [pin("knowledge", "faq", 1, "c")]}},
+        ],
+        knowledge={"inject": [pin("knowledge", "faq", 1, "c")]},
+    )
+    assert identity_paths(s) == {
+        "prompts.system": "prompts.system",
+        "tools[0]": "tools[q]",
+        "tools[1].with.sources[0]": "tools[knowledge_search].with.sources[faq]",
+        "knowledge.inject[0]": "knowledge.inject[faq]",
+    }
+
+
+async def test_identity_paths_equal_diff_paths():
+    """identity_paths 的结果必须与 diff 产出的 asset_changed 路径同一套规则。"""
+    left = spec(tools=[pin("tool", "q", 1, "b"), pin("tool", "r", 1, "d")])
+    right = spec(tools=[pin("tool", "r", 2, "e"), pin("tool", "q", 2, "f")])  # 顺序也变了
+    changed = {c["path"] for c in (await diff_specs(left, right))["changes"] if c["op"] == "asset_changed"}
+    assert changed == {"tools[q]", "tools[r]"}
+    assert changed <= set(identity_paths(left).values()) & set(identity_paths(right).values())
+
+
+def test_identity_paths_fall_back_to_index_when_keys_duplicate():
+    s = spec(knowledge={"inject": [pin("knowledge", "faq", 1, "c"), pin("knowledge", "faq", 2, "d")]})
+    assert identity_paths(s)["knowledge.inject[1]"] == "knowledge.inject[1]"

@@ -200,6 +200,21 @@ def test_versions_and_diff(cli_env, api):
         assert text in r.output
 
 
+def test_diff_against_draft(cli_env, api):
+    """草稿作为一侧：@main 补全为 agent:@main，标题显示草稿名和 revision。"""
+    draft_diff = {
+        **mocks.VERSION_DIFF,
+        "right": {"id": "drf_1", "draft": True, "name": "main", "revision": 4, "spec_hash": "c" * 64},
+    }
+    route = api.get("/versions/diff").mock(return_value=httpx.Response(200, json=draft_diff))
+    r = invoke("diff", "v1", "@main")
+    assert r.exit_code == 0, r.output
+    assert dict(route.calls[0].request.url.params) == {"left": "support:v1", "right": "support:@main"}
+    assert "v1 -> 草稿 main(r4)" in r.output
+    r = invoke("diff", "v1", "drf_1")
+    assert dict(route.calls[1].request.url.params)["right"] == "drf_1"
+
+
 # ---------------------------------------------------------------- chat
 
 
@@ -240,6 +255,33 @@ def test_chat_streams_reply_and_tool_calls(cli_env, api):
     assert json.loads(turn.calls[0].request.content) == {"input": "我的订单 A001 呢"}
     sess = json.loads(api.calls[0].request.content)
     assert sess == {"version_id": "support:v3"}
+
+
+def test_chat_shows_agent_error_frames(cli_env, api):
+    """业务错误事件在 SSE 线上叫 agent.error（旧版服务端是 error，也兼容）。"""
+    api.post("/sessions").mock(
+        return_value=httpx.Response(
+            201, json={"session": {"id": "ses_1", "agent_name": "support", "version_seq": 3}}
+        )
+    )
+    api.post("/sessions/ses_1/turns").mock(
+        return_value=httpx.Response(
+            202,
+            json={"turn_id": "trn_1", "stream_url": "/api/v1/sessions/ses_1/stream?after_seq=0", "turn": {}},
+        )
+    )
+    t = {"turn_id": "trn_1"}
+    for name in ("agent.error", "error"):
+        api.get("/sessions/ses_1/stream").mock(
+            return_value=sse(
+                ("turn.start", {**t, "type": "turn.start", "payload": {}}),
+                (name, {**t, "type": "error", "payload": {"code": "LLM_UNAVAILABLE", "message": "模型挂了"}}),
+                ("turn.end", {**t, "payload": {"status": "error", "latency_ms": 10}}),
+            )
+        )
+        r = invoke("chat", "--version", "v3", input="你好\n/exit\n")
+        assert r.exit_code == 0, r.output
+        assert "出错 LLM_UNAVAILABLE" in r.output and "模型挂了" in r.output
 
 
 # ---------------------------------------------------------------- eval

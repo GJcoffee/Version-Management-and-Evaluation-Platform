@@ -71,6 +71,30 @@ def _keyed(items: list[Any]) -> dict[str, Any] | None:
     return out
 
 
+def identity_paths(spec: Any) -> dict[str, str]:
+    """固化 Spec 中每处资产引用的 ``下标路径 -> 身份键路径``（如 ``tools[0]`` -> ``tools[query-order]``）。
+
+    身份键路径与 diff 的 ``changes[].path`` 用同一套规则（``_keyed``），``assets[].spec_path`` 对外使用它；
+    库里 ``version_asset_refs.spec_path`` 仍存下标路径（校验报错的路径也是下标，指向草稿里的位置）。
+    """
+    out: dict[str, str] = {}
+
+    def walk(node: Any, ipath: str, xpath: str) -> None:
+        if is_pin(node):
+            out[ipath] = xpath
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{ipath}.{k}" if ipath else str(k), f"{xpath}.{k}" if xpath else str(k))
+        elif isinstance(node, list):
+            keyed = _keyed(node)
+            keys = list(keyed) if keyed is not None else None
+            for i, v in enumerate(node):
+                walk(v, f"{ipath}[{i}]", f"{xpath}[{keys[i] if keys is not None else i}]")
+
+    walk(spec, "", "")
+    return out
+
+
 class _Differ:
     def __init__(self, load_text: LoadText | None) -> None:
         self.load_text = load_text

@@ -291,6 +291,8 @@ export interface Agent {
   created_at: ISODateTime
   updated_at: ISODateTime
   latest_version: AgentLatestVersion | null
+  /** 该 agent 全部版本标签的名称（按字典序） */
+  tags: string[]
 }
 
 export interface AgentCreate {
@@ -393,9 +395,19 @@ export interface SpecChange {
   content_diff?: ContentDiff
 }
 
+/** diff 的一侧：版本，或草稿（`draft: true`，没有 seq，有 name / revision） */
+export interface VersionDiffSide {
+  id: string
+  spec_hash: string
+  seq?: number
+  draft?: boolean
+  name?: string
+  revision?: number
+}
+
 export interface VersionDiff {
-  left: { id: string; seq: number; spec_hash: string }
-  right: { id: string; seq: number; spec_hash: string }
+  left: VersionDiffSide
+  right: VersionDiffSide
   changes: SpecChange[]
   summary: Record<DiffOp, number>
 }
@@ -646,9 +658,12 @@ export interface Usage {
 }
 
 export interface TurnOutput {
-  final: Message
+  /** 最终回复；取消 / 出错的轮次没有 */
+  final: Message | null
   /** 这一轮新增的全部 assistant 和 tool 消息 */
   messages: Message[]
+  /** 取消 / 出错 / 超时的轮次：已流出的部分文本（不属于对话历史） */
+  partial_text?: string | null
 }
 
 /** 轮次错误；agent 报错、超时都以 200 + turn.status 返回，原因在这里 */
@@ -788,6 +803,8 @@ export interface TurnEndPayload {
   cost: number | null
   latency_ms: number | null
   ttft_ms: number | null
+  /** 取消 / 出错 / 超时时，已流出但没来得及成为 llm.response 的文本（过长时被截断） */
+  partial_text?: string | null
 }
 
 export interface EventPayloadMap {
@@ -807,7 +824,11 @@ export interface EventPayloadMap {
 
 export type EventType = keyof EventPayloadMap
 
-/** 会话 SSE 需要监听的全部事件类型（`idle` 由 useEventStream 单独处理） */
+/**
+ * 会话 SSE 需要监听的全部帧名（`idle` 由 useEventStream 单独处理）。
+ * 与 `EventType` 的区别：业务事件 `error` 在 SSE 线上叫 `agent.error`（避开 `EventSource.onerror` 的同名事件，
+ * 避免被误判为断线）；帧里 `data.type` 仍是 `error`，所以 reducer 看到的事件类型不变。
+ */
 export const SESSION_EVENT_TYPES = [
   'turn.start',
   'llm.request',
@@ -819,9 +840,9 @@ export const SESSION_EVENT_TYPES = [
   'span.end',
   'log',
   'message.assistant',
-  'error',
+  'agent.error',
   'turn.end',
-] as const satisfies readonly EventType[]
+] as const
 
 interface EventEnvelopeBase<T extends EventType> {
   /** 平台分配，同一会话内单调递增；llm.delta 没有 seq */

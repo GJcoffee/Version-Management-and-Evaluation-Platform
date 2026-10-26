@@ -1,6 +1,7 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useEventStream } from './useEventStream'
+import { SESSION_EVENT_TYPES } from '@/api/types'
 
 /** 最小可用的 EventSource mock */
 class MockEventSource {
@@ -44,7 +45,7 @@ interface Ev {
   text?: string
 }
 const reducer = (s: Ev[], e: Ev) => [...s, e]
-const TYPES = ['turn.start', 'llm.delta', 'turn.end', 'error']
+const TYPES = ['turn.start', 'llm.delta', 'turn.end', 'agent.error']
 const build = (after: number) => `/api/v1/sessions/ses_1/stream?after_seq=${after}`
 
 function setup(extra: Partial<Parameters<typeof useEventStream<Ev[], Ev>>[0]> = {}) {
@@ -94,13 +95,18 @@ describe('useEventStream', () => {
     expect(result.current.state[0]).toMatchObject({ type: 'turn.start', seq: 7 })
   })
 
-  it('名为 error 的业务事件不是连接故障：不断开、不重连，正常派发', () => {
+  it('会话业务错误事件的帧名是 agent.error（不是 error），data.type 仍是 error', () => {
+    expect(SESSION_EVENT_TYPES).toContain('agent.error')
+    expect(SESSION_EVENT_TYPES).not.toContain('error')
+  })
+
+  it('agent.error 业务事件不是连接故障：不断开、不重连，正常派发', () => {
     const { result } = setup()
     const es = MockEventSource.last
     act(() => {
       es.onopen?.()
       es.emit('turn.start', { seq: 1, type: 'turn.start' })
-      es.emit('error', { seq: 2, type: 'error', text: 'PROVIDER_ERROR' })
+      es.emit('agent.error', { seq: 2, type: 'error', text: 'PROVIDER_ERROR' })
     })
     expect(es.closed).toBe(false)
     expect(result.current.status).toBe('open')

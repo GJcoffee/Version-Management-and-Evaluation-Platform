@@ -26,9 +26,11 @@ POLL_STATES = TERMINAL_STATUSES | {"paused"}  # 这些状态下不会再有进�
 
 
 def qualify_version(agent: str | None, ref: str) -> str:
-    """``v3`` / ``3`` / ``baseline`` -> ``agent:v3`` / ``agent:baseline``；版本 id 与 ``a:x`` 原样返回。"""
+    """``v3`` / ``3`` / ``baseline`` -> ``agent:v3`` / ``agent:baseline``；草稿 ``@main`` -> ``agent:@main``。
+
+    版本 id、草稿 id（``drf_``）与 ``a:x`` 原样返回。"""
     ref = ref.strip()
-    if ref.startswith("ver_") or ":" in ref:
+    if ref.startswith(("ver_", "drf_")) or ":" in ref:
         return ref
     if not agent:
         raise WorkspaceError(f"版本 {ref!r} 需要指定 agent（--agent，或在含 .evalp.toml 的目录中运行）。")

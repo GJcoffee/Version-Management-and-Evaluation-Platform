@@ -6,7 +6,7 @@ import { useAgent } from '@/api/queries/agents'
 import { publishDraft, useDraft, useInvalidateAfterPublish } from '@/api/queries/drafts'
 import { useSpecSchema } from '@/api/queries/spec'
 import { versionKeys } from '@/api/queries/versions'
-import { useVersion, useAddTag } from '@/api/queries/versions'
+import { useVersion, useAddTag, useDraftDiff } from '@/api/queries/versions'
 import type { Agent, Draft } from '@/api/types'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -14,7 +14,7 @@ import { CodeEditor, type CodeMarker } from '@/components/ui/CodeEditor'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { RelativeTime } from '@/components/ui/RelativeTime'
 import { cn } from '@/lib/cn'
-import { countSpecChanges } from '@/lib/specDiff'
+import { countSpecChanges, pickChangeCount } from '@/lib/specDiff'
 import { issuesToMarkers, lineOfPath, yamlProblemsToMarkers } from '@/lib/specYaml'
 import { toast } from '@/stores/toast'
 import { ConflictDialog } from './draft/ConflictDialog'
@@ -123,12 +123,24 @@ function DraftEditor({ draft, agent }: { draft: Draft; agent?: Agent }) {
     ]
   }, [ed.parsed, ed.validation, ed.text])
 
-  // 相对基础版本的改动数：用服务端固化后的预览（含默认值）与基础版本的 Spec 比较
-  const changeCount = useMemo(() => {
-    if (!ed.baseVersionId) return null
-    if (!baseVersion.data || !ed.validation?.resolved_preview) return undefined
-    return countSpecChanges(baseVersion.data.spec, ed.validation.resolved_preview)
-  }, [ed.baseVersionId, baseVersion.data, ed.validation])
+  // 相对基础版本的改动数：编辑器内容与已保存草稿一致时用服务端 diff（`/versions/diff`，右侧传草稿）；
+  // 有未保存的修改时服务端看不到，回退为前端计算（服务端固化后的预览与基础版本的 Spec 比较），界面上标"约"
+  const savedClean = ed.state === 'saved'
+  const serverDiff = useDraftDiff(ed.baseVersionId, draft.id, ed.revision, savedClean)
+  const change = useMemo(
+    () =>
+      pickChangeCount({
+        hasBase: !!ed.baseVersionId,
+        saved: savedClean,
+        server: serverDiff.data,
+        local:
+          baseVersion.data && ed.validation?.resolved_preview
+            ? countSpecChanges(baseVersion.data.spec, ed.validation.resolved_preview)
+            : undefined,
+      }),
+    [ed.baseVersionId, savedClean, serverDiff.data, baseVersion.data, ed.validation],
+  )
+  const changeCount = change.count
 
   const errors = ed.validation?.errors ?? []
   const warnings = ed.validation?.warnings ?? []
@@ -308,7 +320,14 @@ function DraftEditor({ draft, agent }: { draft: Draft; agent?: Agent }) {
           ) : changeCount === undefined ? (
             <span className="text-foreground">—</span>
           ) : (
-            <span className="font-medium text-foreground">{changeCount} 处改动</span>
+            <span
+              className="font-medium text-foreground"
+              title={change.approx ? '含未保存的修改，为前端估算；保存后以服务端 diff 为准' : undefined}
+              data-approx={change.approx || undefined}
+            >
+              {change.approx ? '约 ' : ''}
+              {changeCount} 处改动
+            </span>
           )}
         </span>
         <button

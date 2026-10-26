@@ -152,8 +152,8 @@ export function useEventStream<S, E extends StreamEvent>(
         setStatus('idle')
       })
       source.onerror = (e: Event) => {
-        // 业务事件 `event: error`（如会话的 error 事件）同样会触发 onerror，但它带 data，
-        // 不是连接故障：交给上面的监听器当作普通事件处理，不要断开重连
+        // 名为 `error` 的 SSE 帧同样会触发 onerror，但它带 data，不是连接故障，不要断开重连
+        // （会话的业务错误事件在线上叫 `agent.error`，就是为了避免这种歧义；这里只做兜底）
         if (e instanceof MessageEvent && typeof e.data === 'string') return
         shutdown()
         if (stopped) return
