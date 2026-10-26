@@ -240,7 +240,12 @@ async def test_pause_resume_and_cancel(ev):
     assert d.status == "paused" and d.pause_reason == "manual"
     with pytest.raises(InvalidState):
         await ev.evals.pause(rid)
-    await asyncio.sleep(0.3)  # 在跑的做完，之后不再有新的 Item 开始
+    # 在跑的（含评分中的）做完，之后不再有新的 Item 开始；满负载下评分可能较慢，不能用固定时长等待
+    async def drained():
+        p = await ev.evals.progress(rid)
+        return p["running"] == 0 and p["scoring"] == 0
+
+    await wait_until(drained)
     p1 = await ev.evals.progress(rid)
     await asyncio.sleep(0.4)
     p2 = await ev.evals.progress(rid)

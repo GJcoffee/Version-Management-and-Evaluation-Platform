@@ -50,7 +50,9 @@ def restrict_to_owner(path: Path) -> bool:
         return True
     cmd = icacls_command(path, windows_current_user())
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=ICACLS_TIMEOUT_S, check=False)
+        proc = subprocess.run(  # 输出按本地代码页解码（中文系统为 GBK），解不了的字节替换掉，不能因此抛错
+            cmd, capture_output=True, text=True, errors="replace", timeout=ICACLS_TIMEOUT_S, check=False
+        )
     except (OSError, subprocess.SubprocessError) as e:
         log.warning("fsperm.icacls_failed", path=str(path), error=str(e))
         return False
