@@ -242,6 +242,17 @@ def norm_path(path: str) -> str:
     return p[2:] if p.startswith("./") else p
 
 
+def snapshot_asset(agent_name: str, rel: str) -> str:
+    """快照目录内某个文件对应的资产 ``file/snap-{agent}-{路径}-{路径哈希}``（名字合法且不超过 64 字符）。"""
+    parts = (
+        "snap",
+        normalize_stem(agent_name)[:20].strip("-"),
+        normalize_stem(rel)[:30].strip("-"),
+        hashlib.sha1(rel.encode("utf-8")).hexdigest()[:6],
+    )
+    return "file/" + "-".join(p for p in parts if p)
+
+
 def _has_glob(pattern: str) -> bool:
     return any(c in pattern for c in _GLOB_CHARS)
 
@@ -346,9 +357,25 @@ class Workspace:
                     out.setdefault(rel, asset)
         return out
 
+    def snapshot_files(self, spec: dict[str, Any]) -> dict[str, str]:
+        """代码型 ``snapshot.dir`` 下的全部文件：目录内相对路径 -> 项目相对路径。"""
+        snap_dir = (spec.get("snapshot") or {}).get("dir")
+        if not snap_dir:
+            return {}
+        base = self.root / snap_dir
+        if not base.is_dir():
+            raise WorkspaceError(f"{self.project.spec_path} 的 snapshot.dir 不是目录: {snap_dir}")
+        return {
+            p.relative_to(base).as_posix(): p.relative_to(self.root).as_posix()
+            for p in sorted(base.rglob("*"))
+            if p.is_file()
+        }
+
     def collect_files(self, spec: dict[str, Any]) -> list[LocalFile]:
-        """要同步的文件：``[assets]`` 映射到的文件，加上 spec 中 ``file:`` 引用的文件。"""
+        """要同步的文件：``[assets]`` 映射到的文件，加上 spec 中 ``file:`` 引用的文件和快照目录下的文件。"""
         mapping = self.mapped_files()
+        for rel, path in self.snapshot_files(spec).items():
+            mapping[path] = snapshot_asset(self.project.agent_name, rel)
         for ref in iter_file_refs(spec):
             if ref in mapping:
                 continue
@@ -384,9 +411,21 @@ class Workspace:
                 sec[key] = str((self.root / sec[key]).resolve())
         return out
 
-    def _relativize(self, spec: dict[str, Any]) -> dict[str, Any]:
-        """pull 时 ``_absolutize`` 的逆操作：位于项目目录内的绝对路径还原为相对路径。"""
+    def _fill_snapshot(self, spec: dict[str, Any]) -> dict[str, Any]:
+        """把快照目录下的文件登记到 ``snapshot.files``（引用 push 时上传的 file 资产）。"""
         out = copy.deepcopy(spec)
+        if out.get("snapshot"):
+            out["snapshot"]["files"] = {
+                rel: f"asset://{snapshot_asset(self.project.agent_name, rel)}@latest"
+                for rel in self.snapshot_files(spec)
+            }
+        return out
+
+    def _relativize(self, spec: dict[str, Any]) -> dict[str, Any]:
+        """pull 时 ``_absolutize`` 的逆操作：绝对路径还原为相对路径；去掉 push 填充的快照文件表。"""
+        out = copy.deepcopy(spec)
+        if out.get("snapshot"):
+            out["snapshot"].pop("files", None)
         for section, key in (("source", "repo"), ("subprocess", "cwd")):
             sec = out.get(section)
             if isinstance(sec, dict) and isinstance(sec.get(key), str) and os.path.isabs(sec[key]):
@@ -439,7 +478,7 @@ class Workspace:
         body: dict[str, Any] = {
             "agent_name": p.agent_name,
             "draft_name": p.draft_name,
-            "spec": self._absolutize(spec),
+            "spec": self._absolutize(self._fill_snapshot(spec)),
             "expected_revision": None if force else state.draft_revision,
             "force": force,
         }

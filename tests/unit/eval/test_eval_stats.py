@@ -4,10 +4,12 @@ import pytest
 from evalp.services.eval_stats import (
     ItemRow,
     ScoreRow,
+    ToolCallRow,
     case_scores,
     compute_passed,
     compute_stats,
     item_score,
+    tool_call_rows,
 )
 
 
@@ -123,3 +125,41 @@ def test_by_tag_and_latency():
     assert st["by_tag"]["x"] == {"pass_rate": 0.5, "cases": 2}
     assert st["by_tag"]["y"] == {"pass_rate": 0.0, "cases": 1}
     assert st["latency_ms"]["p50"] == 200
+
+
+def test_tool_call_rows_pair_call_and_result_by_call_id():
+    events = [
+        ("tool.call", {"call_id": "c1", "name": "draw", "arguments": {}}),
+        ("tool.call", {"call_id": "c2", "name": "search", "arguments": {}}),
+        ("tool.result", {"call_id": "c2", "name": "search", "latency_ms": 30, "is_error": True}),
+        ("tool.result", {"call_id": "c1", "name": "draw", "latency_ms": 900, "is_error": False}),
+        ("tool.call", {"call_id": "c3", "name": "draw", "arguments": {}}),  # 没有结果（轮次被中断）
+    ]
+    assert tool_call_rows("i1", events) == [
+        ToolCallRow("i1", "draw", 900, False),
+        ToolCallRow("i1", "search", 30, True),
+        ToolCallRow("i1", "draw", None, False),
+    ]
+
+
+def test_tool_stats_per_tool_metrics():
+    items = [
+        item("1", "c1", 0),
+        item("2", "c2", 0, status="failed", passed=None),
+        item("3", "c3", 0, status="cancelled"),
+    ]
+    calls = [
+        ToolCallRow("1", "draw", 100, False),
+        ToolCallRow("1", "draw", 300, True),
+        ToolCallRow("2", "draw", 200, False),
+        ToolCallRow("2", "search", 10, False),
+        ToolCallRow("3", "draw", 9999, False),  # 未结束的 Item 不统计
+    ]
+    tools = compute_stats(items, [], evaluator_keys=[], repeats=1, tool_calls=calls)["tools"]
+    assert list(tools) == ["draw", "search"]  # 按调用次数从多到少
+    draw = tools["draw"]
+    assert draw["calls"] == 3 and draw["calls_per_case"] == pytest.approx(3 / 2)  # 2 个已结束的 Item
+    assert draw["latency_ms"] == {"p50": 200, "p95": pytest.approx(290)}
+    assert draw["errors"] == 1 and draw["error_rate"] == pytest.approx(1 / 3)
+    assert tools["search"]["calls"] == 1 and tools["search"]["error_rate"] == 0
+    assert compute_stats(items, [], evaluator_keys=[], repeats=1)["tools"] == {}

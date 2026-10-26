@@ -215,6 +215,33 @@ async def test_case_variables_and_tool_mocks(ev):
     assert "mock 结果" in detail.output and detail.usage["tool_calls"] == 1
 
 
+async def test_tool_stats_in_run_stats_and_compare(ev):
+    await ev.api.asset(
+        "tool",
+        "q",
+        "name: query_order\ndescription: 查订单\n"
+        "parameters: {type: object, properties: {order_id: {type: string}}}\n"
+        "impl: {type: mock, responses: [{default: {status: 已发货}}]}\n",
+    )
+    v = await ev.config_version({"tools": ["asset://tool/q@latest"]})
+    ev.fake.add_rule(match={"user": "订单", "has_tool": False}, reply=[("query_order", {"order_id": "A1"})])
+    ev.fake.add_rule(match={"has_tool": True}, reply="好的")
+    await ev.dataset(
+        "tools-ds", [{"case_key": f"t{i}", "input": "查订单", "expected": "好的"} for i in range(2)]
+    )
+    d, _ = await ev.run(v, "asset://dataset/tools-ds@latest", [{"type": "contains"}], repeats=2)
+    tool = d.stats["tools"]["query_order"]
+    assert tool["calls"] == 4 and tool["calls_per_case"] == 1.0 and tool["error_rate"] == 0
+    assert tool["latency_ms"]["p50"] is not None
+    # 对比：同一次评测与自身对比，工具指标的差值全为 0
+    r = await ev.client.get(f"{API}/evals/compare?left={d.id}&right={d.id}")
+    body = r.json()
+    assert body["right"]["stats"]["tools"]["query_order"]["calls"] == 4
+    delta = body["summary"]["metrics"]["tools"]["query_order"]
+    assert delta["calls"] == {"left": 4, "right": 4, "delta": 0}
+    assert delta["calls_per_case"]["delta"] == 0 and delta["latency_ms"]["p95"]["delta"] == 0
+
+
 async def test_per_run_concurrency_limit(ev):
     v = await ev.config_version()
     await ev.dataset("ds", make_cases(12))
@@ -240,6 +267,7 @@ async def test_pause_resume_and_cancel(ev):
     assert d.status == "paused" and d.pause_reason == "manual"
     with pytest.raises(InvalidState):
         await ev.evals.pause(rid)
+
     # 在跑的（含评分中的）做完，之后不再有新的 Item 开始；满负载下评分可能较慢，不能用固定时长等待
     async def drained():
         p = await ev.evals.progress(rid)

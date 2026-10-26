@@ -7,6 +7,9 @@
   已取消 / 未完成的 Item 同样不参与。``pass_rate`` 是各用例通过率的平均值。
 - **pass@k** 用无偏估计，只在 ``repeats >= k`` 时计算（k 取 1、3、5、10）。
 - **Item 分数**（对比用）= 该 Item 全部门禁评估器 score 的平均值；执行失败的 Item 记 0 分。
+- **按工具指标**（``tools``）：来自 ``tool.call`` / ``tool.result`` 事件（用 ``call_id`` 配对；耗时取
+  ``tool.result.latency_ms``，失败取 ``tool.result.is_error``）；"每用例"指每个已结束（done / failed）的
+  Item。
 - ``cost`` 是各 Item 的"名义成本"之和（缓存命中的 Item 沿用来源 Item 的成本）；``cost_new``
   是本次评测真正新增的成本
   （不含缓存命中），预算按它计算；``cost_wasted`` 是失败尝试的成本（记在 Item 的 ``usage.failed_attempts``
@@ -53,6 +56,28 @@ class ScoreRow:
     score: float | None = None
     passed: int | None = None
     detail: dict[str, Any] | None = None
+
+
+@dataclass
+class ToolCallRow:
+    """一次工具调用：``tool.call`` 与同 ``call_id`` 的 ``tool.result`` 合并后的结果。"""
+
+    item_id: str
+    name: str
+    latency_ms: int | None = None
+    is_error: bool = False
+
+
+def tool_call_rows(item_id: str, events: Iterable[tuple[str, dict[str, Any]]]) -> list[ToolCallRow]:
+    """一个 Item 的 ``(事件类型, payload)`` 序列 -> 工具调用列表（耗时与是否失败取自 ``tool.result``）。"""
+    events = list(events)
+    results = {p["call_id"]: p for t, p in events if t == "tool.result"}
+    rows: list[ToolCallRow] = []
+    for t, p in events:
+        if t == "tool.call":
+            r = results.get(p["call_id"], {})
+            rows.append(ToolCallRow(item_id, p["name"], r.get("latency_ms"), bool(r.get("is_error"))))
+    return rows
 
 
 def item_outcome(item: ItemRow) -> int | None:
@@ -108,12 +133,37 @@ def _usage_tokens(usage: dict[str, Any] | None) -> tuple[int, int]:
     return int(u.get("prompt_tokens", 0) or 0), int(u.get("completion_tokens", 0) or 0)
 
 
+def compute_tool_stats(items: Sequence[ItemRow], calls: Sequence[ToolCallRow]) -> dict[str, Any]:
+    """按工具名聚合：调用次数、平均每用例（每个已结束的 Item）调用次数、耗时 p50/p95、失败率。
+
+    按调用次数从多到少排列；耗时只统计 ``tool.result`` 带 ``latency_ms`` 的调用。
+    """
+    finished = {it.id for it in items if it.status in FINISHED}
+    by_name: dict[str, list[ToolCallRow]] = defaultdict(list)
+    for c in calls:
+        if c.item_id in finished:
+            by_name[c.name].append(c)
+    out: dict[str, Any] = {}
+    for name, rows in sorted(by_name.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        lat = [c.latency_ms for c in rows if c.latency_ms is not None]
+        errors = sum(1 for c in rows if c.is_error)
+        out[name] = {
+            "calls": len(rows),
+            "calls_per_case": len(rows) / len(finished),
+            "latency_ms": {"p50": percentile(lat, 50), "p95": percentile(lat, 95)},
+            "errors": errors,
+            "error_rate": errors / len(rows),
+        }
+    return out
+
+
 def compute_stats(
     items: Sequence[ItemRow],
     scores: Sequence[ScoreRow],
     *,
     evaluator_keys: Sequence[str],
     repeats: int,
+    tool_calls: Sequence[ToolCallRow] = (),
 ) -> dict[str, Any]:
     """汇总指标（详设 8.6）。"""
     by_status: dict[str, int] = defaultdict(int)
@@ -194,6 +244,7 @@ def compute_stats(
         "cost_new": round(cost_new, 8),
         "cost_wasted": round(wasted, 8),
         "error_rate": (by_status["failed"] / finished) if finished else 0.0,
+        "tools": compute_tool_stats(items, tool_calls),
         "score_error_rate": score_errors / len(all_rows) if all_rows else 0.0,
         "by_tag": {t: {"pass_rate": mean(v), "cases": len(v)} for t, v in sorted(by_tag.items())},
     }

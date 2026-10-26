@@ -162,3 +162,12 @@ def test_canonical_text_is_compact_sorted_unicode():
     assert "中文" in cs.text and "\\u" not in cs.text
     assert json.loads(cs.text) == cs.data
     assert list(cs.data) == sorted(cs.data)
+
+
+def test_empty_snapshot_is_omitted_but_declared_snapshot_is_hashed():
+    base = {"kind": "code", "transport": "http", "http": {"base_url": "http://x"}}
+    assert "snapshot" not in canonicalize(base).data
+    assert canonicalize({**base, "snapshot": None}).hash == canonicalize(base).hash
+    with_snap = {**base, "snapshot": {"dir": "exports/current"}}
+    assert canonicalize(with_snap).data["snapshot"] == {"dir": "exports/current", "files": {}}
+    assert canonicalize(with_snap).hash != canonicalize(base).hash

@@ -162,8 +162,8 @@ async def test_different_asset_at_same_path_is_replace():
 
 
 async def test_non_text_asset_has_no_content_diff():
-    left = spec(knowledge={"inject": [pin("file", "blob", 1, "1")]})
-    right = spec(knowledge={"inject": [pin("file", "blob", 2, "2")]})
+    left = spec(knowledge={"inject": [pin("dataset", "blob", 1, "1")]})
+    right = spec(knowledge={"inject": [pin("dataset", "blob", 2, "2")]})
     called = []
 
     async def load(p):
@@ -172,6 +172,19 @@ async def test_non_text_asset_has_no_content_diff():
 
     c = by_path(await diff_specs(left, right, load))["knowledge.inject[blob]"]
     assert c["op"] == "asset_changed" and "content_diff" not in c and not called
+
+
+async def test_file_asset_gets_content_diff_when_text():
+    left = {"kind": "code", "snapshot": {"dir": "x", "files": {"a.json": pin("file", "f", 1, "1")}}}
+    right = {"kind": "code", "snapshot": {"dir": "x", "files": {"a.json": pin("file", "f", 2, "2")}}}
+
+    async def load(p):
+        return "a\n" if p["rev"] == 1 else "b\n"
+
+    c = by_path(await diff_specs(left, right, load))["snapshot.files.a.json"]
+    assert (
+        c["op"] == "asset_changed" and "-a" in c["content_diff"]["text"] and "+b" in c["content_diff"]["text"]
+    )
 
 
 def test_unified_diff_text_has_no_file_header():

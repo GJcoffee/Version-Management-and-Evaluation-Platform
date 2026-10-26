@@ -125,6 +125,7 @@ def _ref_union(kind: str):
 
 ToolRef = _ref_union("tool")
 KnowledgeRef = _ref_union("knowledge")
+FileRef = _ref_union("file")
 
 
 def _check_system(v: Any) -> Any:
@@ -235,6 +236,15 @@ class CodeRuntime(_Model):
     turn_timeout_s: float = Field(300, gt=0)
 
 
+class SnapshotSpec(_Model):
+    """版本快照：只做记录、不参与运行。``dir`` 下的全部文件在 push 时作为 file 资产上传并固化到版本里。"""
+
+    dir: str = Field(min_length=1, description="本地目录（相对项目根）")
+    files: dict[str, FileRef] = Field(
+        default_factory=dict, description="目录内相对路径 -> file 资产引用；push 时由客户端按目录内容填充"
+    )
+
+
 # ---------------------------------------------------------------- 顶层
 
 
@@ -270,6 +280,7 @@ class CodeSpec(_SpecBase):
     source: SourceSpec = Field(default_factory=SourceSpec)
     params: dict[str, Any] = Field(default_factory=dict, description="原样透传给 agent")
     runtime: CodeRuntime = Field(default_factory=CodeRuntime)
+    snapshot: SnapshotSpec | None = Field(None, description="版本快照目录；为空时不出现在规范化结果中")
 
     @model_validator(mode="after")
     def _check_transport(self) -> CodeSpec:
