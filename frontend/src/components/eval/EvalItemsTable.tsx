@@ -21,11 +21,14 @@ const CLS_OPTIONS: Array<{ value: Cls; label: string }> = [
   { value: 'passed', label: '通过' },
   { value: 'failed', label: '未通过' },
   { value: 'error', label: '失败' },
+  { value: 'flaky', label: '不稳定' },
 ]
+const HUMAN_OPTION: { value: Cls; label: string } = { value: 'pending_human', label: '待人工评审' }
 
 /** 当前（可能是实时更新后的）Item 是否符合筛选；用于实时更新后立刻隐藏不再符合的行 */
 export function itemMatchesClass(it: EvalItemOut, cls: Cls): boolean {
-  if (!cls) return true
+  // flaky（取决于同一用例的其他重复）、pending_human 由服务端判定，刷新列表前不在本地隐藏
+  if (!cls || cls === 'flaky' || cls === 'pending_human') return true
   const v = itemVerdict(it)
   if (cls === 'passed') return v === 'passed'
   if (cls === 'failed') return v === 'not_passed'
@@ -36,6 +39,7 @@ function ScoreCell({ item, evaluatorKey }: { item: EvalItemOut; evaluatorKey: st
   const s = item.scores.find((x) => x.evaluator_key === evaluatorKey)
   if (!s) return <span className="text-muted-foreground">-</span>
   if (s.status === 'error') return <Badge variant="warning" title={s.reason ?? undefined}>出错</Badge>
+  if (s.status === 'pending_human') return <Badge variant="secondary">待评审</Badge>
   return (
     <Badge variant={scoreTone(s.passed)} className="font-mono tabular-nums" title={s.reason ?? undefined}>
       {formatScore(s.score)}
@@ -56,6 +60,11 @@ export function EvalItemsTable({
   running,
   onOpen,
   selectedId,
+  hasHuman,
+  cls: clsProp,
+  onClsChange,
+  tag,
+  onTagChange,
 }: {
   runId: string
   evaluatorKeys: string[]
@@ -66,12 +75,23 @@ export function EvalItemsTable({
   running: boolean
   onOpen: (item: EvalItemOut) => void
   selectedId?: string | null
+  /** 有人工评审评估器时多出「待人工评审」筛选 */
+  hasHuman?: boolean
+  /** 结果筛选：传入则由外部控制（报告页的统计卡片可以直接跳到「不稳定」） */
+  cls?: Cls
+  onClsChange?: (c: Cls) => void
+  /** 按标签筛选（报告页的标签分组统计点击后设置） */
+  tag?: string
+  onTagChange?: (t: string) => void
 }) {
   const qc = useQueryClient()
-  const [cls, setCls] = useState<Cls>('')
+  const [clsState, setClsState] = useState<Cls>('')
+  const cls = clsProp ?? clsState
+  const setCls = (c: Cls) => (onClsChange ? onClsChange(c) : setClsState(c))
+  const clsOptions = hasHuman ? [...CLS_OPTIONS, HUMAN_OPTION] : CLS_OPTIONS
   const [q, setQ] = useState('')
   const dq = useDebouncedValue(q.trim(), 300)
-  const query = useEvalItems(runId, { cls, q: dq || undefined })
+  const query = useEvalItems(runId, { cls, q: dq || undefined, tag: tag || undefined })
   const fetched = useMemo(() => query.data?.pages.flatMap((p) => p.items) ?? [], [query.data])
   const rows = useMemo(
     () => fetched.map((r) => live[r.id] ?? r).filter((r) => itemMatchesClass(r, cls)),
@@ -117,7 +137,7 @@ export function EvalItemsTable({
     <div className="space-y-2" data-testid="eval-items">
       <div className="flex flex-wrap items-center gap-3">
         <div className="inline-flex rounded-md border border-border p-0.5" role="group" aria-label="结果筛选">
-          {CLS_OPTIONS.map((o) => (
+          {clsOptions.map((o) => (
             <button
               key={o.value}
               type="button"
@@ -134,6 +154,17 @@ export function EvalItemsTable({
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input className="pl-8" placeholder="搜索 case_key / 输入 / 输出…" aria-label="搜索用例" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
+        {tag && (
+          <button
+            type="button"
+            onClick={() => onTagChange?.('')}
+            className="inline-flex items-center gap-1 rounded border border-primary bg-primary/10 px-2 py-0.5 font-mono text-xs text-primary"
+            data-testid="tag-chip"
+            aria-label={`清除标签筛选 ${tag}`}
+          >
+            标签 {tag} ×
+          </button>
+        )}
         <span className="ml-auto text-xs text-muted-foreground" data-testid="items-count">
           已加载 {rows.length}
           {hasNextPage ? '+' : ''} 条
@@ -158,7 +189,7 @@ export function EvalItemsTable({
           {query.isLoading ? (
             <LoadingBlock />
           ) : rows.length === 0 ? (
-            <p className="py-10 text-center text-sm text-muted-foreground">{cls || dq ? '没有符合条件的用例' : running ? '等待用例执行…' : '没有用例'}</p>
+            <p className="py-10 text-center text-sm text-muted-foreground">{cls || dq || tag ? '没有符合条件的用例' : running ? '等待用例执行…' : '没有用例'}</p>
           ) : (
             <div ref={parentRef} className="h-[30rem] overflow-y-auto" data-testid="items-scroller">
               <div style={{ height: virt.getTotalSize(), position: 'relative' }}>

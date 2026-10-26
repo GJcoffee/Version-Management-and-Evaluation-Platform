@@ -5,7 +5,7 @@ import { ApiError } from '@/api/client'
 import type { EvalCompareCase, EvalRunOut } from '@/api/evalTypes'
 import { useEval, useEvalCompare, useEvals } from '@/api/queries/evals'
 import { CompareCaseDrawer } from '@/components/eval/CompareCaseDrawer'
-import { COMPARE_CLASSES, CompareSummary, WarningBar } from '@/components/eval/CompareSummary'
+import { COMPARE_TABS, CompareSummary, WarningBar } from '@/components/eval/CompareSummary'
 import { EvalStatusBadge } from '@/components/eval/EvalStatus'
 import {
   TONE_CLASS,
@@ -148,7 +148,7 @@ export default function EvalComparePage() {
 
           <Tabs value={cls} onValueChange={setCls}>
             <TabsList>
-              {COMPARE_CLASSES.map((c) => (
+              {COMPARE_TABS.map((c) => (
                 <TabsTrigger
                   key={c.key}
                   value={c.key}
@@ -185,7 +185,14 @@ export default function EvalComparePage() {
                       data-case-key={c.case_key}
                       data-class={c.class}
                     >
-                      <TableCell className="font-mono text-xs">{c.case_key}</TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {c.case_key}
+                        {c.flaky && (
+                          <Badge variant="warning" className="ml-1.5" title="重复间结果不稳定" data-testid="flaky-badge">
+                            不稳定
+                          </Badge>
+                        )}
+                      </TableCell>
                       <TableCell className="text-right font-mono text-xs tabular-nums">{formatScore(c.left?.score)}</TableCell>
                       <TableCell className="text-right font-mono text-xs tabular-nums">{formatScore(c.right?.score)}</TableCell>
                       <TableCell className={cn('text-right font-mono text-xs font-semibold tabular-nums', TONE_CLASS[tone])}>{formatSigned(c.delta, 2)}</TableCell>

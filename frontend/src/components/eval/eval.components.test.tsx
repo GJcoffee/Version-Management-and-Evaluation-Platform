@@ -99,7 +99,7 @@ function Harness({ initial }: { initial: EvaluatorForm[] }) {
 }
 
 describe('EvaluatorEditor', () => {
-  it('可添加四种评估器并删除；regex 缺少表达式时提示', async () => {
+  it('可添加各类评估器并删除；regex 缺少表达式时提示', async () => {
     render(qc(<Harness initial={[]} />))
     expect(screen.getByText('请至少添加一个评估器')).toBeInTheDocument()
     await userEvent.click(screen.getByTestId('add-evaluator-regex'))

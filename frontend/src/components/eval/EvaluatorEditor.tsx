@@ -76,17 +76,35 @@ function JudgeFields({ value, onChange }: { value: EvaluatorForm; onChange: (pat
       <Field label="评审提示词" required hint="变量：input、output、expected、rubric；要求模型只输出 {&quot;score&quot;: 整数, &quot;reason&quot;: &quot;…&quot;}">
         <AssetRefPicker kind="prompt" value={value.prompt} onChange={(ref) => onChange({ prompt: ref })} />
       </Field>
-      <div className="grid grid-cols-3 gap-3">
-        <Field label="量程最小值">
-          <Input type="number" aria-label="量程最小值" value={value.scaleMin} onChange={(e) => onChange({ scaleMin: e.target.value })} />
-        </Field>
-        <Field label="量程最大值">
-          <Input type="number" aria-label="量程最大值" value={value.scaleMax} onChange={(e) => onChange({ scaleMax: e.target.value })} />
-        </Field>
-        <Field label="通过阈值" hint="留空取量程 60% 处">
-          <Input type="number" aria-label="通过阈值" value={value.passThreshold} onChange={(e) => onChange({ passThreshold: e.target.value })} />
-        </Field>
-      </div>
+      <ScaleFields value={value} onChange={onChange} />
+      <Field label="采样次数 samples" hint="同一条回复评审多次取平均分，可降低评审波动；1–10，次数越多成本越高">
+        <Input
+          type="number"
+          min={1}
+          max={10}
+          aria-label="采样次数"
+          className="w-28"
+          value={value.samples}
+          onChange={(e) => onChange({ samples: e.target.value })}
+        />
+      </Field>
+    </div>
+  )
+}
+
+/** 量程与通过阈值（LLM 评审、人工评审共用） */
+function ScaleFields({ value, onChange }: { value: EvaluatorForm; onChange: (patch: Partial<EvaluatorForm>) => void }) {
+  return (
+    <div className="grid grid-cols-3 gap-3">
+      <Field label="量程最小值">
+        <Input type="number" aria-label="量程最小值" value={value.scaleMin} onChange={(e) => onChange({ scaleMin: e.target.value })} />
+      </Field>
+      <Field label="量程最大值">
+        <Input type="number" aria-label="量程最大值" value={value.scaleMax} onChange={(e) => onChange({ scaleMax: e.target.value })} />
+      </Field>
+      <Field label="通过阈值" hint="留空取量程 60% 处">
+        <Input type="number" aria-label="通过阈值" value={value.passThreshold} onChange={(e) => onChange({ passThreshold: e.target.value })} />
+      </Field>
     </div>
   )
 }
@@ -173,13 +191,79 @@ function EvaluatorCard({
           </div>
         </>
       )}
+      {value.type === 'json_schema' && (
+        <>
+          <Field label="JSON Schema" required hint="从回复中提取 JSON 后按此 Schema（Draft 2020-12）校验">
+            <Textarea
+              rows={6}
+              mono
+              aria-label="JSON Schema"
+              value={value.schemaText}
+              onChange={(e) => onChange({ schemaText: e.target.value })}
+              spellCheck={false}
+            />
+          </Field>
+          <Field label="提取方式">
+            <Select aria-label="提取方式" className="w-56" value={value.extract} onChange={(e) => onChange({ extract: e.target.value as 'auto' | 'codeblock' })}>
+              <option value="auto">自动（整段或代码块）</option>
+              <option value="codeblock">只取代码块</option>
+            </Select>
+          </Field>
+        </>
+      )}
+      {value.type === 'trace' && (
+        <>
+          <p className="text-xs text-muted-foreground">基于执行轨迹检查 agent 的行为；所有已设置的断言都满足才算通过，至少设置一项。</p>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="必须调用的工具" hint="每行一个工具名">
+              <Textarea rows={2} mono aria-label="必须调用的工具" value={value.toolCalled} onChange={(e) => onChange({ toolCalled: e.target.value })} placeholder="query_order" />
+            </Field>
+            <Field label="不能调用的工具" hint="每行一个工具名">
+              <Textarea rows={2} mono aria-label="不能调用的工具" value={value.toolNotCalled} onChange={(e) => onChange({ toolNotCalled: e.target.value })} placeholder="delete_order" />
+            </Field>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="步数上限" hint="留空 = 不限">
+              <Input type="number" min={0} aria-label="步数上限" value={value.maxSteps} onChange={(e) => onChange({ maxSteps: e.target.value })} />
+            </Field>
+            <Field label="耗时上限（ms）" hint="留空 = 不限">
+              <Input type="number" min={0} aria-label="耗时上限" value={value.maxLatencyMs} onChange={(e) => onChange({ maxLatencyMs: e.target.value })} />
+            </Field>
+            <Field label="tokens 上限" hint="留空 = 不限">
+              <Input type="number" min={0} aria-label="tokens 上限" value={value.maxTokens} onChange={(e) => onChange({ maxTokens: e.target.value })} />
+            </Field>
+          </div>
+        </>
+      )}
+      {value.type === 'python' && (
+        <>
+          <div className="grid grid-cols-[1fr_8rem] gap-3">
+            <Field label="入口函数" required hint="module:function；签名 func(case, transcript) 返回 {score, passed, reason}">
+              <Input mono aria-label="入口函数" value={value.entry} onChange={(e) => onChange({ entry: e.target.value })} placeholder="my_evals:check_refund" />
+            </Field>
+            <Field label="超时（秒）">
+              <Input type="number" min={1} aria-label="超时" value={value.timeoutS} onChange={(e) => onChange({ timeoutS: e.target.value })} />
+            </Field>
+          </div>
+          <p className="text-xs text-warning">函数会在本机子进程中执行，只运行你信任的代码。</p>
+        </>
+      )}
       {value.type === 'llm_judge' && <JudgeFields value={value} onChange={onChange} />}
+      {value.type === 'human' && (
+        <>
+          <Field label="评审标准" hint="在人工评审页常驻显示，给评审人打分时参考">
+            <Textarea rows={3} aria-label="评审标准" value={value.guideline} onChange={(e) => onChange({ guideline: e.target.value })} placeholder="例如：回复是否礼貌、是否解决了用户的问题" />
+          </Field>
+          <ScaleFields value={value} onChange={onChange} />
+          <p className="text-xs text-muted-foreground">评测结束后到「人工评审」页逐条打分；打分前该评分为待评审，不计入汇总。默认不参与通过判定，需要时勾选「参与通过判定」。</p>
+        </>
+      )}
       {error && <p className="text-xs text-danger">{error}</p>}
     </div>
   )
 }
 
-/** 评估器编辑器：可添加四种评估器，每种有对应表单。`showErrors` 为 true 时显示校验错误 */
+/** 评估器编辑器：可添加八种评估器，每种有对应表单。`showErrors` 为 true 时显示校验错误 */
 export function EvaluatorEditor({
   value,
   onChange,

@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { useAgent, useAgents } from '@/api/queries/agents'
 import { useAssetRevisions, useAssets } from '@/api/queries/assets'
 import { useDatasetCases } from '@/api/queries/datasets'
-import { useCreateEval } from '@/api/queries/evals'
+import { useCreateEval, useEstimateEval } from '@/api/queries/evals'
+import type { EvalCreateRequest, EvalEstimate } from '@/api/evalTypes'
 import { useVersions } from '@/api/queries/versions'
 import type { VersionSummary } from '@/api/types'
 import { AssetRefPicker } from '@/components/AssetRefPicker'
@@ -17,7 +18,8 @@ import { parseAssetRef } from '@/lib/assetRef'
 import { cn } from '@/lib/cn'
 import { toast } from '@/stores/toast'
 import { EvaluatorEditor } from './EvaluatorEditor'
-import { evaluatorToInput, newEvaluatorForm, validateEvaluators, type EvaluatorForm } from './evalUtils'
+import { EstimatePanel } from './EstimatePanel'
+import { evaluatorToInput, newEvaluatorForm, parseBudgetInput, validateEvaluators, type EvaluatorForm } from './evalUtils'
 
 /** 版本选项的键：`ver:<id>` | `tag:<名称>` | `latest` */
 export function versionRefsFromSelection(selection: readonly string[], agentName: string): string[] {
@@ -67,6 +69,7 @@ export interface NewEvalDialogProps {
 export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClose }: NewEvalDialogProps) {
   const navigate = useNavigate()
   const create = useCreateEval()
+  const estimateMut = useEstimateEval()
   const [pickedAgent, setPickedAgent] = useState('')
   const agentId = fixedAgentId ?? pickedAgent
   const agents = useAgents()
@@ -81,6 +84,9 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
   const [evaluators, setEvaluators] = useState<EvaluatorForm[]>(() => [newEvaluatorForm('exact_match', [])])
   const [repeats, setRepeats] = useState('1')
   const [concurrency, setConcurrency] = useState('8')
+  const [maxCost, setMaxCost] = useState('')
+  const [maxTokens, setMaxTokens] = useState('')
+  const [estimate, setEstimate] = useState<{ key: string; data: EvalEstimate } | null>(null)
   const [showErrors, setShowErrors] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -106,23 +112,53 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
   if (!dataset) problems.push('请选择数据集')
   if (repeatsN === null) problems.push('重复次数必须是不小于 1 的整数')
   if (concurrencyN === null) problems.push('并发数必须是不小于 1 的整数')
+  const maxCostN = parseBudgetInput(maxCost, false)
+  const maxTokensN = parseBudgetInput(maxTokens, true)
+  if (maxCostN === 'invalid') problems.push('成本上限必须是不小于 0 的数字')
+  if (maxTokensN === 'invalid') problems.push('tokens 上限必须是不小于 0 的整数')
   const evValidation = validateEvaluators(evaluators)
   const evInvalid = !!evValidation.global || Object.keys(evValidation.byUid).length > 0
+
+  /** 表单已通过校验时生成请求体，否则返回 null */
+  const buildRequest = (): EvalCreateRequest | null => {
+    if (problems.length > 0 || evInvalid || !agent.data || !dataset) return null
+    const budget: NonNullable<EvalCreateRequest['budget']> = {}
+    if (typeof maxCostN === 'number') budget.max_cost = maxCostN
+    if (typeof maxTokensN === 'number') budget.max_tokens = maxTokensN
+    return {
+      name: name.trim() || undefined,
+      version_ids: versionRefsFromSelection(selection, agent.data.name),
+      dataset,
+      case_filter: tagFilter.length > 0 ? { tags: tagFilter } : undefined,
+      evaluators: evaluators.map(evaluatorToInput),
+      repeats: repeatsN!,
+      concurrency: concurrencyN!,
+      budget: Object.keys(budget).length > 0 ? budget : undefined,
+    }
+  }
+  const currentKey = JSON.stringify(buildRequest())
+
+  const runEstimate = async () => {
+    setShowErrors(true)
+    setError(null)
+    const req = buildRequest()
+    if (!req) return
+    try {
+      const r = await estimateMut.mutateAsync(req)
+      if (r.estimate) setEstimate({ key: JSON.stringify(req), data: r.estimate })
+    } catch (e) {
+      const f = formatApiError(e, '成本预估失败')
+      setError([f.message, ...f.lines].join('\n'))
+    }
+  }
 
   const submit = async () => {
     setShowErrors(true)
     setError(null)
-    if (problems.length > 0 || evInvalid || !agent.data || !dataset) return
+    const req = buildRequest()
+    if (!req) return
     try {
-      const r = await create.mutateAsync({
-        name: name.trim() || undefined,
-        version_ids: versionRefsFromSelection(selection, agent.data.name),
-        dataset,
-        case_filter: tagFilter.length > 0 ? { tags: tagFilter } : undefined,
-        evaluators: evaluators.map(evaluatorToInput),
-        repeats: repeatsN!,
-        concurrency: concurrencyN!,
-      })
+      const r = await create.mutateAsync(req)
       toast.success(r.runs.length > 1 ? `已发起 ${r.runs.length} 个评测` : '已发起评测')
       onClose()
       navigate(`/evals/${r.runs[0].id}`)
@@ -146,6 +182,9 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
           {showErrors && problems.length > 0 && <span className="mr-auto text-xs text-danger">{problems[0]}</span>}
           <Button variant="outline" onClick={onClose}>
             取消
+          </Button>
+          <Button variant="outline" onClick={() => void runEstimate()} loading={estimateMut.isPending} data-testid="estimate-eval">
+            预估成本
           </Button>
           <Button onClick={() => void submit()} loading={create.isPending} data-testid="submit-eval">
             开始评测{selection.length > 1 ? `（${selection.length} 个版本）` : ''}
@@ -279,6 +318,20 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
               <Input id="ne-conc" type="number" min={1} value={concurrency} onChange={(e) => setConcurrency(e.target.value)} />
             </Field>
           </div>
+          <div className="grid grid-cols-3 gap-3">
+            <Field
+              label="成本上限（元）"
+              htmlFor="ne-max-cost"
+              hint="可选；按本次新增成本（缓存命中不计）算，超出后自动暂停"
+              error={showErrors && maxCostN === 'invalid' ? '请输入不小于 0 的数字' : null}
+            >
+              <Input id="ne-max-cost" type="number" min={0} step="any" value={maxCost} onChange={(e) => setMaxCost(e.target.value)} placeholder="不限制" />
+            </Field>
+            <Field label="tokens 上限" htmlFor="ne-max-tokens" hint="可选；同样只算新增消耗" error={showErrors && maxTokensN === 'invalid' ? '请输入不小于 0 的整数' : null}>
+              <Input id="ne-max-tokens" type="number" min={0} value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="不限制" />
+            </Field>
+          </div>
+          {estimate && <EstimatePanel estimate={estimate.data} stale={estimate.key !== currentKey} />}
         </section>
 
         {error && (

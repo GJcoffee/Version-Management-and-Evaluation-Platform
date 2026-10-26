@@ -681,7 +681,18 @@ HTTP 状态恒为 200（版本不存在 404），agent 的任何问题都体现�
 | GET | `/evals/{id}/stream` | SSE |
 | GET | `/evals/compare?left=&right=&threshold=0.05&class=&limit=&cursor=` | 两次评测逐用例对比 |
 
-契约之外保留的接口（详设 8，一期前端 / CLI 不依赖）：`pause`、`resume`、`retry-failed`、`rescore`、`human-scores`、`gate`，以及 `POST /evals?dry_run=true`。
+契约之外的接口（详设 8，评测报告页、发起评测对话框和人工评审页使用）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/evals/{id}/pause`、`/evals/{id}/resume` | 暂停 / 继续；返回 Run。暂停原因在 `pause_reason`（`manual` / `budget`）；因预算暂停时 `resume` 可带 `{"budget": {"max_cost", "max_tokens"}}` 调高预算，仍超出则 409 |
+| POST | `/evals/{id}/retry-failed` | 失败的 Item 重新入队，返回 `{retried}`；`completed*` 的 Run 会回到 `running` |
+| POST | `/evals/{id}/rescore` | 仅重新评分，请求体 `{evaluators?, dataset?}`，返回 `{rescored_items, evaluators_changed, rebased}`；只有 `completed` / `completed_with_errors` 可用，按 `evaluator_hash` 只重算有变化或出错的评估器 |
+| POST | `/evals/{id}/human-scores` | 请求体 `{scores: [{item_id, evaluator_key, raw_score, reason?, annotator?}]}`，整批生效或整批不生效，返回 `{updated}`；待评分的 Item 用 `GET /evals/{id}/items?class=pending_human` 取 |
+| GET | `/evals/{id}/gate?baseline=&max_regressions=0&min_pass_rate=&threshold=0.05` | CI 门禁，始终 200，返回 `{passed, reasons, summary}` |
+| POST | `/evals?dry_run=true` | 只返回 `estimate`（200），不创建 |
+
+`EvalRun.budget` 为 `{max_cost, max_tokens}`；SSE 的 `eval.status` 带 `pause_reason`。
 
 ### EvalRun / EvalItem 的附加字段
 

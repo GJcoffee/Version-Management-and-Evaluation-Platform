@@ -1,19 +1,24 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { GitCompare, OctagonX, WifiOff } from 'lucide-react'
+import { ClipboardCheck, GitCompare, OctagonX, WifiOff } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import type { EvalItemOut, EvalRunDetailOut } from '@/api/evalTypes'
-import { evalKeys, useCancelEval, useEval, useEvals } from '@/api/queries/evals'
+import { evalKeys, useCancelEval, useEval, useEvals, type EvalItemFilter } from '@/api/queries/evals'
 import { EvalItemDrawer } from '@/components/eval/EvalItemDrawer'
 import { EvalItemsTable } from '@/components/eval/EvalItemsTable'
 import { EvalProgressBar, EvalStatusBadge } from '@/components/eval/EvalStatus'
+import { GatePanel } from '@/components/eval/GatePanel'
 import { MetricCards } from '@/components/eval/MetricCards'
+import { PauseNotice, RunControls } from '@/components/eval/RunControls'
+import { StatsPanel } from '@/components/eval/StatsPanel'
 import { useEvalStream } from '@/components/eval/useEvalStream'
 import {
   compareHref,
+  describeBudget,
   describeEvaluator,
   isRunActive,
+  pendingHumanCount,
   orderForCompare,
   passRateText,
   runDatasetLabel,
@@ -28,6 +33,8 @@ import { RelativeTime } from '@/components/ui/RelativeTime'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { formatApiError } from '@/lib/apiError'
 import { toast } from '@/stores/toast'
+
+type ItemCls = NonNullable<EvalItemFilter['cls']>
 
 export default function EvalReportPage() {
   const { id } = useParams()
@@ -50,13 +57,23 @@ export default function EvalReportPage() {
 function ReportView({ run }: { run: EvalRunDetailOut }) {
   const qc = useQueryClient()
   // 进入页面时是否在进行中，决定是否订阅 SSE（结束后保持连接状态，避免状态被重置）
-  const [subscribe] = useState(() => isRunActive(run.status))
+  const [subscribe, setSubscribe] = useState(() => isRunActive(run.status))
   const stream = useEvalStream(run.id, subscribe)
   const live = stream.state
   const status = live.status ?? run.status
   const progress = live.progress ?? run.progress
   const stats = live.stats ?? run.stats
   const active = isRunActive(status)
+  const pauseReason = status === 'paused' ? (live.pauseReason ?? run.pause_reason ?? progress.pause_reason ?? null) : null
+  // 已结束的评测被「重跑失败项 / 重新评分」重新拉起后，需要重新订阅实时进度
+  const reactivate = () => {
+    setSubscribe(true)
+    stream.reopen()
+  }
+  const [itemCls, setItemCls] = useState<ItemCls>('')
+  const [itemTag, setItemTag] = useState('')
+  const hasHuman = run.evaluators.some((e) => e.type === 'human')
+  const pendingHuman = pendingHumanCount(stats)
 
   // 到达终态后刷新详情（finished_at、stats）和用例列表
   const terminal = live.status !== null && !isRunActive(live.status)
@@ -93,12 +110,34 @@ function ReportView({ run }: { run: EvalRunDetailOut }) {
             {runTitle(run)}
           </h1>
           <EvalStatusBadge status={status} />
-          {active && (
-            <Button size="sm" variant="outline" className="ml-auto" onClick={() => setConfirmCancel(true)} data-testid="cancel-eval">
-              <OctagonX className="h-3.5 w-3.5" />
-              取消评测
-            </Button>
-          )}
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            {hasHuman && status !== 'queued' && (
+              <Link
+                to={`/evals/${run.id}/annotate`}
+                data-testid="open-annotate"
+                className="inline-flex h-7 items-center gap-1 rounded-md border border-input bg-background px-2.5 text-xs font-medium hover:bg-accent"
+              >
+                <ClipboardCheck className="h-3.5 w-3.5" />
+                人工评审{pendingHuman > 0 ? `（待评 ${pendingHuman}）` : ''}
+              </Link>
+            )}
+            <RunControls
+              runId={run.id}
+              status={status}
+              pauseReason={pauseReason}
+              progress={progress}
+              failedCount={progress.failed ?? stats?.failed ?? 0}
+              budget={run.budget}
+              evaluators={run.evaluators}
+              onReactivated={reactivate}
+            />
+            {active && (
+              <Button size="sm" variant="outline" onClick={() => setConfirmCancel(true)} data-testid="cancel-eval">
+                <OctagonX className="h-3.5 w-3.5" />
+                取消评测
+              </Button>
+            )}
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <span>
@@ -117,6 +156,11 @@ function ReportView({ run }: { run: EvalRunDetailOut }) {
           <span>
             重复 <span className="font-mono text-foreground">{run.repeats}</span> · 并发 <span className="font-mono text-foreground">{run.concurrency}</span>
           </span>
+          {describeBudget(run.budget) && (
+            <span data-testid="run-budget">
+              预算 <span className="font-mono text-foreground">{describeBudget(run.budget)}</span>
+            </span>
+          )}
           <span>
             创建 <RelativeTime value={run.created_at} />
           </span>
@@ -136,6 +180,7 @@ function ReportView({ run }: { run: EvalRunDetailOut }) {
         </div>
       </div>
 
+      <PauseNotice status={status} reason={pauseReason} budget={run.budget} progress={progress} />
       {run.error && <p className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">{run.error}</p>}
       {subscribe && stream.status === 'reconnecting' && (
         <div role="status" className="flex items-center gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-1.5 text-xs text-warning">
@@ -192,8 +237,25 @@ function ReportView({ run }: { run: EvalRunDetailOut }) {
         </Card>
       )}
 
+      {hasHuman && pendingHuman > 0 && (
+        <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning" data-testid="pending-human">
+          有 {pendingHuman} 条评分在等待人工评审，打分前不计入通过判定与汇总指标。
+          <Link to={`/evals/${run.id}/annotate`} className="ml-1 font-medium underline">
+            去评审
+          </Link>
+        </p>
+      )}
+
       {stats ? (
-        <MetricCards stats={stats} />
+        <>
+          <MetricCards stats={stats} />
+          <StatsPanel
+            stats={stats}
+            activeTag={itemTag}
+            onShowFlaky={() => setItemCls('flaky')}
+            onPickTag={(t) => setItemTag((cur) => (cur === t ? '' : t))}
+          />
+        </>
       ) : (
         <p className="text-xs text-muted-foreground">评测结束后显示通过率、评估器均值、延迟、tokens 和成本等汇总指标。</p>
       )}
@@ -207,7 +269,14 @@ function ReportView({ run }: { run: EvalRunDetailOut }) {
         running={active}
         onOpen={setOpened}
         selectedId={opened?.id}
+        hasHuman={hasHuman}
+        cls={itemCls}
+        onClsChange={setItemCls}
+        tag={itemTag}
+        onTagChange={setItemTag}
       />
+
+      <GatePanel run={run} />
 
       <EvalItemDrawer runId={run.id} item={openedLive} onClose={() => setOpened(null)} />
 
