@@ -2,9 +2,15 @@ import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClie
 import { api } from '../client'
 import {
   EVAL_ACTIVE_STATUSES,
+  type EvalBudget,
   type EvalCompareOut,
   type EvalCreateRequest,
   type EvalCreated,
+  type EvalGateParams,
+  type EvalGateResult,
+  type EvalHumanScoreEntry,
+  type EvalRescoreResult,
+  type EvaluatorInput,
   type EvalItemDetailOut,
   type EvalItemOut,
   type EvalRunDetailOut,
@@ -71,9 +77,11 @@ export function useEval(id: string | undefined, opts: { pollMs?: number } = {}) 
 }
 
 export interface EvalItemFilter {
-  /** passed：通过；failed：评分未通过；error：执行失败或评估器出错 */
-  cls?: 'passed' | 'failed' | 'error' | ''
+  /** passed：通过；failed：评分未通过；error：执行失败或评估器出错；flaky：重复结果不一致；pending_human：等待人工打分 */
+  cls?: 'passed' | 'failed' | 'error' | 'flaky' | 'pending_human' | ''
   q?: string
+  /** 只看含该标签的用例 */
+  tag?: string
 }
 
 /** 用例（Item）列表，游标分页，供虚拟滚动逐页加载 */
@@ -82,7 +90,7 @@ export function useEvalItems(runId: string | undefined, filter: EvalItemFilter =
     queryKey: [...evalKeys.items(runId ?? '', filter), limit],
     queryFn: ({ pageParam }) =>
       api.get<Page<EvalItemOut>>(`/evals/${runId}/items`, {
-        query: { class: filter.cls, q: filter.q, limit, cursor: pageParam },
+        query: { class: filter.cls, q: filter.q, tag: filter.tag, limit, cursor: pageParam },
       }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
@@ -108,6 +116,14 @@ export function useCreateEval() {
   })
 }
 
+/** 成本预估：dry_run=true，只返回 estimate，不创建评测 */
+export function useEstimateEval() {
+  return useMutation({
+    mutationFn: (body: EvalCreateRequest) =>
+      api.post<EvalCreated>('/evals', { query: { dry_run: true }, body: { via: 'ui', ...body } }),
+  })
+}
+
 export function useCancelEval() {
   const qc = useQueryClient()
   return useMutation({
@@ -128,5 +144,54 @@ export function useEvalCompare(left: string | undefined, right: string | undefin
     getNextPageParam: (last) => last.cases.next_cursor ?? undefined,
     enabled: !!left && !!right && left !== right,
     placeholderData: keepPreviousData,
+  })
+}
+
+// ───────────────────────────── 运行控制 ─────────────────────────────
+
+/** 暂停 / 继续 / 重跑失败项 / 重新评分 都会改变 run 的状态与进度：成功后刷新评测相关的全部查询 */
+function useRunAction<V, R>(fn: (id: string, v: V) => Promise<R>) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...v }: { id: string } & V) => fn(id, v as V),
+    onSuccess: () => qc.invalidateQueries({ queryKey: evalKeys.all }),
+  })
+}
+
+export function usePauseEval() {
+  return useRunAction<object, EvalRunDetailOut>((id) => api.post<EvalRunDetailOut>(`/evals/${id}/pause`))
+}
+
+/** 继续；因预算暂停时可同时调高预算 */
+export function useResumeEval() {
+  return useRunAction<{ budget?: EvalBudget }, EvalRunDetailOut>((id, v) =>
+    api.post<EvalRunDetailOut>(`/evals/${id}/resume`, { body: v.budget ? { budget: v.budget } : {} }),
+  )
+}
+
+/** 把执行失败的 Item 重新放回队列 */
+export function useRetryFailed() {
+  return useRunAction<object, { retried: number }>((id) => api.post<{ retried: number }>(`/evals/${id}/retry-failed`))
+}
+
+/** 仅重新评分：`evaluators` 省略时只重算出错 / 过期的评分 */
+export function useRescoreEval() {
+  return useRunAction<{ evaluators?: EvaluatorInput[] }, EvalRescoreResult>((id, v) =>
+    api.post<EvalRescoreResult>(`/evals/${id}/rescore`, { body: v.evaluators ? { evaluators: v.evaluators } : {} }),
+  )
+}
+
+/** 提交人工评分（批量，要么全部生效要么全部不生效） */
+export function useSubmitHumanScores() {
+  return useRunAction<{ scores: EvalHumanScoreEntry[] }, { updated: number }>((id, v) =>
+    api.post<{ updated: number }>(`/evals/${id}/human-scores`, { body: { scores: v.scores } }),
+  )
+}
+
+/** CI 门禁检查：始终 200，结论在 `passed` 里 */
+export function useEvalGate() {
+  return useMutation({
+    mutationFn: ({ id, ...params }: { id: string } & EvalGateParams) =>
+      api.get<EvalGateResult>(`/evals/${id}/gate`, { query: { ...params } }),
   })
 }

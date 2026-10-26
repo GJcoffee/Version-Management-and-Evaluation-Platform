@@ -3,7 +3,7 @@ import type { EvalCompareOut, EvalStatsOut } from '@/api/evalTypes'
 import { Card, CardContent } from '@/components/ui/Card'
 import { cn } from '@/lib/cn'
 import { formatCost, formatDuration, formatPercent, formatTokens } from '@/lib/format'
-import { TONE_CLASS, deltaTone, formatSigned, formatSignedPercent } from './evalUtils'
+import { TONE_CLASS, deltaTone, formatPValue, formatSigned, formatSignedPercent, interpretCi, interpretSignTest } from './evalUtils'
 
 export const COMPARE_CLASSES = [
   { key: 'regressed', label: '退化', tone: 'bad' },
@@ -12,6 +12,9 @@ export const COMPARE_CLASSES = [
   { key: 'new', label: '新增', tone: 'neutral' },
   { key: 'missing', label: '缺失', tone: 'neutral' },
 ] as const
+
+/** 对比页的分类页签：在计数卡片的分类之外加上「不稳定」 */
+export const COMPARE_TABS = [...COMPARE_CLASSES, { key: 'flaky', label: '不稳定', tone: 'neutral' }] as const
 
 export function WarningBar({ warnings }: { warnings: string[] }) {
   if (warnings.length === 0) return null
@@ -112,6 +115,7 @@ export function CompareSummary({ data }: { data: EvalCompareOut }) {
           </CardContent>
         </Card>
       </div>
+      <StatisticalConclusion summary={summary} />
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {rows.map((r) => {
           const tone = deltaTone(r.delta, r.higherIsBetter)
@@ -131,6 +135,52 @@ export function CompareSummary({ data }: { data: EvalCompareOut }) {
           )
         })}
       </div>
+    </div>
+  )
+}
+
+/** 统计结论：平均 Δ 的配对 bootstrap 95% 置信区间、胜/平/负与符号检验 p 值 */
+export function StatisticalConclusion({ summary }: { summary: EvalCompareOut['summary'] }) {
+  const ci = summary.ci95 ?? null
+  const wins = summary.wins ?? summary.improved
+  const ties = summary.ties ?? summary.unchanged
+  const losses = summary.losses ?? summary.regressed
+  const ciSig = interpretCi(ci)
+  const pSig = interpretSignTest(summary.sign_test_p, wins, losses)
+  return (
+    <div className="grid gap-3 md:grid-cols-2" data-testid="stat-conclusion">
+      <Card data-testid="ci95" data-tone={ciSig.tone}>
+        <CardContent className="pt-4">
+          <div className="text-xs text-muted-foreground">平均 Δ 的 95% 置信区间（配对 bootstrap，基于 {summary.paired ?? '-'} 个可配对用例）</div>
+          <div className={cn('mt-1 font-mono text-lg font-semibold tabular-nums', TONE_CLASS[ciSig.tone])} data-testid="ci95-value">
+            {ci ? `[${formatSigned(ci[0], 3)}, ${formatSigned(ci[1], 3)}]` : '-'}
+          </div>
+          <p className="mt-0.5 text-xs text-muted-foreground">{ciSig.text}</p>
+        </CardContent>
+      </Card>
+      <Card data-testid="sign-test" data-tone={pSig.tone}>
+        <CardContent className="pt-4">
+          <div className="text-xs text-muted-foreground">
+            胜 / 平 / 负 与符号检验 p 值
+            <span className="ml-1">（胜 = 改善，负 = 退化）</span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-baseline gap-x-4 font-mono">
+            <span className="text-lg font-semibold tabular-nums" data-testid="wtl">
+              <span className="text-success">{wins}</span> / {ties} / <span className="text-danger">{losses}</span>
+            </span>
+            <span className={cn('text-lg font-semibold tabular-nums', TONE_CLASS[pSig.tone])} data-testid="sign-p">
+              p = {formatPValue(summary.sign_test_p)}
+            </span>
+          </div>
+          <p className="mt-0.5 text-xs text-muted-foreground">{pSig.text}</p>
+        </CardContent>
+      </Card>
+      {((summary.flaky ?? 0) > 0 || (summary.unscored ?? 0) > 0) && (
+        <p className="text-xs text-muted-foreground md:col-span-2" data-testid="stat-footnote">
+          {(summary.flaky ?? 0) > 0 && <span>有 {summary.flaky} 个用例在重复间结果不稳定，对比时需谨慎。</span>}
+          {(summary.unscored ?? 0) > 0 && <span> 另有 {summary.unscored} 个用例某一侧没有可用分数，未计入统计。</span>}
+        </p>
+      )}
     </div>
   )
 }

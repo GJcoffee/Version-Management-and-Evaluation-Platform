@@ -75,6 +75,7 @@ describe('用例结论与筛选', () => {
   it('结论', () => {
     expect(itemVerdict(item({}))).toBe('passed')
     expect(itemVerdict(item({ passed: false }))).toBe('not_passed')
+    expect(itemVerdict(item({ passed: null }))).toBe('unscored')
     expect(itemVerdict(item({ status: 'failed', passed: null }))).toBe('failed')
     expect(itemVerdict(item({ status: 'running', passed: null }))).toBe('pending')
   })

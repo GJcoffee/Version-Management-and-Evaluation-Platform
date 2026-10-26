@@ -43,6 +43,8 @@ export function ScoreList({ scores }: { scores: EvalScoreOut[] }) {
             <span className="ml-auto flex items-center gap-2">
               {s.status === 'error' ? (
                 <Badge variant="warning">评分出错</Badge>
+              ) : s.status === 'pending_human' ? (
+                <Badge variant="warning">待人工评审</Badge>
               ) : (
                 <>
                   <span className="font-mono text-sm tabular-nums">{formatScore(s.score)}</span>
@@ -53,6 +55,8 @@ export function ScoreList({ scores }: { scores: EvalScoreOut[] }) {
             </span>
           </div>
           {s.reason && <p className="mt-1.5 whitespace-pre-wrap text-xs text-muted-foreground">{s.reason}</p>}
+          {s.annotator && <p className="mt-1 text-xs text-muted-foreground">评审人：{s.annotator}</p>}
+          {s.stale && <p className="mt-1 text-xs text-warning">评估器配置已变化，这个评分尚未重新计算</p>}
         </li>
       ))}
     </ul>

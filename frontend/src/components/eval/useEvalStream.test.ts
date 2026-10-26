@@ -54,4 +54,18 @@ describe('evalStreamReducer', () => {
     expect(s.items.evi_1.passed).toBe(true)
     expect(s.itemDoneCount).toBe(3)
   })
+
+  it('暂停原因：status=paused 带 pause_reason，继续后清空；budget_exceeded 事件也会置为 budget', () => {
+    let s = evalStreamReducer(initialEvalStreamState, { type: 'eval.status', run_id: 'r', status: 'paused', pause_reason: 'manual', stats: null })
+    expect(s.pauseReason).toBe('manual')
+    s = evalStreamReducer(s, { type: 'eval.status', run_id: 'r', status: 'running', pause_reason: null, stats: null })
+    expect(s.pauseReason).toBeNull()
+    s = evalStreamReducer(s, { type: 'eval.budget_exceeded', run_id: 'r', max_cost: 1, cost: 1.2 })
+    expect(s.pauseReason).toBe('budget')
+    s = evalStreamReducer(s, { type: 'eval.status', run_id: 'r', status: 'paused', pause_reason: 'budget', stats: null })
+    expect(s.pauseReason).toBe('budget')
+    // 后续没有 pause_reason 的暂停快照不应丢掉已知原因
+    s = evalStreamReducer(s, { type: 'eval.status', run_id: 'r', status: 'paused', stats: null })
+    expect(s.pauseReason).toBe('budget')
+  })
 })
