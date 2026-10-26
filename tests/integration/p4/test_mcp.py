@@ -17,6 +17,8 @@ from tests.integration.p4 import mocks
 TOOLS = {
     "push_draft", "pull_draft", "publish_version", "list_versions", "diff_versions",
     "chat", "run_eval", "get_eval_report", "get_eval_compare",
+    "list_agents", "get_draft", "update_draft", "list_assets", "upsert_asset", "import_dataset",
+    "get_eval_status", "get_session", "replay_session", "compare_sessions",
 }  # fmt: skip
 MOCK_API = "http://test/api/v1"
 
@@ -38,7 +40,7 @@ def mock_server(project_dir):
         yield server, m
 
 
-async def test_registers_exactly_the_nine_tools(project_dir):
+async def test_registers_exactly_the_nineteen_tools(project_dir):
     server = build_server(project_dir=project_dir)
     async with Client(server) as c:
         tools = (await c.list_tools()).tools
@@ -46,7 +48,9 @@ async def test_registers_exactly_the_nine_tools(project_dir):
     for t in tools:
         assert t.description and t.input_schema["type"] == "object"
     run_eval = next(t for t in tools if t.name == "run_eval")
-    assert run_eval.input_schema["required"] == ["dataset"]  # 其余参数都可以省略
+    assert not run_eval.input_schema.get("required")  # 全部参数都可以省略（dataset 等取 [eval] 默认值）
+    update = next(t for t in tools if t.name == "update_draft")
+    assert update.input_schema["required"] == ["patch", "expected_revision"]
 
 
 async def test_push_and_list_versions_against_real_app(project_dir, client, provider):

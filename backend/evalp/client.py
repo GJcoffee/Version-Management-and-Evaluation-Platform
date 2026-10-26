@@ -172,14 +172,21 @@ class EvalpClient:
         json_body: Any = None,
         timeout: float | None = None,
         raw: bool = False,
+        files: dict[str, tuple[str, bytes]] | None = None,
     ) -> Any:
-        """发请求并返回 JSON；失败抛 :class:`EvalpClientError`。``raw=True`` 时 path 不加 /api/v1 前缀。"""
+        """发请求并返回 JSON；失败抛 :class:`EvalpClientError`。``raw=True`` 时 path 不加 /api/v1 前缀。
+
+        ``files`` 非空时以 multipart 上传（``{字段名: (文件名, 内容)}``）。"""
         url = path if raw else f"{API_PREFIX}{path}"
         kw: dict[str, Any] = {}
         if timeout is not None:
             kw["timeout"] = httpx.Timeout(timeout, connect=5.0)
         try:
-            resp = await self._http.request(method, url, params=_clean(params), json=json_body, **kw)
+            if files:
+                kw["files"] = files
+            else:
+                kw["json"] = json_body
+            resp = await self._http.request(method, url, params=_clean(params), **kw)
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             raise ServerUnavailable(self.base_url, str(e)) from e
         except httpx.TimeoutException as e:
@@ -199,6 +206,12 @@ class EvalpClient:
 
     async def delete(self, path: str, **kw: Any) -> Any:
         return await self.request("DELETE", path, **kw)
+
+    async def upload_blob(
+        self, data: bytes, filename: str = "upload.bin", *, timeout: float = 300.0
+    ) -> dict[str, Any]:
+        """上传大文件（``POST /assets/upload``），返回 ``{blob_upload_id, size}``。"""
+        return await self.request("POST", "/assets/upload", files={"file": (filename, data)}, timeout=timeout)
 
     async def stream(
         self, path: str, *, params: dict[str, Any] | None = None, raw: bool = False

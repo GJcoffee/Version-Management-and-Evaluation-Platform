@@ -31,6 +31,18 @@ draft = "main"
 # 本地文件 -> 资产（kind/name）。支持 glob；{{stem}} 表示不带扩展名的文件名（会转成小写和连字符）
 [assets]
 {assets}
+
+# 默认评测配置：evalp eval run 和 MCP 的 run_eval 省略参数时读取；命令行 / 工具参数优先
+[eval]
+dataset = "dataset/{prefix}-regression"
+evaluators = "evals.yaml"            # 评估器配置文件（相对本目录）
+# repeats = 3                        # 每个用例重复次数
+# baseline = "baseline"              # 基线版本（标签 / vN），设置后新版本与它对比
+# concurrency = 8                    # 每个评测的并发上限
+# versions = ["latest"]              # 默认评测哪些版本
+
+# [mcp]
+# autostart = false                  # 关闭 MCP 启动时自动拉起 evalp serve
 """
 
 CONFIG_ASSETS = """\
@@ -148,7 +160,9 @@ def init(
     assets = (CONFIG_ASSETS if kind is Kind.config else CODE_ASSETS).format(p=prefix)
     created: list[str] = []
     skipped: list[str] = []
-    (cwd / CONFIG_NAME).write_text(TOML.format(name=agent, assets=assets.rstrip()), encoding="utf-8")
+    (cwd / CONFIG_NAME).write_text(
+        TOML.format(name=agent, assets=assets.rstrip(), prefix=prefix), encoding="utf-8"
+    )
     created.append(CONFIG_NAME)
     _write(cwd / "agent.yaml", CONFIG_YAML if kind is Kind.config else CODE_YAML, created, skipped)
     if kind is Kind.config:
@@ -168,9 +182,8 @@ def init(
         console.print(f"[green]创建[/green] {p}")
     for p in skipped:
         console.print(f"[yellow]已存在，跳过[/yellow] {p}")
-    ds = f"dataset/{prefix}-regression"
     console.print(f"\nagent [bold]{agent}[/bold]（{kind.value}）已初始化。下一步：")
     console.print("  1. 编辑 agent.yaml（配置型需要把 model.provider 改成已登记的 Provider）")
     console.print("  2. [bold]evalp serve[/bold]（另开终端启动服务）")
     console.print('  3. [bold]evalp push[/bold] -> [bold]evalp publish -m "初版" --tag baseline[/bold]')
-    console.print(f"  4. [bold]evalp eval run --dataset {ds} --wait[/bold]")
+    console.print("  4. [bold]evalp eval run --wait[/bold]（数据集和评估器取自 .evalp.toml 的 [eval]）")

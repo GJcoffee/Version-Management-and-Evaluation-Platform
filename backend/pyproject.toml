@@ -30,6 +30,7 @@ dependencies = [
   "structlog",
   "numpy",
   "pyyaml",
+  "ruamel.yaml>=0.18",   # pull 重写 agent.yaml 时保留注释（纯 Python，无需编译）
   "tomli-w",
   "python-multipart",
   "jsonschema",

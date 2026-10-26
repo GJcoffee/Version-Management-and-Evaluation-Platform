@@ -21,6 +21,7 @@ from typing import Any
 import yaml
 
 from evalp.client import EvalpClient, EvalpClientError
+from evalp.yamlio import dump_preserving, plain_dump
 
 CONFIG_NAME = ".evalp.toml"
 STATE_DIR = ".evalp"
@@ -55,6 +56,9 @@ class PushConflict(WorkspaceError):
 # ---------------------------------------------------------------------- 项目配置
 
 
+EVAL_DEFAULT_KEYS = ("dataset", "evaluators", "repeats", "baseline", "versions", "concurrency")
+
+
 @dataclass
 class ProjectConfig:
     """``.evalp.toml`` 的内容。"""
@@ -65,6 +69,8 @@ class ProjectConfig:
     draft_name: str = "main"
     server_url: str | None = None
     assets: dict[str, str] = field(default_factory=dict)
+    eval: dict[str, Any] = field(default_factory=dict)  # [eval] 默认评测配置（已校验类型）
+    mcp_autostart: bool = True  # [mcp].autostart：MCP 启动时是否自动拉起 evalp serve
 
     @property
     def spec_file(self) -> Path:
@@ -96,6 +102,9 @@ def load_project(root: Path) -> ProjectConfig:
     if not name:
         raise WorkspaceError(f"{path} 缺少 [agent].name")
     assets = {str(k): str(v) for k, v in (raw.get("assets") or {}).items()}
+    mcp_section = raw.get("mcp") or {}
+    if not isinstance(mcp_section, dict) or not isinstance(mcp_section.get("autostart", True), bool):
+        raise WorkspaceError(f"{path} 的 [mcp].autostart 应为 true / false。")
     return ProjectConfig(
         root=root,
         agent_name=str(name),
@@ -103,7 +112,52 @@ def load_project(root: Path) -> ProjectConfig:
         draft_name=str(agent.get("draft", "main")),
         server_url=(raw.get("server") or {}).get("url"),
         assets=assets,
+        eval=_load_eval_defaults(raw.get("eval"), path),
+        mcp_autostart=mcp_section.get("autostart", True),
     )
+
+
+def _load_eval_defaults(section: Any, path: Path) -> dict[str, Any]:
+    """校验 ``[eval]`` 段：只接受已知键且类型正确，写错时给出明确提示而不是静默忽略。"""
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise WorkspaceError(f"{path} 的 [eval] 应是一个表。")
+    unknown = sorted(set(section) - set(EVAL_DEFAULT_KEYS))
+    if unknown:
+        raise WorkspaceError(
+            f"{path} 的 [eval] 含有未知配置: {', '.join(unknown)}（可用: {', '.join(EVAL_DEFAULT_KEYS)}）"
+        )
+    out: dict[str, Any] = {}
+    for key, value in section.items():
+        if key in ("dataset", "baseline"):
+            ok = isinstance(value, str) and bool(value.strip())
+        elif key in ("repeats", "concurrency"):
+            ok = isinstance(value, int) and not isinstance(value, bool) and value >= 1
+        elif key == "versions":
+            ok = (isinstance(value, str) and bool(value.strip())) or (
+                isinstance(value, list)
+                and bool(value)
+                and all(isinstance(v, str) and v.strip() for v in value)
+            )
+            if ok and isinstance(value, str):
+                value = [v.strip() for v in value.split(",") if v.strip()]
+        else:  # evaluators：文件路径，或评估器表数组
+            ok = (isinstance(value, str) and bool(value.strip())) or (
+                isinstance(value, list) and bool(value) and all(isinstance(v, dict) for v in value)
+            )
+        if not ok:
+            hint = {
+                "dataset": "非空字符串",
+                "baseline": "非空字符串",
+                "repeats": "不小于 1 的整数",
+                "concurrency": "不小于 1 的整数",
+                "versions": "版本字符串（逗号分隔）或字符串数组",
+                "evaluators": "评估器文件路径，或 [[eval.evaluators]] 表数组",
+            }[key]
+            raise WorkspaceError(f"{path} 的 [eval].{key} 应是{hint}。")
+        out[key] = value
+    return out
 
 
 # ---------------------------------------------------------------------- 本地状态
@@ -517,10 +571,10 @@ class Workspace:
             result.unchanged.append(p.spec_path)
         else:
             p.spec_file.parent.mkdir(parents=True, exist_ok=True)
-            p.spec_file.write_text(
-                yaml.safe_dump(local_spec, allow_unicode=True, sort_keys=False, default_flow_style=False),
-                encoding="utf-8",
-            )
+            old_text = p.spec_file.read_text(encoding="utf-8") if p.spec_file.is_file() else ""
+            # 在原文件上更新，保留注释与键顺序（原文件不存在 / 无法往返时退化为整体重写）
+            text = dump_preserving(old_text, local_spec) if old_text.strip() else plain_dump(local_spec)
+            p.spec_file.write_text(text, encoding="utf-8")
             result.written.append(p.spec_path)
         written_spec = self.load_spec()
         State(

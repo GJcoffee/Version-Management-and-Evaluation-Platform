@@ -19,7 +19,6 @@
 |---|---|
 | LLM 评审调用记录为 judge 会话（一期只把评审请求与回复摘要写入 score.detail） | 8.5 |
 | 评测会话保留期清理（retention.eval_sessions_days） | 16.2 |
-| `evalp eval gate` 命令行（接口 `/evals/{id}/gate` 和报告页的门禁面板已有，CLI 命令尚未实现） | 13 |
 | 重新评分时换绑数据集修订（`rescore` 的 `dataset` 参数，只改了 expected / rubric 时；界面目前只能改评估器） | 8.4 |
 | 报告页用例表逐行标记 flaky（目前只有汇总数量和「不稳定」筛选；需要 items 接口返回每个用例的通过率） | 8.7 |
 
@@ -41,12 +40,7 @@
 
 | 条目 | 出处 |
 |---|---|
-| 其余 MCP 工具：list_agents、get_draft、update_draft、list_assets、upsert_asset、import_dataset、get_eval_status、get_session、replay_session、compare_sessions | 12.2 |
-| MCP 启动时自动拉起 `evalp serve` | 12.1 |
-| `.evalp.toml` 的 `[eval]` 默认评测配置 | 12.2 |
-| 其余 CLI：asset、dataset import、replay、adapter check、gc、eval status | 13 |
-| chat 支持直接与草稿对话（目前只能选已发布版本） | 13 |
-| pull 重写 agent.yaml 时保留注释 | 10.3 |
+| chat 支持直接与草稿对话（目前只能选已发布版本）。会话以版本为锚（`sessions.version_id` 非空，重放 / 评测 / trace 都依赖它），支持草稿需要改会话模型、Runner 与前端，不是小补丁 | 13 |
 
 ## 前端
 
