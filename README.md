@@ -107,7 +107,7 @@ cd frontend && npm run typecheck && npm run lint && npm test
 npm run dev                    # 前端开发服务器，/api 代理到 7860（EVALP_BACKEND_PORT 可改）
 ```
 
-CI（`.github/workflows/ci.yml`）：后端在 Linux（Python 3.11 / 3.12）、macOS、Windows 上跑 `ruff check .` 与 `pytest`；前端（Linux）跑 `tsc`、`eslint`、`vitest`、`vite build`；另有一个 wheel 任务构建 wheel、装进干净 venv 并冒烟 `evalp serve`。
+CI（`.github/workflows/ci.yml`）：只在 macOS 上跑，手动触发（GitHub Actions 页面 → CI → Run workflow），推送时不自动跑；依次跑前端 `tsc`、`eslint`、`vitest`、`vite build` 与后端 `ruff check .`、`pytest`。
 
 ### 性能压测
 

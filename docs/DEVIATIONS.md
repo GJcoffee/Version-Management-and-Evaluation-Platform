@@ -431,9 +431,9 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 
 `pyproject.toml` 的 `package-data` 本来就声明了 `static/**/*`、迁移的 `*.mako` 与 `versions/*.py`（`versions/` 没有 `__init__.py`，只能靠 package-data 进 wheel）。新增 `scripts/build_wheel.py`：`npm ci`（仅当没有 `node_modules`，或加 `--npm-ci`）→ `npm run build` → `python -m build --wheel backend` → 检查 wheel 内容（`index.html`、`assets/*.js`、全部迁移脚本、入口点、无 `__pycache__` / tests / frontend），不通过退出码为 1；`--skip-frontend` 复用已有产物，`--check WHEEL` 只检查。已在本地真实构建一次（2.0MB，25 个静态文件、3 个迁移脚本），在临时 venv（Python 3.13）里 `pip install` 后验证：`evalp --help` 正常、`evalp serve` 能启动并迁移到 `0003`、`/` 返回 `<!doctype html>`、`/assets/index-*.js` 返回 200、`/agents`（SPA 回退）返回 HTML、`token` 文件权限 600。未引入新依赖（构建时需要 `pip install build`，不是运行时依赖）。`tests/unit/test_build_wheel.py` 用合成 wheel 测检查逻辑，真实构建的用例需 `EVALP_TEST_WHEEL=1` 且已安装 `build`。jieba 只有 sdist，安装时需要 setuptools：当前 pip 的构建隔离已自动提供，CI 里仍显式升级 `setuptools>=68`。
 
-## 平台 — CI 矩阵（`.github/workflows/ci.yml`）
+## 平台 — CI（`.github/workflows/ci.yml`）
 
-后端：Linux × Python 3.11 / 3.12、macOS × 3.12、Windows × 3.12（详设写的是三平台 × 双版本，这里裁剪为 4 个组合以控制时长），跑 `ruff check .` 与 `python -m pytest -q`；前端（Linux）：`npm ci`、`tsc --noEmit`、`npm run lint`、`vitest run`、`npm run build`；另有一个 wheel 任务（Linux）构建、检查、装进干净 venv 后冒烟 `evalp serve`。action 版本：`checkout@v4`、`setup-python@v5`、`setup-node@v4`。**只做了 YAML 合法性检查，没有在 GitHub 上实际跑过**；测试套件在 Windows 上（子进程 Adapter、进程树终止、路径分隔符等）可能有失败，需要首次运行后再逐个修复，所以 `fail-fast: false`。详设 15.1 兼容行里「安装、启动、子进程 Adapter、终止进程树」的冒烟，目前由完整的 pytest 覆盖，没有单独的冒烟任务。
+详设 15.1 要求三平台 × 双版本。本项目是本地自用，先只保证 macOS：CI 只有一个 macOS × Python 3.12 的任务，只能手动触发（`workflow_dispatch`），推送时不自动跑；依次跑前端 `tsc --noEmit`、`npm run lint`、`vitest run`、`npm run build` 与后端 `ruff check .`、`python -m pytest -q`。Linux / Windows 上的问题按需再修。
 
 ## 平台 — 性能压测与瓶颈（`scripts/loadtest_eval.py`）
 

@@ -38,7 +38,7 @@
 
 ## 平台与工程
 
-> 说明：Windows token 文件 ACL（icacls）、wheel 打包发布流程与安装文档（`scripts/build_wheel.py`）、Windows / macOS / Linux CI 矩阵（`.github/workflows/ci.yml`）、压测脚本（`scripts/loadtest_eval.py`）均已完成。CI 与 Windows ACL 只做了本地检查（YAML 合法性、mock 平台判断后的调用参数），尚未在真实的 GitHub runner / Windows 机器上跑过。下表是仍未完成的部分。
+> 说明：Windows token 文件 ACL（icacls）、wheel 打包发布流程与安装文档（`scripts/build_wheel.py`）、CI（`.github/workflows/ci.yml`，只在 macOS 上手动触发）、压测脚本（`scripts/loadtest_eval.py`）均已完成。Windows ACL 只做了本地检查（mock 平台判断后的调用参数），尚未在真实的 Windows 机器上跑过。下表是仍未完成的部分。
 
 | 条目 | 出处 |
 |---|---|
