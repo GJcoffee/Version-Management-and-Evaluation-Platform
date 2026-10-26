@@ -150,6 +150,28 @@ describe('EvalReportPage：统计与门禁', () => {
     expect(screen.getByTestId('items-table')).toHaveAttribute('data-tag', '')
   })
 
+  it('按工具的技术指标表；旧报告（没有 tools）不显示', async () => {
+    const tools = {
+      draw_image: { calls: 12, calls_per_case: 1.2, latency_ms: { p50: 8000, p95: 15000 }, errors: 1, error_rate: 1 / 12 },
+      search: { calls: 5, calls_per_case: 0.5, latency_ms: { p50: 300, p95: 450 }, errors: 0, error_rate: 0 },
+    }
+    setup(run({ stats: stats({ tools }) }))
+    const table = await screen.findByTestId('tool-stats')
+    const row = within(table).getByTestId('tool-row-draw_image')
+    expect(row).toHaveTextContent('12')
+    expect(row).toHaveTextContent('1.20')
+    expect(row).toHaveTextContent('8.0s')
+    expect(row).toHaveTextContent('15.0s')
+    expect(row).toHaveTextContent('8.3%')
+    expect(within(table).getByTestId('tool-row-search')).toHaveTextContent('0.0%')
+  })
+
+  it('旧报告没有 tools 字段时不显示工具表', async () => {
+    setup(run())
+    await screen.findByTestId('stats-panel')
+    expect(screen.queryByTestId('tool-stats')).toBeNull()
+  })
+
   it('页面上有 CI 门禁面板，可以直接检查', async () => {
     const api = setup(run({ status: 'completed' }), {
       'GET /api/v1/evals/evr_1/gate': { passed: true, reasons: [], summary: { run_id: 'evr_1', status: 'completed', pass_rate: 0.7, max_regressions: 0, min_pass_rate: null } },

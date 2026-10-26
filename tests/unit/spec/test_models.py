@@ -178,3 +178,13 @@ def test_json_schema_export():
     for d in schema["$defs"].values():
         props.update(d.get("properties", {}))
     assert "schema" in props and "with" in props  # 使用别名
+
+
+def test_code_snapshot_accepts_dir_shorthand_and_file_refs():
+    base = {"kind": "code", "transport": "http", "http": {"base_url": "http://x"}}
+    short = parse_spec({**base, "snapshot": "exports/current"})
+    assert dump_spec(short)["snapshot"] == {"dir": "exports/current", "files": {}}
+    full = parse_spec({**base, "snapshot": {"dir": "d", "files": {"a/b.json": "asset://file/snap-x@latest"}}})
+    assert full.snapshot.files["a/b.json"] == "asset://file/snap-x@latest"
+    errs = errors_of({**base, "snapshot": {"dir": "d", "files": {"a": "asset://prompt/p@1"}}})
+    assert "需要 file 类型的资产" in errs["snapshot.files.a"]

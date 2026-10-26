@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -72,6 +72,65 @@ function setup() {
   )
   return api
 }
+
+const metric = (left: number | null, right: number | null) => ({ left, right, delta: left === null || right === null ? null : right - left })
+
+describe('EvalComparePage：按工具指标变化', () => {
+  it('每个工具显示左 → 右与变化量，延迟、失败率变差标为 bad', async () => {
+    mockApi({
+      'GET /api/v1/evals': { items: [runOut('evr_a', 1), runOut('evr_b', 2)], next_cursor: null },
+      'GET /api/v1/evals/evr_a': { ...runOut('evr_a', 1), batch_runs: [] },
+      'GET /api/v1/evals/evr_b': { ...runOut('evr_b', 2), batch_runs: [] },
+      'GET /api/v1/evals/compare': {
+        ...compare,
+        summary: {
+          ...compare.summary,
+          metrics: {
+            tools: {
+              draw_image: {
+                calls: metric(10, 14),
+                calls_per_case: metric(1, 1.4),
+                latency_ms: { p50: metric(5000, 8000), p95: metric(9000, 8000) },
+                error_rate: metric(0, 0.1),
+              },
+              search: {
+                calls: metric(0, 3),
+                calls_per_case: metric(0, 0.3),
+                latency_ms: { p50: metric(null, 200), p95: metric(null, 300) },
+                error_rate: metric(null, 0),
+              },
+            },
+          },
+        },
+      },
+    })
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter initialEntries={['/evals/compare?left=evr_a&right=evr_b']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <EvalComparePage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    const draw = await screen.findByTestId('tool-delta-draw_image')
+    expect(within(draw).getByTestId('calls')).toHaveTextContent('10 → 14+4')
+    expect(within(draw).getByTestId('calls')).toHaveAttribute('data-tone', 'neutral')
+    expect(within(draw).getByTestId('p50')).toHaveTextContent('5.0s → 8.0s+3000ms')
+    expect(within(draw).getByTestId('p50')).toHaveAttribute('data-tone', 'bad')
+    expect(within(draw).getByTestId('p95')).toHaveAttribute('data-tone', 'good')
+    expect(within(draw).getByTestId('error-rate')).toHaveTextContent('0.0% → 10.0%+10.0pp')
+    expect(within(draw).getByTestId('error-rate')).toHaveAttribute('data-tone', 'bad')
+    // 只在右侧出现的工具：左侧耗时为空
+    const search = screen.getByTestId('tool-delta-search')
+    expect(within(search).getByTestId('calls')).toHaveTextContent('0 → 3+3')
+    expect(within(search).getByTestId('p50')).toHaveTextContent('- → 200ms-')
+  })
+
+  it('没有工具调用时不显示', async () => {
+    setup()
+    await screen.findByTestId('compare-summary')
+    expect(screen.queryByTestId('tool-compare')).toBeNull()
+  })
+})
 
 describe('EvalComparePage：统计结论与不稳定用例', () => {
   it('显示置信区间、符号检验 p 值；不稳定用例带标记', async () => {

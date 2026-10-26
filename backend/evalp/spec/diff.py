@@ -18,7 +18,7 @@ from typing import Any
 from evalp.spec.refs import ASSET_KEY, is_pin
 
 TEXT_DIFF_MIN_LEN = 80
-TEXT_KINDS = ("prompt", "tool", "knowledge")
+TEXT_KINDS = ("prompt", "tool", "knowledge", "file")  # file 为二进制时 load_text 返回 None
 
 LoadText = Callable[[dict[str, Any]], Awaitable["str | None"]]
 

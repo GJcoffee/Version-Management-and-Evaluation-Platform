@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -108,6 +108,27 @@ describe('AnnotateView', () => {
     expect(screen.getByTestId('annotate-progress')).toHaveTextContent('已评 1/3，待评 2')
     // 待评审队列用 class=pending_human 取
     expect(api.find('GET', /items\?/)[0].url).toContain('class=pending_human')
+  })
+
+  it('输出里的图片和视频链接直接渲染，方便人工审核', async () => {
+    mockApi({
+      'GET /api/v1/evals/evr_1/items': { items: [item('evi_1', 'c001')], next_cursor: null },
+      'GET /api/v1/evals/evr_1/items/evi_1': {
+        ...detail('evi_1', 'c001'),
+        output: '生成好了 ![图](https://cdn.example.com/a.png) 视频 https://cdn.example.com/v.mp4',
+      },
+    })
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <AnnotateView run={run()} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    const out = await screen.findByTestId('annotate-output')
+    await waitFor(() => expect(within(out).getAllByTestId('media')).toHaveLength(2))
+    expect(within(out).getAllByTestId('media').map((m) => m.getAttribute('data-kind'))).toEqual(['image', 'video'])
+    expect(out).toHaveTextContent('https://cdn.example.com/v.mp4') // 原文链接仍在
   })
 
   it('没选分数时不能提交；选分、写备注后提交到 human-scores，并自动切到下一条', async () => {

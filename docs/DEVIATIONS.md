@@ -447,3 +447,15 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 新增 `Dockerfile`（Node 构建前端 → Python 3.12 slim 安装 backend，非 root 用户，数据目录 `/data`）和 `docker-compose.yml`（挂载宿主机 `~/.evalp`，端口只映射到 `127.0.0.1:7860`）。
 `/auth/bootstrap` 原本只允许回环地址，Docker 里浏览器请求来自网关地址会被拒绝，因此新增配置 `server.allow_remote_bootstrap`（默认 false，
 环境变量 `EVALP_SERVER_ALLOW_REMOTE_BOOTSTRAP`），镜像里设为 true；安全性靠端口只映射到宿主机回环地址保证。
+
+## 代码型 Spec — 新增 `snapshot`（版本快照）
+
+详设 4.2 的代码型 Spec 没有这个字段。新增 `snapshot: {dir, files}`：`dir` 下的文件在 push 时上传为 `file` 资产，`files`（相对路径 → 资产引用）固化进版本并参与哈希，用于记录平台侧配置（如 HiAgent 导出）的每个版本，diff 逐文件显示文本差异；不参与运行。取舍：①规范化时 `snapshot` 为空就去掉，旧版本的 `spec_hash` 不变（偏离 4.4「补齐全部默认值」）；②diff 的 `TEXT_KINDS` 加入 `file`（二进制文件读不出文本时仍只标记变化）；③资产名带 agent 名和路径哈希，避免不同 agent 同名文件冲突；快照目录里被删除的文件不再被引用，但对应资产保留。
+
+## 评测统计 — 按工具指标 `stats.tools`
+
+详设 8.6 / 8.7 没有按工具的指标。新增 `stats.tools`（见 docs/api.md「stats」）和对比的 `summary.metrics.tools`。口径：每个已结束 Item 的 `tool.call` 与同 `call_id` 的 `tool.result` 配对；"每用例"指每个已结束的 Item（含重复）。报告的 `stats` 在评测结束时落库，所以旧评测没有 `tools`（对比接口现算，有事件就有）。
+
+## 前端 — 助手消息中的图片 / 视频
+
+`Markdown` 增加 remark 插件（`lib/remarkMedia.ts`，无新依赖）：markdown 图片、`<img src>`、`<video src>`、以 png/jpg/jpeg/webp/gif/mp4/webm/mov 结尾的裸 URL 渲染为图片（点击放大）/ 视频播放器；裸 URL 的原文保留在文字中，其他写法在媒体下方显示原始链接。取舍：裸 URL 允许带查询串（带签名的对象存储链接）；只识别上述 `<img>` / `<video>` 标签，其他原始 HTML 仍不渲染；人工标注页的「输出」是纯文本，原文不变，媒体列在文本下方（`MediaText`）。只做渲染，不下载、不代理，链接过期后图片会加载失败。

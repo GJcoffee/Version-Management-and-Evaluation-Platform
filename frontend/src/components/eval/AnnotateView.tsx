@@ -12,6 +12,7 @@ import { formatApiError } from '@/lib/apiError'
 import { cn } from '@/lib/cn'
 import { safeGet, safeSet } from '@/lib/safeStorage'
 import { toast } from '@/stores/toast'
+import { MediaText } from '@/components/session'
 import { ItemConversation } from './ItemDetail'
 import {
   annotateProgress,
@@ -37,6 +38,12 @@ function Block({ title, children, testId }: { title: string; children: React.Rea
       <div className="whitespace-pre-wrap rounded-md bg-muted/50 px-3 py-2 text-sm">{children}</div>
     </section>
   )
+}
+
+/** 输出文本；其中的图片 / 视频链接直接渲染出来，方便人工审核 */
+function AnnotateOutput({ text }: { text: string | null | undefined }) {
+  if (text === null || text === undefined) return <span className="text-muted-foreground">（没有输出）</span>
+  return <MediaText text={text} />
 }
 
 function ScoreInput({
@@ -312,7 +319,7 @@ export function AnnotateView({ run }: { run: EvalRunDetailOut }) {
                   {turns.length > 0 ? turns.join('\n\n') : (current.input_preview ?? '-')}
                 </Block>
                 <Block title="输出" testId="annotate-output">
-                  {detail.data?.output ?? current.output_preview ?? <span className="text-muted-foreground">（没有输出）</span>}
+                  <AnnotateOutput text={detail.data?.output ?? current.output_preview} />
                 </Block>
                 {current.expected && <Block title="期望">{current.expected}</Block>}
                 {detail.data?.case_detail?.rubric && <Block title="评分标准 rubric">{detail.data.case_detail.rubric}</Block>}

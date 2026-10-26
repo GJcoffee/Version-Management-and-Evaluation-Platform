@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import defaultdict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -80,10 +81,12 @@ from evalp.services.dataset import DatasetService
 from evalp.services.eval_stats import (
     ItemRow,
     ScoreRow,
+    ToolCallRow,
     case_scores,
     compute_passed,
     compute_stats,
     item_outcome,
+    tool_call_rows,
 )
 from evalp.services.judge import JudgeService
 from evalp.services.provider import ProviderService
@@ -99,6 +102,7 @@ from evalp.store.models import (
     EvalItem,
     EvalRun,
     EvalScore,
+    Event,
     Turn,
     Version,
 )
@@ -697,6 +701,21 @@ class EvalService:
 
     # ---------------------------------------------------------------- 取行数据
 
+    async def _tool_call_rows(self, s: AsyncSession, run_id: str) -> list[ToolCallRow]:
+        """本次评测各 Item 会话里的工具调用（缓存命中的 Item 共用来源 Item 的会话）。"""
+        rows = (
+            await s.execute(
+                select(EvalItem.id, Event.type, Event.payload)
+                .join(Event, Event.session_id == EvalItem.session_id)
+                .where(EvalItem.run_id == run_id, Event.type.in_(("tool.call", "tool.result")))
+                .order_by(EvalItem.id, Event.seq)
+            )
+        ).all()
+        by_item: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
+        for item_id, etype, payload in rows:
+            by_item[item_id].append((etype, payload))
+        return [c for item_id, evs in by_item.items() for c in tool_call_rows(item_id, evs)]
+
     async def _stat_rows(self, s: AsyncSession, run_id: str) -> tuple[list[ItemRow], list[ScoreRow]]:
         rows = (
             await s.execute(
@@ -742,7 +761,11 @@ class EvalService:
     async def _compute_stats(self, s: AsyncSession, run: EvalRun) -> dict[str, Any]:
         items, scores = await self._stat_rows(s, run.id)
         return compute_stats(
-            items, scores, evaluator_keys=[c["key"] for c in run.evaluators], repeats=run.repeats
+            items,
+            scores,
+            evaluator_keys=[c["key"] for c in run.evaluators],
+            repeats=run.repeats,
+            tool_calls=await self._tool_call_rows(s, run.id),
         )
 
     # ================================================================ 事件
@@ -1979,11 +2002,16 @@ class EvalService:
         async with self.ctx.db.read() as s:
             run = await self._run_row(s, run_id)
             items, scores = await self._stat_rows(s, run_id)
+            tool_calls = await self._tool_call_rows(s, run_id)
             (out,) = await self._run_outs(s, [run])
             dataset_name = out.dataset
         gates = [c["key"] for c in run.evaluators if c.get("gate")]
         stats = compute_stats(
-            items, scores, evaluator_keys=[c["key"] for c in run.evaluators], repeats=run.repeats
+            items,
+            scores,
+            evaluator_keys=[c["key"] for c in run.evaluators],
+            repeats=run.repeats,
+            tool_calls=tool_calls,
         )
         return {
             "run": run,
@@ -2262,6 +2290,23 @@ def _delta(a: float | None, b: float | None) -> dict[str, Any]:
     return {"left": a, "right": b, "delta": (b - a) if a is not None and b is not None else None}
 
 
+def _tool_deltas(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    """各工具指标的 ``{left, right, delta}``；只出现在一侧的工具，调用次数记 0，耗时与失败率为 None。"""
+    out: dict[str, Any] = {}
+    for name in [*left, *[n for n in right if n not in left]]:
+        a, b = left.get(name), right.get(name)
+        out[name] = {
+            "calls": _delta(a["calls"] if a else 0, b["calls"] if b else 0),
+            "calls_per_case": _delta(a["calls_per_case"] if a else 0.0, b["calls_per_case"] if b else 0.0),
+            "latency_ms": {
+                p: _delta(a["latency_ms"][p] if a else None, b["latency_ms"][p] if b else None)
+                for p in ("p50", "p95")
+            },
+            "error_rate": _delta(a["error_rate"] if a else None, b["error_rate"] if b else None),
+        }
+    return out
+
+
 def _metric_deltas(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
     """各项指标的差值（右 - 左）。"""
     keys = [k for k in left["evaluators"] if k in right["evaluators"]]
@@ -2275,4 +2320,5 @@ def _metric_deltas(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any
         "tokens": {k: _delta(left["tokens"][k], right["tokens"][k]) for k in ("prompt", "completion")},
         "cost": _delta(left["cost"], right["cost"]),
         "cost_new": _delta(left["cost_new"], right["cost_new"]),
+        "tools": _tool_deltas(left["tools"], right["tools"]),
     }

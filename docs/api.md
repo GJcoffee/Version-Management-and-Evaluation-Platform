@@ -68,6 +68,12 @@
 `source.repo` 相对路径相对于服务进程的当前目录，建议客户端传绝对路径。`source.git` 由服务端在发布时写入，不要手写。
 可选的顶层字段 `name` / `description` / `notes` 仅用于显示，不参与哈希。
 
+**版本快照（代码型，可选）**：`"snapshot": {"dir": "exports/current", "files": {"platform/app-config.json": "asset://file/snap-…@latest"}}`。
+`dir` 是本地目录（相对项目根；`snapshot` 也可以简写为目录字符串 `"exports/current"`，等价于 `{"dir": …}`）；`files` 是「目录内相对路径 → file 资产引用」，引用位置同其他资产引用，发布时固化为 `{"$asset": …}` 并参与哈希
+（所以快照里任一文件变化都会产生新版本）。只做记录、不参与运行。`evalp push` / `publish` 会把 `dir` 下的全部文件上传为 `file` 资产
+（资产名 `snap-{agent}-{路径}-{路径哈希}`）并填好 `files`；`evalp pull` 不会把 `files` 写回 `agent.yaml`。未声明 `snapshot` 时它不出现在规范化结果中，
+所以旧版本的 `spec_hash` 不变。版本 diff 里每个文件一条变更，路径形如 `snapshot.files.platform/app-config.json`；文本文件的 `asset_changed` 带 `content_diff`，二进制文件只标记变化。
+
 **引用写法**（`prompts.system` 也可以直接写内联文本）：
 
 | 写法 | 含义 | 可出现在 |
@@ -731,10 +737,13 @@ HTTP 状态恒为 200（版本不存在 404），agent 的任何问题都体现�
 
 ### stats
 
-契约字段之外：`cancelled`、`cost_new`（不含缓存命中）、`cost_wasted`（失败尝试的成本）、`pass_at_k`、`flaky_cases`、`by_tag`、`score_error_rate`；`evaluators[key]` 另有 `std`、`n`、`parse_failures`、`pending_human`。口径：
+契约字段之外：`cancelled`、`cost_new`（不含缓存命中）、`cost_wasted`（失败尝试的成本）、`pass_at_k`、`flaky_cases`、`by_tag`、`score_error_rate`、`tools`；`evaluators[key]` 另有 `std`、`n`、`parse_failures`、`pending_human`。口径：
 
 - 用例通过率 = 通过的重复次数 / 参与判定的重复次数；执行失败的 Item 算未通过；没有任何可用门禁评分（如评审解析失败）的 Item 不参与判定；`pass_rate` 是各用例通过率的平均值。
 - `latency_ms`、`tokens` 只统计 `done` 的 Item，缓存命中的沿用来源 Item 的数值。
+- `tools`：按工具名聚合，调用次数多的在前，没有工具调用时为 `{}`。来自会话事件 `tool.call` / `tool.result`（按 `call_id` 配对；耗时取 `tool.result.latency_ms`，失败取 `tool.result.is_error`），统计已结束（`done` / `failed`）的 Item，缓存命中的沿用来源会话：
+  `{"draw_image": {"calls": 12, "calls_per_case": 1.2, "latency_ms": {"p50": 8000, "p95": 15000}, "errors": 1, "error_rate": 0.083}}`。
+  `calls_per_case` = 调用次数 / 已结束的 Item 数；耗时只统计带 `latency_ms` 的调用，都没有时为 null；有 `tool.call` 但没有 `tool.result` 的调用计入次数，不计失败。**该字段在这次改动之后完成（或重算）的评测才有**，旧报告里没有 `tools`。
 
 ### SSE
 
@@ -762,6 +771,6 @@ HTTP 状态恒为 200（版本不存在 404），agent 的任何问题都体现�
 返回契约结构（`left` / `right` 带 `stats`，`warnings` 为字符串数组，`summary`，`cases.items` / `cases.next_cursor`）。附加：
 
 - `threshold` 回显；`class` 还接受 `unscored`（某一侧没有可用分数）和 `flaky`；另有 `tag`、`q`（case_key 模糊匹配）参数；`cursor` 为上一页最后一条的 `case_key`；
-- `summary` 另有 `ci95`（配对 bootstrap 95% 置信区间）、`sign_test_p`、`wins` / `ties` / `losses`、`unscored`、`flaky`，以及 `metrics`（各指标 `{left, right, delta}` 的完整版）；契约的 `metric_deltas` 均为 `right - left`，`tokens_total` 为 prompt + completion；
+- `summary` 另有 `ci95`（配对 bootstrap 95% 置信区间）、`sign_test_p`、`wins` / `ties` / `losses`、`unscored`、`flaky`，以及 `metrics`（各指标 `{left, right, delta}` 的完整版，其中 `metrics.tools[工具名]` 为 `calls` / `calls_per_case` / `latency_ms.{p50,p95}` / `error_rate` 的 `{left, right, delta}`，只出现在一侧的工具，另一侧调用次数记 0、耗时与失败率为 null；`left.stats` / `right.stats` 里也带 `tools`）；契约的 `metric_deltas` 均为 `right - left`，`tokens_total` 为 prompt + completion；
 - 用例行另有 `flaky`；`left` / `right` 的 `pass_rate` 为该用例通过的重复次数占比；
 - 用例分数 = 各 gate 评估器分数的平均值（执行失败记 0 分），再对重复次数取平均；`|Δ| < threshold` 为 unchanged；排序：regressed、improved、unchanged、new、missing、unscored，同类按 `|Δ|` 从大到小。

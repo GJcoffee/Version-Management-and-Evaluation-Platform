@@ -91,8 +91,6 @@ async def resolve_spec(s: AsyncSession, spec: ConfigSpec | CodeSpec) -> ResolveR
     """固化 Spec 中的全部资产引用。出错的引用保持原样，并记录到 ``errors``。"""
     data = dump_spec(spec)
     result = ResolveResult(resolved=data)
-    if isinstance(spec, CodeSpec):
-        return result
 
     async def one(node: Any, path: str) -> Any:
         try:
@@ -110,6 +108,13 @@ async def resolve_spec(s: AsyncSession, spec: ConfigSpec | CodeSpec) -> ResolveR
         use = RefUse(*astuple_of(ResolvedAsset.of(asset, revision)), spec_path=path)
         result.refs.append(use)
         return use.pin
+
+    if isinstance(spec, CodeSpec):
+        if data["snapshot"] is not None:
+            files = data["snapshot"]["files"]
+            for rel in files:
+                files[rel] = await one(files[rel], f"snapshot.files.{rel}")
+        return result
 
     prompts = data["prompts"]
     prompts["system"] = await one(prompts["system"], "prompts.system")
