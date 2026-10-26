@@ -1,3 +1,4 @@
+import { lazy } from 'react'
 import { createBrowserRouter, type RouteObject } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
 import type { RouteHandle } from '@/components/layout/Breadcrumbs'
@@ -5,18 +6,20 @@ import { shortenId } from '@/components/ui/IdText'
 import HomePage from '@/pages/HomePage'
 import AgentsPage from '@/pages/AgentsPage'
 import AgentDetailPage from '@/pages/AgentDetailPage'
-import DraftEditorPage from '@/pages/DraftEditorPage'
-import VersionDiffPage from '@/pages/VersionDiffPage'
-import AssetsPage from '@/pages/AssetsPage'
-import AssetDetailPage from '@/pages/AssetDetailPage'
-import SessionPage from '@/pages/SessionPage'
-import ComparePage from '@/pages/ComparePage'
 import EvalsPage from '@/pages/EvalsPage'
 import EvalReportPage from '@/pages/EvalReportPage'
 import EvalComparePage from '@/pages/EvalComparePage'
 import EvalAnnotatePage from '@/pages/EvalAnnotatePage'
 import SettingsPage from '@/pages/SettingsPage'
 import NotFoundPage from '@/pages/NotFoundPage'
+
+// 含编辑器 / 对话的页面按路由懒加载，缩小首屏 bundle（AppLayout 里的 Suspense 兜底）
+const DraftEditorPage = lazy(() => import('@/pages/DraftEditorPage'))
+const VersionDiffPage = lazy(() => import('@/pages/VersionDiffPage'))
+const AssetsPage = lazy(() => import('@/pages/AssetsPage'))
+const AssetDetailPage = lazy(() => import('@/pages/AssetDetailPage'))
+const SessionPage = lazy(() => import('@/pages/SessionPage'))
+const ComparePage = lazy(() => import('@/pages/ComparePage'))
 
 const idCrumb = (key: string): RouteHandle['crumb'] => (p) => shortenId(p[key] ?? '')
 

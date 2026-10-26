@@ -1,4 +1,5 @@
 import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { AlertTriangle, ArrowDownToLine, Ban, Bot, ListTree, MessageSquareText, Timer, User } from 'lucide-react'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -10,6 +11,15 @@ import type { Message } from '@/api/types'
 import { isHighlighted, messageText, type AssistantMessageView, type TurnState } from './sessionState'
 import { ToolCallCard } from './ToolCallCard'
 import { TurnMetricsBar } from './TurnMetricsBar'
+
+/** 轮次数超过该值时启用虚拟滚动（几百轮的长会话）；短会话保持完整渲染，行为与以前完全一致 */
+export const VIRTUALIZE_THRESHOLD = 60
+/** 虚拟滚动下未测量轮次的估算高度（px），测量后以实际高度为准 */
+const ESTIMATED_TURN_HEIGHT = 260
+/** 轮与轮之间的间距（与完整渲染时的 gap-6 一致，px） */
+const TURN_GAP = 24
+/** 新内容到达后多久之内，列表总高度的变化（测量修正）仍会触发贴底，毫秒 */
+const SETTLE_MS = 600
 
 export interface ChatPaneProps {
   turns: readonly TurnState[]
@@ -49,6 +59,17 @@ export function ChatPane({
   const scrollRef = useRef<HTMLDivElement>(null)
   const stuckRef = useRef(true)
   const [showJump, setShowJump] = useState(false)
+  const virtual = turns.length > VIRTUALIZE_THRESHOLD
+  const lastChangeAt = useRef(0)
+
+  const virt = useVirtualizer({
+    count: virtual ? turns.length : 0,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ESTIMATED_TURN_HEIGHT + TURN_GAP,
+    getItemKey: (i) => turns[i]?.id ?? i,
+    overscan: 4,
+  })
+  const totalSize = virtual ? virt.getTotalSize() : 0
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current
@@ -71,15 +92,26 @@ export function ChatPane({
   ].join(':')
 
   useLayoutEffect(() => {
+    lastChangeAt.current = Date.now()
     if (!autoScroll || !stuckRef.current) return
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [signature, autoScroll])
 
+  // 虚拟滚动：新内容到达后，轮次被测量会修正总高度，贴底状态下需要继续跟随；
+  // 超过 SETTLE_MS 后的高度变化（例如用户手动展开工具卡片）不再强制贴底
+  useLayoutEffect(() => {
+    if (!virtual || !autoScroll || !stuckRef.current) return
+    if (Date.now() - lastChangeAt.current > SETTLE_MS) return
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [totalSize, virtual, autoScroll])
+
   const jump = () => {
     const el = scrollRef.current
     if (!el) return
     stuckRef.current = true
+    lastChangeAt.current = Date.now()
     el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
     setShowJump(false)
   }
@@ -98,6 +130,34 @@ export function ChatPane({
               </div>
             ))
           )
+        ) : virtual ? (
+          <div
+            className="relative mx-auto w-full max-w-3xl"
+            style={{ height: virt.getTotalSize() }}
+            data-testid="chat-virtual"
+          >
+            {virt.getVirtualItems().map((v) => {
+              const t = turns[v.index]
+              return (
+                <div
+                  key={v.key}
+                  ref={virt.measureElement}
+                  data-index={v.index}
+                  className="absolute left-0 top-0 w-full"
+                  style={{ transform: `translateY(${v.start}px)`, paddingBottom: TURN_GAP }}
+                >
+                  <TurnView
+                    turn={t}
+                    sessionId={sessionId}
+                    selected={selectedTurnId === t.id}
+                    onSelectTurn={onSelectTurn}
+                    highlightSteps={highlightSteps}
+                    onSelectStep={onSelectStep}
+                  />
+                </div>
+              )
+            })}
+          </div>
         ) : (
           <div className="mx-auto flex max-w-3xl flex-col gap-6">
             {turns.map((t) => (
