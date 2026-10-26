@@ -155,9 +155,13 @@ def main(argv: list[str] | None = None) -> int:
         base = f"http://127.0.0.1:{port}"
         deadline = time.monotonic() + 60
         while True:
+            # 健康检查在 /api/v1 下且需要 token（/health 会被 SPA 回退成 index.html，没构建前端时是 404）
+            token_file = data_dir / "token"
             try:
-                if httpx.get(f"{base}/health", timeout=2).status_code == 200:
-                    break
+                if token_file.exists():
+                    headers = {"Authorization": f"Bearer {token_file.read_text().strip()}"}
+                    if httpx.get(f"{base}/api/v1/health", headers=headers, timeout=2).status_code == 200:
+                        break
             except httpx.HTTPError:
                 pass
             if server.poll() is not None or time.monotonic() > deadline:

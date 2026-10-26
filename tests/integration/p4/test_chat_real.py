@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 from evalp.cli.chat import run_turn
 from evalp.client import EvalpClient
@@ -56,6 +58,9 @@ async def test_chat_tool_against_real_app(client, published, fake_openai, projec
         assert "好的，已记录。" in out2 and sid in out2
 
 
+# Windows 上 loop.add_signal_handler 不可用，run_turn 走的是 chat 命令里的 KeyboardInterrupt 回退；而且
+# os.kill(pid, SIGINT) 在 Windows 上是 TerminateProcess（退出码 2），会直接杀掉 pytest 进程
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 信号语义")
 async def test_ctrl_c_cancels_current_turn(client, published, fake_openai, capsys):
     import asyncio
     import os
