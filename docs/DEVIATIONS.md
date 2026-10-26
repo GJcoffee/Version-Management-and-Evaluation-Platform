@@ -441,3 +441,9 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 本机（4 核沙箱）实测，2000 用例 × 并发 64、1 次重复、延迟 200ms：总耗时 191.7s，吞吐 10.4 条/秒（稳态 10.6），理想值 320 条/秒（64 / 0.2s）；服务进程 CPU 平均 106%（单核跑满，95 分位 109%）、RSS 峰值 190MB；数据库 13.9MB（约 7KB/条）；报告详情接口 12ms、用例表第一页 20ms；Fake 侧观测到的最大并发只有 10（模型调用只占每条用例耗时的很小一部分）。按线性外推 1 万用例约 16 分钟（未实测；在 100 / 300 / 500 / 600 / 2000 用例下吞吐都稳定在 9~13 条/秒，没有随规模变差）。
 瓶颈：吞吐与并发数、模型延迟、流式增量大小、事件落库间隔（50ms → 1000ms 只快约 9%）、`scheduler.workers` 都无关，是**服务进程单个事件循环的 CPU**。计数显示每条用例约 75 条 SQL（12 次写事务、11 次读事务，其中 sessions 5 次、eval_runs 4 次、eval_items 4 次、turns 4 次、agents 3 次、versions 3 次重复读取），每条 SQL 经 SQLAlchemy ORM + aiosqlite 线程往返，约 100ms 的事件循环时间/条。只有模型延迟高于约 6.4 秒（并发 64 ÷ 10 条/秒）时，并发数才会成为瓶颈；用快模型（<1s）做大规模评测时，平台开销占主导。
 没有做优化：试过的低成本手段（调整 workers、事件刷新间隔）收益 <10%；真正有效的做法是合并写事务（会话创建与 Turn 收尾、评分落库）、缓存不可变的版本 / agent / 用例读取，改动落在 SessionService / EvalService 核心路径上，风险与改动面都超出「明显、低风险」，留在 BACKLOG。顺带观察到：`tiktoken` 词表首次使用时会联网下载，离线环境会在第一次估算 token 时在事件循环里同步尝试联网，失败后才退化为启发式估算（没有测过它具体阻塞多久）。
+
+## 部署 — Docker 与 `server.allow_remote_bootstrap`
+
+新增 `Dockerfile`（Node 构建前端 → Python 3.12 slim 安装 backend，非 root 用户，数据目录 `/data`）和 `docker-compose.yml`（挂载宿主机 `~/.evalp`，端口只映射到 `127.0.0.1:7860`）。
+`/auth/bootstrap` 原本只允许回环地址，Docker 里浏览器请求来自网关地址会被拒绝，因此新增配置 `server.allow_remote_bootstrap`（默认 false，
+环境变量 `EVALP_SERVER_ALLOW_REMOTE_BOOTSTRAP`），镜像里设为 true；安全性靠端口只映射到宿主机回环地址保证。

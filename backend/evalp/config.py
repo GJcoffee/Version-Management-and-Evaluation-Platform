@@ -20,6 +20,9 @@ ENV_PREFIX = "EVALP_"
 class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(7860, ge=1, le=65535)
+    # 允许非回环地址调用 /auth/bootstrap 领取 token Cookie。Docker 里浏览器请求来自网关地址，需要打开；
+    # 此时应把端口只映射到宿主机的 127.0.0.1
+    allow_remote_bootstrap: bool = False
 
 
 class SchedulerConfig(BaseModel):

@@ -2,6 +2,7 @@ import os
 import stat
 
 import httpx
+from evalp.app import create_app
 from evalp.auth import COOKIE_NAME, ensure_token
 
 
@@ -56,6 +57,17 @@ async def test_bootstrap_loopback_only(app, token):
             if status == 403:
                 assert "set-cookie" not in r.headers
                 assert r.json()["error"]["code"] == "FORBIDDEN"
+
+
+
+async def test_bootstrap_remote_allowed_by_config(config, ctx):
+    config.server.allow_remote_bootstrap = True
+    app = create_app(config, ctx=ctx)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app, client=("172.17.0.1", 5000))  # Docker 网关
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.get("/auth/bootstrap")
+            assert r.status_code == 200 and f"{COOKIE_NAME}={app.state.token}" in r.headers["set-cookie"]
 
 
 def test_token_file_created_with_mode_600(config, app, token):

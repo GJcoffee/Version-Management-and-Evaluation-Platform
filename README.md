@@ -69,6 +69,19 @@ evalp serve                    # 默认 http://127.0.0.1:7860，数据目录 ~/.
 
 浏览器打开 http://127.0.0.1:7860 ，先到「设置」登记模型 Provider（base_url、API Key、模型名与价格）。
 
+## Docker 部署
+
+```bash
+docker compose up -d --build   # 构建镜像（含前端）并在后台启动，http://127.0.0.1:7860
+docker compose logs -f         # 查看日志
+docker compose down            # 停止
+```
+
+- 数据目录挂载宿主机的 `~/.evalp`（可用环境变量 `EVALP_HOME` 改），与本机的 `evalp` CLI / MCP 共用 token 和数据库，宿主机上的 `evalp push`、`evalp eval run` 等命令可以直接连容器里的服务。不要同时在宿主机上运行 `evalp serve`（端口冲突）。
+- 端口只映射到宿主机的 `127.0.0.1`：镜像里打开了 `server.allow_remote_bootstrap`（浏览器经 Docker 网关访问，不是回环地址），不要改成映射到 `0.0.0.0`。
+- 模型服务跑在宿主机上（如 Ollama、vLLM）时，Provider 的 base_url 写 `http://host.docker.internal:端口/v1`，不能写 `127.0.0.1`。
+- 镜像里没有 git 和 agent 项目代码，代码型 agent 的子进程接入需要在宿主机上运行 `evalp serve`；HTTP 接入不受影响（agent 服务在宿主机上时同样用 `host.docker.internal`）。
+
 ## 在 agent 项目里使用（CLI）
 
 ```bash

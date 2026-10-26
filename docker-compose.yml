@@ -1,0 +1,12 @@
+services:
+  evalp:
+    build: .
+    image: evalp:latest
+    container_name: evalp
+    # 只映射到宿主机的 127.0.0.1：镜像里打开了 allow_remote_bootstrap（浏览器经 Docker 网关访问），不能暴露到局域网
+    ports:
+      - "127.0.0.1:7860:7860"
+    # 与本机 evalp CLI / MCP 共用数据目录（token、数据库），宿主机上的 evalp 命令可以直接连容器里的服务
+    volumes:
+      - ${EVALP_HOME:-~/.evalp}:/data
+    restart: unless-stopped

@@ -221,9 +221,12 @@ def create_app(
 
     @app.get("/auth/bootstrap", include_in_schema=False)
     async def bootstrap(request: Request) -> JSONResponse:
-        """前端启动时调用：仅限回环地址，下发 HttpOnly + SameSite=Strict 的 token Cookie。"""
+        """前端启动时调用：下发 HttpOnly + SameSite=Strict 的 token Cookie。
+
+        仅限回环地址；``server.allow_remote_bootstrap`` 打开时不限（Docker）。
+        """
         host = request.client.host if request.client else None
-        if not is_loopback(host):
+        if not is_loopback(host) and not config.server.allow_remote_bootstrap:
             raise Forbidden("bootstrap 只允许本机访问")
         resp = JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
         resp.set_cookie(
