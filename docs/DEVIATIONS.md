@@ -208,18 +208,13 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 - SSE 业务事件 `event: error` 与 `EventSource.onerror` 同名，前端已区分处理（带 data 视为业务事件）。
 - 超过 32KB 的事件在库中是整个 payload 被替换为 `{$blob, ...}` 存根（不是字段级），前端按整 payload 存根按需加载。
 
-## 对比与重放 — 重放在同一次重放内逐轮串行，不同重放之间最多并发 4 个
+## 对比与重放 — 重放在同一次重放内逐轮串行，不同重放之间最多并发 4 个（已取代）
 
-契约 3 节要求"各轮相互独立，在后台并发执行（并发上限 4）"。但 `SessionService` 约束同一会话同一时间只能执行一轮
-（`_running` 按 session_id 占位，`EventSink` 的 seq 也按会话单调分配），而契约又要求一次重放只产生一个新会话，
-因此一次重放内的各轮无法真正并发。实际：每次重放一个后台 asyncio 任务，按原轮次 idx 升序逐轮执行；不同重放之间用
-`Semaphore(4)` 限制并发。各轮的上下文仍取自原会话（`history_override`），互不依赖，结果与并发执行等价，只是总耗时更长。
-未改动 `services/session.py`。若以后需要真正的轮内并发，需要让 `SessionService` 支持同一会话并行轮次（或重放改为每轮一个会话）。
+早期实现因 `SessionService` 同一会话同一时间只能执行一轮，锚定重放只能逐轮串行。**已被取代**：见文末「对比与重放 — 锚定重放轮内并发」。
 
-## 对比与重放 — replay 对比组的轮次选择存在 compare_groups.notes
+## 对比与重放 — replay 对比组的轮次选择存在 compare_groups.notes（已取代）
 
-`turns` 子集重放时，对齐结果只应包含被选中的轮次。`compare_groups` 没有对应字段，所以把 `{"replay_turns": [...]}`
-以 JSON 写进 `notes` 列（该列的"备注编辑"功能在 BACKLOG 中尚未实现，API 也不返回 notes）。以后做备注编辑时需另加字段或迁移这个用法。
+早期把 `{"replay_turns": [...]}` 写进 `notes`。**已被取代**：见文末「对比与重放 — 重放状态与所选轮次成为 compare_groups 的正式列」（迁移 0003 已把旧数据迁出，`notes` 回归用户备注）。
 
 ## 对比与重放 — 对齐结果的附加字段与 step_id 约定
 
@@ -363,3 +358,42 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
   - `evalp gc`：`POST /system/gc`。
 - **未做**：`chat` 直接与草稿对话——会话（`sessions.version_id` 非空、重放 / 评测 / trace 都以版本为锚）不支持草稿，要改需要 schema、Runner 与前端同时调整，超出"极小补丁"，保留在 BACKLOG。
 
+## 对比与重放 — 重放状态与所选轮次成为 compare_groups 的正式列
+
+迁移 `0003` 给 `compare_groups` 加三列：`replay_status`（`running | completed | failed`，带 CHECK）、`replay_turns`（JSON，所选原轮次 idx）、`replay_error`（TEXT）。
+详设 3.3 的 `compare_groups` 没有这些列；原因是前端需要稳定的重放进度（取代前端的“2 分钟没进展就算停止”启发式）和所选轮次，不能再塞在 `notes` 里。
+
+- 旧数据：迁移里把 `mode='replay'` 行 `notes` 中的 `replay_turns` 迁到新列，`notes` 清空（若 notes 里还有别的键则保留其余键）；`replay_status` 按已有轮次推断（所选轮次在新会话里都有非 running 的轮次为 `completed`，否则 `failed`，迁移时不可能有重放在后台跑）。降级把 `replay_turns` 写回 `notes`（会覆盖用户备注）。
+- 读取时仍兼容旧格式：`replay_turns` 为空但 `notes` 是旧 JSON 时从 notes 读，且该 notes 不作为备注返回。
+- `failed` 的定义：轮次没能启动 / 被取消、整个任务出错、服务关闭或重启打断。单轮 agent 报错（`status=error|timeout`）是重放的**结果**，不算失败。库里是 `running` 但进程内没有对应后台任务（重启 / 崩溃）时，API 读出来按 `failed` 返回（不依赖启动时的清理）。
+- 状态在 SSE 发 `idle` 之前写入终态。
+
+## 对比与重放 — 重放期间 SSE 不发 idle
+
+`SessionService.hold_stream(session_id)` 返回释放函数：持有期间，该会话的 SSE 即使没有轮次在执行也不发 `idle`、不关闭连接（心跳照常），释放时唤醒等待的流再判断是否空闲。`CompareService.replay` 在创建对比组之前持有、重放任务结束（状态已写终态）后释放。
+详设 7.4 的 idle 语义对非重放会话不变。前端去掉了每 1.5s 检查并重连的轮询，只保留“重放仍在进行但连接已 idle 持续 5 秒”时的兜底重连。
+
+## 对比与重放 — 锚定重放轮内并发（SessionService 支持同会话并发轮次）
+
+契约 3 节、详设 9.4 要求锚定重放“各轮并发执行（并发上限 4）”。确认可行性：锚定模式第 k 轮的上下文完全取自**原会话**（`get_history(src, upto_idx=k)`），与新会话里其他轮次无关，所以可以并发；顺序依赖只存在于自由模式。
+为此 `SessionService.run_turn` 增加 `concurrent=True`：只允许与同会话中同样 `concurrent` 的轮次并发，与普通轮次仍然互斥（普通对话行为不变，仍是 `SESSION_BUSY`）。改动点：
+- `_running` 由“会话 → 一个槽位”改为“会话 → 槽位列表”；`is_running` / `running_turn_id` 语义不变，新增 `running_turn_ids`、`wait_turn`。
+- 同一会话的并发轮次**共用一个 `EventSink`**（引用计数，最后一个归还时关闭）：`seq` 单调不重复、只有一份缓冲，事件靠 `turn_id` 区分。若各轮各自一个 sink，seq 会冲突，`last_seq` 水位也会让断线重连漏事件。
+- 会话 `status`：并发轮次中最后一个结束才回到 `idle`（`error` 由最后结束的那一轮的结果决定，中途结束的轮次的 error 不单独保留）。
+- SSE 的 idle 判定按“还有未结束的轮次”计算（见上一节）。
+- 重放内：`Turn` 行按原轮次顺序创建（`start_lock`），之后各轮并发运行；全部重放合计最多同时执行 `REPLAY_CONCURRENCY=4` 个轮次（取代原来的“不同重放之间最多 4 个”）。LLM 的并发仍受各 Provider 的 `max_concurrency` 限制。
+
+## 对比与重放 — 重放自由模式
+
+`mode=free`：新会话用自己的回复续写上下文（`history_override=None`，取新会话 `status=ok` 的轮次），逐轮串行，`anchored_from_turn_id` 为空，`pair_index` 仍是原轮次 idx（用于对齐）。取舍：
+- 只重放部分轮次时，上下文只含所选的前几轮（没选的轮次不在新会话里）。
+- 某一轮 agent 出错后继续下一轮（出错的轮次不进历史），与锚定模式“单轮失败不影响其他轮”一致；详设没有规定。
+- 全局信号量按“轮”获取（不是整个重放占一个名额），避免一个长的自由重放长期占满并发名额。
+
+## 对比与重放 — 单侧发送、备注、alignment 缓存、前端增量对齐
+
+- **单侧发送**：`POST /compare/{id}/turns` 增加 `side`（缺省 `both`，向后兼容）；`left/right` 时 `pair_index`、另一侧 turn id 为 null（`ComparePairAccepted` 的三个字段改为可空）。alignment 增加顶层 `forks`（单侧消息，含 `after_pair` 供排序），`turns` 不变，旧客户端忽略即可。详设 9.3 说“在 UI 中标为单侧消息”，这里由前端按 `forks` 渲染为独占一侧的行。UI 上运行期间两侧输入都被禁用（只要任一侧在跑），比后端更保守。
+- **备注/标题编辑**：新增 `PATCH /compare/{id}`；`notes` 列原先被重放元数据占用（见上），现在是真正的用户备注，并在 `CompareGroup` 里返回。
+- **alignment 缓存**：进程内 LRU（64 条），键 = 对比模式 + 重放所选轮次 + 两侧会话的 `last_seq` 与各轮 `(id, status, finished_at)`；任一侧有轮次在执行（库里 running 或内存里占着槽位）、或重放未结束时不缓存，且计算前后签名不一致也不缓存。不落库，重启后重算。
+- **前端增量对齐**（详设 9.2）：运行中的行用浏览器里根据 SSE 事件算出的对齐（`incrementalAlign.ts`，`difflib.SequenceMatcher` 的最长连续匹配递归在 TS 里重写一份，用后端生成的 42 组用例做一致性测试）；两侧都结束后以服务端结果为准。只覆盖步骤对齐、参数 diff 和 final_text，指标仍取自 SSE 还原出的轮次。
+- **会话列表**：API 缺省（`chat,replay`）保持不变以兼容旧客户端；前端“与其他会话对比”选择器改为默认 `mode=chat`，可勾选“包含重放会话”。

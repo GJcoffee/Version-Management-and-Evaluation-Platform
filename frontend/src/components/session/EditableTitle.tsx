@@ -14,10 +14,16 @@ export function EditableTitle({
   value,
   onSave,
   disabled,
+  testId = 'session-title',
+  maxLength = SESSION_TITLE_MAX,
 }: {
   value: string
   onSave: (title: string) => Promise<unknown>
   disabled?: boolean
+  /** 展示文字的 data-testid；输入框为 `${testId}-input` */
+  testId?: string
+  /** 最长字符数，默认与会话标题一致（120） */
+  maxLength?: number
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(value)
@@ -44,8 +50,8 @@ export function EditableTitle({
       setError('标题不能为空')
       return
     }
-    if (next.length > SESSION_TITLE_MAX) {
-      setError(`标题最长 ${SESSION_TITLE_MAX} 个字符`)
+    if (next.length > maxLength) {
+      setError(`标题最长 ${maxLength} 个字符`)
       return
     }
     if (next === value) {
@@ -66,7 +72,7 @@ export function EditableTitle({
   if (!editing) {
     return (
       <div className="flex min-w-0 items-center gap-1">
-        <h1 className="truncate text-sm font-semibold" data-testid="session-title">
+        <h1 className="truncate text-sm font-semibold" data-testid={testId}>
           {value}
         </h1>
         {!disabled && (
@@ -84,7 +90,7 @@ export function EditableTitle({
         value={draft}
         invalid={!!error}
         aria-label="会话标题"
-        data-testid="session-title-input"
+        data-testid={`${testId}-input`}
         className="h-7 w-64"
         disabled={saving}
         onChange={(e) => {

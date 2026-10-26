@@ -630,11 +630,17 @@ def replay_finished(alignment: dict[str, Any]) -> bool:
 async def wait_replay(
     client: EvalpClient, compare_id: str, *, interval: float = 1.0, timeout: float | None = None
 ) -> tuple[dict[str, Any], bool]:
-    """轮询对比的对齐结果，直到重放完成。返回 (对齐结果, 是否超时)。"""
+    """轮询对比的对齐结果，直到重放完成。返回 (对齐结果, 是否超时)。
+
+    各轮都有结果即完成；否则再看对比组的 ``replay_status``（``failed`` 时有的轮次不会再有结果，不必等超时）。
+    """
     start = time.monotonic()
     while True:
         alignment = await client.get(f"/compare/{compare_id}/alignment")
         if replay_finished(alignment):
+            return alignment, False
+        group = await client.get(f"/compare/{compare_id}")
+        if isinstance(group, dict) and group.get("replay_status") in ("completed", "failed"):
             return alignment, False
         if timeout is not None and time.monotonic() - start >= timeout:
             return alignment, True

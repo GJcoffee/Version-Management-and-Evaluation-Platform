@@ -6,6 +6,7 @@ import type {
   CompareGroup,
   CompareTurnAccepted,
   CompareTurnCreate,
+  CompareUpdate,
   ReplayRequest,
   ReplayResponse,
 } from '../compareTypes'
@@ -28,11 +29,27 @@ export function useCompares(limit = 6) {
   })
 }
 
+/** 重放进行中时对比组的刷新间隔（重放状态来自服务端，页面据此显示进度 / 完成 / 失败） */
+export const REPLAY_POLL_MS = 2000
+
 export function useCompare(id: string | undefined) {
   return useQuery({
     queryKey: compareKeys.detail(id ?? ''),
     queryFn: () => api.get<CompareGroup>(`/compare/${id}`),
     enabled: !!id,
+    refetchInterval: (q) => (q.state.data?.replay_status === 'running' ? REPLAY_POLL_MS : false),
+  })
+}
+
+/** 修改对比的标题 / 备注 */
+export function useUpdateCompare(id: string | undefined) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: CompareUpdate) => api.patch<CompareGroup>(`/compare/${id}`, { body }),
+    onSuccess: (g) => {
+      qc.setQueryData(compareKeys.detail(g.id), g)
+      void qc.invalidateQueries({ queryKey: [...compareKeys.all, 'list'] })
+    },
   })
 }
 

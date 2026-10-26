@@ -747,8 +747,11 @@ def build_server(
         session_id: Annotated[str, Field(description="要重放的历史会话 id")],
         target_version: Annotated[str, Field(description="用哪个版本重放：v13、标签或版本 id")],
         mode: Annotated[
-            Literal["anchored"],
-            Field(description="重放模式；目前只支持 anchored（锚定：每轮的上下文用原会话的历史）"),
+            Literal["anchored", "free"],
+            Field(
+                description="重放模式：anchored（锚定，默认：每轮的上下文用原会话的历史，各轮并发）；"
+                "free（自由：新版本用自己的回复续写上下文，逐轮串行，更慢）"
+            ),
         ] = "anchored",
         turns: Annotated[list[int] | None, Field(description="只重放这些轮次（idx）；省略为全部")] = None,
         wait: Annotated[bool, Field(description="是否等待重放结束（最多 10 分钟）并给出对比摘要")] = True,

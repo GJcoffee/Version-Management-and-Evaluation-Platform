@@ -91,7 +91,7 @@ async def test_replay_validation(cw):
     src, _, _ = await _source(cw, vs)
     for body in (
         {"target_version_id": vs["T1"]["id"], "turns": [5]},
-        {"target_version_id": vs["T1"]["id"], "mode": "free"},
+        {"target_version_id": vs["T1"]["id"], "mode": "bogus"},
     ):
         r = await cw.client.post(f"{API}/sessions/{src.id}/replay", json=body)
         assert r.status_code == 400, r.text

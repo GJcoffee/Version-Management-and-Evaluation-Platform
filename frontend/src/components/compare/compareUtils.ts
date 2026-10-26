@@ -1,17 +1,21 @@
 import DiffMatchPatch from 'diff-match-patch'
-import type { AlignTurn, Alignment, CompareMode } from '@/api/compareTypes'
+import type { AlignFork, AlignTurn, Alignment, CompareMode, ReplayMode } from '@/api/compareTypes'
 import { highlightKey, type TurnState } from '@/components/session'
 
 // ───────────────────────────── 行模型 ─────────────────────────────
 
-/** 一行 = 同一个 pair 的左右两轮（任一侧可以没有） */
+/** 一行 = 同一个 pair 的左右两轮（任一侧可以没有）；或一条单侧消息（分叉，只有一侧有轮次） */
 export interface CompareRow {
-  /** pair_index（live / replay）或 idx（history） */
+  /** 行的唯一键：成对行为 `p{pair}`，单侧消息为 `f:{turn_id}` */
+  key: string
+  /** pair_index（live / replay）或 idx（history）；单侧消息为 -1 */
   pair: number
   leftTurnId: string | null
   rightTurnId: string | null
   /** 服务端对齐结果（没拉到时为 undefined） */
   align?: AlignTurn
+  /** 单侧消息：发给了哪一侧 */
+  fork?: 'left' | 'right'
 }
 
 /** 刚发送、对齐结果还没返回的 pair（POST /compare/{id}/turns 的响应） */
@@ -21,23 +25,69 @@ export interface SeededPair {
   rightTurnId: string
 }
 
+/** 刚发送的单侧消息；afterPair 为发送时界面上最后一个成对行的 pair（没有则 null） */
+export interface SeededFork {
+  side: 'left' | 'right'
+  turnId: string
+  afterPair: number | null
+}
+
 /**
  * 行 = 服务端对齐结果的轮次（重放时只含选中的轮次）+ 本地刚发送、对齐结果里还没有的 pair。
- * 按 pair 升序。
+ * 成对行按 pair 升序；单侧消息（分叉）排在 after_pair 对应的行之后（同一位置左侧先、再按 idx）。
  */
-export function buildRows(alignment: Alignment | undefined, seeded: readonly SeededPair[] = []): CompareRow[] {
+export function buildRows(
+  alignment: Alignment | undefined,
+  seeded: readonly SeededPair[] = [],
+  seededForks: readonly SeededFork[] = [],
+): CompareRow[] {
   const rows = new Map<number, CompareRow>()
   for (const t of alignment?.turns ?? []) {
-    rows.set(t.pair, { pair: t.pair, leftTurnId: t.left_turn_id, rightTurnId: t.right_turn_id, align: t })
+    rows.set(t.pair, { key: `p${t.pair}`, pair: t.pair, leftTurnId: t.left_turn_id, rightTurnId: t.right_turn_id, align: t })
   }
   for (const s of seeded) {
     const cur = rows.get(s.pair)
-    if (!cur) rows.set(s.pair, { pair: s.pair, leftTurnId: s.leftTurnId, rightTurnId: s.rightTurnId })
+    if (!cur) rows.set(s.pair, { key: `p${s.pair}`, pair: s.pair, leftTurnId: s.leftTurnId, rightTurnId: s.rightTurnId })
     else if (!cur.leftTurnId || !cur.rightTurnId) {
       rows.set(s.pair, { ...cur, leftTurnId: cur.leftTurnId ?? s.leftTurnId, rightTurnId: cur.rightTurnId ?? s.rightTurnId })
     }
   }
-  return [...rows.values()].sort((a, b) => a.pair - b.pair)
+  const pairRows = [...rows.values()].sort((a, b) => a.pair - b.pair)
+
+  const forks: Array<{ after: number | null; side: 'left' | 'right'; turnId: string }> = (alignment?.forks ?? []).map((f: AlignFork) => ({
+    after: f.after_pair,
+    side: f.side,
+    turnId: f.turn_id,
+  }))
+  const known = new Set(forks.map((f) => f.turnId))
+  for (const f of seededForks) if (!known.has(f.turnId)) forks.push({ after: f.afterPair, side: f.side, turnId: f.turnId })
+  if (forks.length === 0) return pairRows
+
+  const forkRows = (after: number | null): CompareRow[] =>
+    forks
+      .filter((f) => f.after === after)
+      .map((f) => ({
+        key: `f:${f.turnId}`,
+        pair: -1,
+        fork: f.side,
+        leftTurnId: f.side === 'left' ? f.turnId : null,
+        rightTurnId: f.side === 'right' ? f.turnId : null,
+      }))
+  const out: CompareRow[] = forkRows(null)
+  const placed = new Set<number | null>([null])
+  for (const r of pairRows) {
+    out.push(r)
+    out.push(...forkRows(r.pair))
+    placed.add(r.pair)
+  }
+  // after_pair 指向的成对行（暂时）不存在：放在最后，避免丢失
+  for (const f of forks) {
+    if (!placed.has(f.after)) {
+      placed.add(f.after)
+      out.push(...forkRows(f.after))
+    }
+  }
+  return out
 }
 
 export function turnById(turns: readonly TurnState[], id: string | null): TurnState | undefined {
@@ -213,3 +263,4 @@ export function charDiff(left: string, right: string): DiffPiece[] {
 // ───────────────────────────── 杂项 ─────────────────────────────
 
 export const MODE_TAG: Record<CompareMode, string> = { live: '实时', history: '历史', replay: '重放' }
+export const REPLAY_MODE_LABEL: Record<ReplayMode, string> = { anchored: '锚定模式', free: '自由模式' }

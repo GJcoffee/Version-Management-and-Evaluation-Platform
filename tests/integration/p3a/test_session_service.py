@@ -350,6 +350,8 @@ async def test_list_sessions_filters_and_pagination(world, fake_openai):
     assert await ids(mode="eval") == [ev.id]
     assert set(await ids(mode=["eval", "judge"])) == {ev.id, jd.id}
     assert await ids(mode="replay") == [rp.id]
+    assert rp.id in default  # 缺省包含 replay（向后兼容）；调用方用 mode=chat 过滤掉重放会话
+    assert rp.id not in await ids(mode="chat") and {s1.id, s2.id, s3.id} <= set(await ids(mode="chat"))
     assert set(await ids(agent_id="agent-b")) == {s2.id}
     assert s1.id in await ids(agent_id=va["agent_id"])
     assert await ids(version_id=vb["id"]) == [s2.id]

@@ -14,6 +14,7 @@ from evalp.schemas.compare import (
     CompareGroupOut,
     ComparePairAccepted,
     ComparePairCreate,
+    CompareUpdate,
     ReplayAccepted,
     ReplayCreate,
 )
@@ -40,19 +41,26 @@ async def get_compare(compare_id: str, ctx: AppContext = Depends(get_ctx)):
     return await ctx.svc(CompareService).get(compare_id)
 
 
+@router.patch("/compare/{compare_id}", response_model=CompareGroupOut)
+async def update_compare(compare_id: str, body: CompareUpdate, ctx: AppContext = Depends(get_ctx)):
+    """修改对比的标题 / 备注（只改请求里出现的字段；null 或空白表示清空，标题最长 120、备注最长 2000）。"""
+    return await ctx.svc(CompareService).update(compare_id, body)
+
+
 @router.post("/compare/{compare_id}/turns", response_model=ComparePairAccepted, status_code=202)
 async def create_pair_turn(compare_id: str, body: ComparePairCreate, ctx: AppContext = Depends(get_ctx)):
-    """双栏发送：两侧会话并发执行同一输入，立即返回；任意一侧正在执行时 409 ``SESSION_BUSY``。"""
-    return await ctx.svc(CompareService).run_pair(compare_id, body.input, body.variables)
+    """双栏发送：默认两侧会话并发执行同一输入，立即返回；``side=left|right`` 只发给一侧（单侧消息 / 分叉，
+    ``pair_index`` 为 null）。目标会话正在执行时 409 ``SESSION_BUSY``。"""
+    return await ctx.svc(CompareService).run_pair(compare_id, body.input, body.variables, body.side)
 
 
 @router.get("/compare/{compare_id}/alignment")
 async def get_alignment(compare_id: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
-    """轮次与步骤对齐结果（服务端计算，包含正在执行的轮次的当前进度）。"""
+    """轮次与步骤对齐结果（服务端计算，包含正在执行的轮次的当前进度；两侧都空闲时结果会被缓存）。"""
     return await ctx.svc(CompareService).alignment(compare_id)
 
 
 @router.post("/sessions/{session_id}/replay", response_model=ReplayAccepted, status_code=201)
 async def replay_session(session_id: str, body: ReplayCreate, ctx: AppContext = Depends(get_ctx)):
-    """用另一个版本重放历史会话（锚定模式）：立即返回新会话与对比组，各轮在后台执行。"""
+    """用另一个版本重放历史会话（锚定 ``anchored`` / 自由 ``free``）：立即返回新会话与对比组，后台执行。"""
     return await ctx.svc(CompareService).replay(session_id, body.target_version_id, body.turns, body.mode)

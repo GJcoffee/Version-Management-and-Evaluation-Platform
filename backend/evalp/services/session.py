@@ -4,7 +4,10 @@
 
 - ``run_turn(..., wait=True)`` 在本轮结束后返回 ``TurnOut``；执行失败**不抛异常**，看 ``status`` / ``error``。
   调用方任务被取消时，本轮会被取消（置位 cancel，等 Runner 收尾后再向上抛 CancelledError），不会留下孤儿任务；
-- 同一会话同一时间只能执行一轮（``SessionBusy``）；``history_override`` 非空时代替会话自身的历史（锚定重放）；
+- 同一会话同一时间只能执行一轮（``SessionBusy``）；唯一的例外是 ``concurrent=True``（锚定重放）：
+  同一会话的多个并发轮次共用一个 :class:`EventSink`（seq 单调），会话直到最后一个轮次结束才回到空闲；
+  ``history_override`` 非空时代替会话自身的历史（锚定重放）；
+- ``hold_stream`` 让该会话的 SSE 在没有轮次运行的间隙也不发 ``idle``（重放轮次之间）；
 - 历史拼接（6.1）：只取 ``status=ok`` 的轮次，按 idx 顺序拼接 ``input`` 与 ``output.messages``；
 - 每个会话的事件由 :class:`EventSink` 写入 ``events`` 表（先发布到总线，后批量落库），``turn.end`` 到达前
   ``turns`` 与 ``sessions.stats / status`` 已更新完毕；
@@ -18,7 +21,7 @@ import asyncio
 import contextlib
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -84,6 +87,7 @@ class _Running:
     result: TurnResult | None = None
     sink: EventSink | None = None
     finalized: bool = False  # 轮次结果已写库（对外可见为已结束），只差 turn.end 落库后释放槽位
+    shared: bool = False  # 允许与同会话的其他 shared 轮次并发（锚定重放）
     released: asyncio.Event = field(default_factory=asyncio.Event)  # turn.end 已落库、会话已可接受下一轮
 
 
@@ -198,8 +202,11 @@ def _like(q: str) -> str:
 class SessionService:
     def __init__(self, ctx: AppContext) -> None:
         self.ctx = ctx
-        self._running: dict[str, _Running] = {}  # session_id -> 正在执行的轮次
+        self._running: dict[str, list[_Running]] = {}  # session_id -> 正在执行的轮次（一般只有一个）
         self._by_turn: dict[str, _Running] = {}
+        self._sinks: dict[str, list[Any]] = {}  # session_id -> [共享的 EventSink, 引用数]
+        self._holds: dict[str, int] = {}  # session_id -> SSE 保持打开的持有数（重放期间）
+        self._hold_events: dict[str, asyncio.Event] = {}  # 持有数归零时置位，唤醒等待中的 SSE
         self._recovered = False
         self._recover_lock = asyncio.Lock()
 
@@ -460,12 +467,67 @@ class SessionService:
         return msg
 
     def running_turn_id(self, session_id: str) -> str | None:
-        """会话当前正在执行的轮次 id（没有则 None）。"""
-        slot = self._running.get(session_id)
-        return slot.turn_id if slot else None
+        """会话当前正在执行的轮次 id（没有则 None；并发轮次时取最早开始的那个）。"""
+        slots = self._running.get(session_id)
+        return slots[0].turn_id if slots else None
+
+    def running_turn_ids(self, session_id: str) -> list[str]:
+        """会话当前所有正在执行的轮次 id（按开始顺序）。"""
+        return [s.turn_id for s in self._running.get(session_id, ())]
 
     def is_running(self, session_id: str) -> bool:
-        return session_id in self._running
+        return bool(self._running.get(session_id))
+
+    # ------------------------------------------------------------ SSE 保持打开（重放期间）
+
+    def hold_stream(self, session_id: str) -> Callable[[], None]:
+        """持有该会话的 SSE：持有期间没有轮次执行时也不发 ``idle``（重放在轮次之间会有空档）。
+
+        返回释放函数（幂等）。持有数归零时唤醒正在等待的 SSE，由它们重新判断是否空闲。
+        """
+        self._holds[session_id] = self._holds.get(session_id, 0) + 1
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            n = self._holds.get(session_id, 1) - 1
+            if n > 0:
+                self._holds[session_id] = n
+                return
+            self._holds.pop(session_id, None)
+            waiter = self._hold_events.pop(session_id, None)
+            if waiter is not None:
+                waiter.set()
+
+        return release
+
+    def is_held(self, session_id: str) -> bool:
+        return self._holds.get(session_id, 0) > 0
+
+    # ------------------------------------------------------------ 共享 EventSink
+
+    def _acquire_sink(self, session_id: str, last_seq: int) -> EventSink:
+        """取会话的 EventSink：已有（并发轮次）则复用，保证同一会话的 seq 单调且只有一份缓冲。"""
+        entry = self._sinks.get(session_id)
+        if entry is None:
+            entry = [EventSink(self.ctx, session_id, last_seq), 0]
+            self._sinks[session_id] = entry
+        entry[1] += 1
+        return entry[0]
+
+    async def _release_sink(self, session_id: str, sink: EventSink) -> None:
+        """归还 EventSink；最后一个使用者归还时关闭（做最后一次 flush）。"""
+        entry = self._sinks.get(session_id)
+        if entry is None or entry[0] is not sink:
+            await sink.close()
+            return
+        entry[1] -= 1
+        if entry[1] <= 0:
+            del self._sinks[session_id]
+            await sink.close()
 
     async def run_turn(
         self,
@@ -478,26 +540,31 @@ class SessionService:
         pair_index: int | None = None,
         history_override: list[Message] | None = None,
         anchored_from_turn_id: str | None = None,
+        concurrent: bool = False,
         wait: bool = True,
     ) -> TurnOut:
         """执行一轮。
 
         ``wait=False``：创建 running 状态的轮次后立即返回，后台执行；``wait=True``：执行完成后返回。
         执行失败不抛异常，通过 ``TurnOut.status`` / ``error`` 体现。会话正在执行时抛 ``SessionBusy``。
+        ``concurrent=True``：允许与同会话中同样 ``concurrent`` 的轮次并发（仅锚定重放使用，
+        每轮的上下文都由 ``history_override`` 给定，互不依赖）；与非并发轮次仍然互斥。
         """
         await self._ensure_recovered()
         msg = self._coerce_input(input)
         cur = self._running.get(session_id)
-        if cur is not None and cur.finalized:
+        if cur and not concurrent and all(c.finalized for c in cur):
             # 轮次在库里已经是结束状态（客户端可能刚轮询到），只差 turn.end 落库：稍等槽位释放而不是报忙
-            await self._wait_released(cur.turn_id)
-        if session_id in self._running:
+            for c in list(cur):
+                await self._wait_released(c.turn_id)
+        cur = self._running.get(session_id)
+        if cur and not (concurrent and all(c.shared for c in cur)):
             raise SessionBusy(
                 f"会话 {session_id} 正在执行一轮",
-                {"session_id": session_id, "turn_id": self._running[session_id].turn_id},
+                {"session_id": session_id, "turn_id": cur[0].turn_id},
             )
-        slot = _Running(session_id=session_id, turn_id=new_id("trn"))
-        self._running[session_id] = slot  # 无 await：检查与占位是原子的
+        slot = _Running(session_id=session_id, turn_id=new_id("trn"), shared=concurrent)
+        self._running.setdefault(session_id, []).append(slot)  # 无 await：检查与占位是原子的
         self._by_turn[slot.turn_id] = slot
         try:
             async with self.ctx.db.read() as s:
@@ -539,29 +606,44 @@ class SessionService:
                 last_seq = row.last_seq
                 await s.flush()
                 out = turn_out(turn)
+            slot.sink = self._acquire_sink(session_id, last_seq)
         except BaseException:
             self._release(slot)
             raise
 
         merged = {**session_vars, **(variables or {})}
         slot.task = asyncio.create_task(
-            self._execute(slot, resolved, msg, history, merged, tool_mocks, priority, last_seq),
+            self._execute(slot, resolved, msg, history, merged, tool_mocks, priority),
             name=f"turn-{slot.turn_id}",
         )
         if not wait:
             return out
+        return await self._await_slot(slot)
+
+    async def _await_slot(self, slot: _Running) -> TurnOut:
+        """等本轮结束并返回轮次；等待方被取消时取消本轮并等它收尾，避免留下孤儿任务。"""
+        assert slot.task is not None
         try:
             await asyncio.shield(slot.task)
         except asyncio.CancelledError:
-            # 调用方被取消：取消本轮并等它收尾，避免留下孤儿任务
             slot.cancel.set()
             await asyncio.wait({slot.task}, timeout=CANCEL_WAIT_S)
             raise
         return await self.get_turn(slot.turn_id)
 
+    async def wait_turn(self, turn_id: str) -> TurnOut:
+        """等一个以 ``wait=False`` 启动的轮次结束（已结束则立即返回）；等待方被取消时本轮一并取消。"""
+        slot = self._by_turn.get(turn_id)
+        if slot is None or slot.task is None:
+            return await self.get_turn(turn_id)
+        return await self._await_slot(slot)
+
     def _release(self, slot: _Running) -> None:
-        if self._running.get(slot.session_id) is slot:
-            del self._running[slot.session_id]
+        slots = self._running.get(slot.session_id)
+        if slots is not None and slot in slots:
+            slots.remove(slot)
+            if not slots:
+                del self._running[slot.session_id]
         self._by_turn.pop(slot.turn_id, None)
         slot.released.set()
 
@@ -581,15 +663,16 @@ class SessionService:
         variables: dict[str, Any],
         tool_mocks: dict[str, Any] | None,
         priority: int,
-        last_seq: int,
     ) -> None:
         """后台执行一轮：Runner + EventSink，结束时更新 turns / sessions。"""
-        sink = EventSink(self.ctx, slot.session_id, last_seq, turn_id=slot.turn_id)
-        slot.sink = sink
+        sink = slot.sink
+        assert sink is not None
         finalized = False
         adapter: AgentAdapter | None = None
 
         async def emit(event: AgentEvent) -> None:
+            if event.turn_id is None:  # sink 可能被同会话的并发轮次共用，必须显式标注轮次
+                event = event.with_turn(slot.turn_id)
             await sink.emit(event)
             if event.type == "turn.end":
                 self._release(slot)  # turn.end 已发布并落库：此后该会话可以开始下一轮
@@ -639,7 +722,7 @@ class SessionService:
             if adapter is not None:
                 with contextlib.suppress(Exception):
                     await adapter.aclose()
-            await sink.close()
+            await self._release_sink(slot.session_id, sink)
             self._release(slot)
 
     async def _finalize(self, slot: _Running, result: TurnResult) -> None:
@@ -669,8 +752,12 @@ class SessionService:
                     stats[k] = stats.get(k, 0) + int(result.usage.get(k, 0) or 0)
                 stats["cost"] = round(float(stats.get("cost", 0.0)) + result.cost, 8)
                 sess.stats = stats
-                sess.status = "error" if result.status in ("error", "timeout") else "idle"
+                siblings = self._running.get(slot.session_id, ())
+                others = [r for r in siblings if r is not slot and not r.finalized]
+                if not others:  # 并发轮次：最后一个结束才回到空闲
+                    sess.status = "error" if result.status in ("error", "timeout") else "idle"
                 sess.updated_at = now
+            slot.finalized = True  # 在事务内置位：同会话并发轮次的最后一个才能把会话置为空闲
 
     # ------------------------------------------------------------ 取消 / 关闭
 
@@ -709,14 +796,17 @@ class SessionService:
         客户端带 ``Last-Event-ID`` 重连即可从数据库补齐。
         """
         sub = self.ctx.bus.subscribe(session_topic(session_id))
+        pending: asyncio.Future[AgentEvent] | None = None
         try:
             last = after_seq
-            ended: set[str] = set()
             # 事件先发布后落库：订阅之前已发布但还在缓冲里的事件既不在队列也不在库里，
             # 所以回放前先让正在执行的轮次把缓冲刷到库（订阅之后发布的事件在队列里，靠 seq 去重）
-            live = self._running.get(session_id)
-            if live is not None and live.sink is not None:
-                await live.sink.flush()
+            entry = self._sinks.get(session_id)
+            if entry is not None:
+                await entry[0].flush()
+            # 回放开始时正在执行的轮次；看到它的 turn.end 才算结束。回放 / 积压 / 实时事件里的
+            # turn.start 会补进来（并发轮次、重放的后一轮），turn.end 会移出
+            busy_ids = {s.turn_id for s in self._running.get(session_id, ())}
             while True:
                 async with self.ctx.db.read() as s:
                     rows = (
@@ -738,11 +828,8 @@ class SessionService:
                     yield e
                     last = r.seq
                     if e.type == "turn.end" and e.turn_id:
-                        ended.add(e.turn_id)
+                        busy_ids.discard(e.turn_id)
 
-            slot = self._running.get(session_id)
-            idle = slot is None or slot.turn_id in ended
-            last_end: str | None = slot.turn_id if slot is not None and idle else None
             # 回放结束时队列里的积压：按顺序处理，积压里已经回放过的步骤的 delta 是过期的
             backlog = sub.qsize()
             held: list[AgentEvent] = []
@@ -760,34 +847,75 @@ class SessionService:
                     held.clear()
                     yield item
                     last = item.seq
-                    if item.type == "turn.end":
-                        idle = True
-                        last_end = item.turn_id
+                    if item.type == "turn.end" and item.turn_id:
+                        busy_ids.discard(item.turn_id)
+                    elif item.type == "turn.start" and item.turn_id:
+                        busy_ids.add(item.turn_id)
             except SubscriptionClosed:
                 return
-            if not idle:
+            if busy_ids or self.is_held(session_id):
                 for h in held:
                     yield h
-            if idle:
-                await self._wait_released(last_end)
+            else:
+                await self._wait_all_released(session_id)
                 yield Idle(last)
                 return
             while True:
-                try:
-                    item = await sub.get()
-                except SubscriptionClosed:
-                    return
+                # 没有重放持有时直接等总线；持有期间还要能被"持有结束"唤醒（轮次之间不发 idle）
+                if pending is None and not self.is_held(session_id):
+                    try:
+                        item = await sub.get()
+                    except SubscriptionClosed:
+                        return
+                else:
+                    if pending is None:
+                        pending = asyncio.ensure_future(sub.get())
+                    waits: set[asyncio.Future[Any]] = {pending}
+                    hold_wait: asyncio.Future[Any] | None = None
+                    if self.is_held(session_id):
+                        hold_ev = self._hold_events.setdefault(session_id, asyncio.Event())
+                        hold_wait = asyncio.ensure_future(hold_ev.wait())
+                        waits.add(hold_wait)
+                    await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+                    if hold_wait is not None and not hold_wait.done():
+                        hold_wait.cancel()
+                    if not pending.done():  # 持有结束：重新判断是否空闲
+                        if not busy_ids and not self.is_held(session_id):
+                            await self._wait_all_released(session_id)
+                            yield Idle(last)
+                            return
+                        continue
+                    done_get, pending = pending, None
+                    try:
+                        item = done_get.result()
+                    except SubscriptionClosed:
+                        return
                 if item.seq is not None and item.seq <= last:
                     continue
                 yield item
                 if item.seq is not None:
                     last = item.seq
-                if item.type == "turn.end":
+                if item.type == "turn.start" and item.turn_id:
+                    busy_ids.add(item.turn_id)
+                elif item.type == "turn.end":
+                    if item.turn_id:
+                        busy_ids.discard(item.turn_id)
                     await self._wait_released(item.turn_id)
-                    yield Idle(last)
-                    return
+                    if not busy_ids and not self.is_held(session_id):
+                        yield Idle(last)
+                        return
         finally:
+            if pending is not None:
+                if not pending.done():
+                    pending.cancel()
+                elif not pending.cancelled():
+                    pending.exception()  # 取走异常（订阅已被关闭），避免 "exception was never retrieved"
             sub.close()
+
+    async def _wait_all_released(self, session_id: str) -> None:
+        """等该会话所有已结束（finalized）的轮次释放槽位，保证 Idle 之后库里已是完整数据。"""
+        for slot in list(self._running.get(session_id, ())):
+            await self._wait_released(slot.turn_id)
 
     # ------------------------------------------------------------ blob 访问控制
 

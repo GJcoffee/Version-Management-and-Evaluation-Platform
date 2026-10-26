@@ -1,4 +1,4 @@
-"""evalp replay：用另一个版本重放历史会话（锚定模式）。"""
+"""evalp replay：用另一个版本重放历史会话（锚定 / 自由模式）。"""
 
 from __future__ import annotations
 
@@ -25,7 +25,14 @@ def _parse_turns(text: str | None) -> list[int] | None:
 def replay(
     session_id: Annotated[str, typer.Argument(help="要重放的历史会话 id（ses_…）")],
     to: Annotated[str, typer.Option("--to", help="用哪个版本重放：v13、标签或版本 id")],
-    mode: Annotated[str, typer.Option("--mode", help="重放模式（目前只支持 anchored）")] = "anchored",
+    mode: Annotated[
+        str,
+        typer.Option(
+            "--mode",
+            help="重放模式：anchored（锚定，默认：用原会话的历史作上下文，各轮并发）或 "
+            "free（自由：新版本用自己的回复续写，逐轮串行）",
+        ),
+    ] = "anchored",
     turns: Annotated[
         str | None, typer.Option("--turns", help="只重放这些轮次（从 0 开始，逗号分隔）；默认全部")
     ] = None,
@@ -34,9 +41,9 @@ def replay(
     agent: AgentOpt = None,
     data_dir: DataDirOpt = None,
 ) -> None:
-    """用另一个版本重放历史会话：新会话的每一轮都以原会话的历史为上下文（锚定模式）。"""
-    if mode != "anchored":
-        raise typer.BadParameter("目前只支持 anchored（锚定模式）。", param_hint="--mode")
+    """用另一个版本重放历史会话：锚定模式下每一轮都以原会话的历史为上下文；自由模式下新版本用自己的回复续写。"""
+    if mode not in ("anchored", "free"):
+        raise typer.BadParameter("只支持 anchored（锚定）或 free（自由）。", param_hint="--mode")
     project = actions.project_or_none()
     agent_ = agent or (project.agent_name if project else None)
     selected = _parse_turns(turns)

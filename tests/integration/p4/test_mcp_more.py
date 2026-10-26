@@ -301,3 +301,14 @@ async def test_session_replay_and_compare_tools(real_server, two_versions, fake_
         assert "已创建重放" in out and "会话对比" not in out and "get_session" in out
         r = await c.call_tool("replay_session", {"session_id": sid, "target_version": "v9"})
         assert r.is_error  # 版本不存在
+
+        # 自由模式：新版本用自己的回复续写，逐轮串行；同样等到结束并给出对比摘要
+        out = text(
+            await c.call_tool("replay_session", {"session_id": sid, "target_version": "v2", "mode": "free"})
+        )
+        assert "已创建重放" in out and "共 2 轮对齐，其中 2 轮有差异" in out and "+新回复" in out
+        free_sid = out.split("新会话: `")[1].split("`")[0]
+        detail = (await client.get(f"/api/v1/sessions/{free_sid}", params={"include": "turns"})).json()
+        assert detail["session"]["replay_mode"] == "free" and len(detail["turns"]) == 2
+        r = await c.call_tool("replay_session", {"session_id": sid, "target_version": "v2", "mode": "bogus"})
+        assert r.is_error

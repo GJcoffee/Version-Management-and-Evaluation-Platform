@@ -441,9 +441,28 @@ def test_replay_cli(cli_env, api):  # noqa: F811
     assert align.call_count == 2  # 第一次还在 running，等到完成
     assert "共 1 轮对齐，其中 1 轮有差异" in r.output and "-旧回复" in r.output and "+新回复" in r.output
     assert json.loads(route.calls[1].request.content)["target_version_id"] == "ver_9"
-    assert invoke("replay", "ses_1", "--to", "v2", "--mode", "free").exit_code == 2
+    assert invoke("replay", "ses_1", "--to", "v2", "--mode", "bogus").exit_code == 2
+    r = invoke("replay", "ses_1", "--to", "v2", "--mode", "free")
+    assert r.exit_code == 0, r.output
+    assert json.loads(route.calls[-1].request.content)["mode"] == "free"
     r = invoke("replay", "ses_1", "--to", "v2", "--turns", "a")
     assert r.exit_code == 1 and "逗号分隔" in r.output
+
+
+def test_replay_wait_stops_when_group_reports_failed(cli_env, api):  # noqa: F811
+    """某一轮永远不会有结果（重放失败）：看到对比组 failed 就停，不等超时，并在摘要里注明。"""
+    api.post("/sessions/ses_1/replay").mock(
+        return_value=httpx.Response(201, json={"session_id": "ses_2", "compare_id": "cmp_1"})
+    )
+    stuck = alignment(False)
+    stuck["turns"][0]["right_turn_id"] = None
+    align = api.get("/compare/cmp_1/alignment").mock(return_value=httpx.Response(200, json=stuck))
+    failed = {**GROUP, "replay_status": "failed", "replay_error": "第 1 轮未能执行: 读历史失败"}
+    api.get("/compare/cmp_1").mock(return_value=httpx.Response(200, json=failed))
+    r = invoke("replay", "ses_1", "--to", "ver_9", "--wait", "--poll-interval", "0")
+    assert r.exit_code == 0, r.output
+    assert align.call_count == 1
+    assert "重放未能完整执行" in r.output and "读历史失败" in r.output
 
 
 def test_replay_without_project_takes_agent_from_session(tmp_path, monkeypatch):
