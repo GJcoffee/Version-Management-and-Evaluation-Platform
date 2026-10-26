@@ -57,9 +57,13 @@ evalp publish -m "初版" --tag baseline      # push 草稿并发布 v1
 # ……修改 prompt……
 evalp publish -m "调整语气"                  # 发布 v2
 evalp diff baseline v2
-evalp eval run --dataset dataset/<名称> --versions baseline,v2 --baseline baseline --wait
+evalp eval run --versions baseline,v2 --baseline baseline --wait   # 数据集 / 评估器取自 .evalp.toml 的 [eval]
+evalp eval gate <run_id> --baseline <基线 run_id> --max-regressions 0   # CI 门禁：不通过时退出码为 1
 evalp chat --version v2
 ```
+
+其他常用命令：`evalp eval status|report|compare <run_id>`、`evalp asset ls|show|add|diff`、`evalp dataset import <文件> --name <名称>`、
+`evalp replay <会话> --to v2 --wait`、`evalp adapter check`、`evalp gc`；`evalp <命令> --help` 查看参数。
 
 ## 接入 Claude Code / Cursor（MCP）
 
@@ -69,7 +73,8 @@ evalp chat --version v2
 {"mcpServers": {"evalp": {"command": "evalp", "args": ["mcp"]}}}
 ```
 
-先启动 `evalp serve`，之后就可以让 agent 调用 `push_draft`、`publish_version`、`run_eval`、`get_eval_compare` 等工具。详见 [docs/mcp-接入指南.md](docs/mcp-接入指南.md)。
+`evalp mcp` 发现服务没有运行时会自动在后台启动 `evalp serve`（`--no-autostart` 关闭），之后就可以让 agent 调用
+`push_draft`、`publish_version`、`run_eval`、`get_eval_compare`、`update_draft`、`replay_session` 等 19 个工具。详见 [docs/mcp-接入指南.md](docs/mcp-接入指南.md)。
 
 ## 开发
 

@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+import difflib
 import json
+from datetime import UTC, datetime
 from typing import Any
 
-from evalp.utils.time import fmt_local
+from evalp.utils.time import fmt_local, parse_iso
 
 TERMINAL_STATUSES = {"completed", "completed_with_errors", "cancelled", "failed"}
 
@@ -420,3 +422,426 @@ def render_compare(
     if web_url:
         parts += ["", f"Web UI: {web_url}"]
     return "\n".join(parts) + "\n"
+
+
+# ---------------------------------------------------------------------- 评测状态与门禁
+
+
+def eta_seconds(run: dict[str, Any], now: datetime | None = None) -> float | None:
+    """按已完成用例的速度估算剩余秒数；还没有进展、已结束或缺少开始时间时返回 None。"""
+    if run.get("status") in TERMINAL_STATUSES or not run.get("started_at"):
+        return None
+    p = run.get("progress") or {}
+    total = p.get("total") or 0
+    finished = (p.get("done") or 0) + (p.get("failed") or 0) + (p.get("cancelled") or 0)
+    try:
+        elapsed = ((now or datetime.now(UTC)) - parse_iso(run["started_at"])).total_seconds()
+    except (ValueError, TypeError):
+        return None
+    if total <= 0 or finished <= 0 or elapsed <= 0:
+        return None
+    return max(total - finished, 0) / (finished / elapsed)
+
+
+def duration_text(seconds: float) -> str:
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s} 秒"
+    if s < 3600:
+        return f"{s // 60} 分 {s % 60} 秒"
+    return f"{s // 3600} 小时 {s % 3600 // 60} 分"
+
+
+def render_eval_status(run: dict[str, Any], web_url: str | None = None, now: datetime | None = None) -> str:
+    """评测进度：状态、进度、预计剩余时间（不含用例明细）。"""
+    p = run.get("progress") or {}
+    lines = [
+        f"## 评测状态 `{run.get('id')}`",
+        "",
+        f"- {run_headline(run)}",
+        f"- 状态: {status_text(run.get('status'))}",
+    ]
+    if run.get("pause_reason"):
+        lines.append(f"- 暂停原因: {run['pause_reason']}")
+    total = p.get("total") or 0
+    finished = (p.get("done") or 0) + (p.get("failed") or 0) + (p.get("cancelled") or 0)
+    pct_text = f"（{finished / total * 100:.0f}%）" if total else ""
+    lines.append(f"- 进度: {finished}/{total or '?'}{pct_text}；{progress_text(run)}")
+    if run.get("status") not in TERMINAL_STATUSES:
+        eta = eta_seconds(run, now)
+        lines.append(f"- 预计剩余: {duration_text(eta)}" if eta is not None else "- 预计剩余: 暂时无法估算")
+    if p.get("cost_new") is not None:
+        lines.append(f"- 已产生成本: {num(p.get('cost_new'), 4)}")
+    if run.get("error"):
+        lines.append(f"- 错误: {truncate(run['error'], 200)}")
+    if run.get("status") in TERMINAL_STATUSES and run.get("stats"):
+        lines += stats_lines(run["stats"])[:1]
+    if web_url:
+        lines.append(f"- Web UI: {web_url}")
+    return "\n".join(lines) + "\n"
+
+
+def render_gate(result: dict[str, Any], web_url: str | None = None) -> str:
+    """CI 门禁结果：结论、原因、关键数字和退化用例。"""
+    s = result.get("summary") or {}
+    passed = bool(result.get("passed"))
+    lines = [
+        f"## 门禁{'通过' if passed else '未通过'}",
+        "",
+        f"- 评测: `{s.get('run_id')}`（{status_text(s.get('status'))}）",
+    ]
+    lines.append(
+        f"- 通过率: {pct(s.get('pass_rate'))}"
+        + (
+            f"，要求不低于 {pct(s['min_pass_rate'])}"
+            if s.get("min_pass_rate") is not None
+            else "（未设置 --min-pass-rate，通过率不参与判定）"
+        )
+    )
+    if s.get("failed_items"):
+        lines.append(f"- 执行失败的用例: {s['failed_items']}")
+    if s.get("baseline_run_id"):
+        lines.append(
+            f"- 基线: `{s['baseline_run_id']}`（{status_text(s.get('baseline_status'))}），"
+            f"通过率 {pct(s.get('baseline_pass_rate'))}"
+        )
+        lines.append(
+            f"- 相对基线: 退化 {s.get('regressions', '-')}（允许 {s.get('max_regressions')}），"
+            f"改善 {s.get('improved', '-')}，不变 {s.get('unchanged', '-')}"
+        )
+        if isinstance(s.get("mean_delta"), int | float):
+            ci = s.get("ci95")
+            ci_text = f"，95% 置信区间 [{signed(ci[0])}, {signed(ci[1])}]" if ci and len(ci) == 2 else ""
+            lines.append(f"- 平均 Δ（右 - 左）: {signed(s['mean_delta'])}{ci_text}")
+    elif s.get("max_regressions") is not None:
+        lines.append("- 未指定基线，不检查退化用例（用 --baseline 指定）")
+    if result.get("reasons"):
+        lines += ["", "未通过原因:"] + [f"- {r}" for r in result["reasons"]]
+    cases = s.get("regressed_cases") or []
+    if cases:
+        lines += ["", f"退化的用例（显示 {min(len(cases), 10)}/{s.get('regressions', len(cases))}）:"]
+        lines += [f"- `{c.get('case_key')}`（Δ {signed(c.get('delta'), 2)}）" for c in cases[:10]]
+    if web_url:
+        lines += ["", f"Web UI: {web_url}"]
+    return "\n".join(lines) + "\n"
+
+
+def render_adapter_check(report: dict[str, Any]) -> str:
+    """Adapter 自检报告：每个检查项一行。"""
+    marks = {"pass": "通过", "fail": "失败", "warn": "警告", "skip": "跳过"}
+    summ = report.get("summary") or {}
+    head = "## 适配器自检：" + ("通过" if report.get("ok") else "**未通过**")
+    lines = [
+        head,
+        "",
+        f"- {report.get('agent_name') or ''} · {report.get('kind') or '-'}"
+        + (f" · {report['transport']}" if report.get("transport") else "")
+        + f" · 耗时 {(report.get('duration_ms') or 0) / 1000:.1f}s",
+        "- " + "，".join(f"{marks.get(k, k)} {v}" for k, v in summ.items() if v),
+        "",
+    ]
+    for it in report.get("items") or []:
+        lines.append(
+            f"- [{marks.get(it.get('status'), it.get('status'))}] {it.get('title') or it.get('name')}"
+            + (f"：{truncate(it['message'], 200)}" if it.get("message") else "")
+        )
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------- agent / 资产 / 草稿
+
+
+def render_agents(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "还没有 agent。在项目目录运行 push_draft（evalp push）创建第一个。"
+    lines = ["## agent 列表", "", "| agent | 类型 | 最新版本 | 标签 | 说明 |", "|---|---|---|---|---|"]
+    for a in items:
+        latest = a.get("latest_version") or {}
+        ver = f"v{latest['seq']}（{fmt_local(latest.get('created_at'))}）" if latest.get("seq") else "未发布"
+        lines.append(
+            f"| `{a.get('name')}`{' (已归档)' if a.get('archived') else ''} | {a.get('kind')} | {ver} "
+            f"| {', '.join(a.get('tags') or []) or '-'} | {truncate(a.get('description') or '-', 40)} |"
+        )
+    return "\n".join(lines)
+
+
+def render_assets(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "没有匹配的资产。"
+    lines = ["| 资产 | 最新修订 | 大小 | 创建时间 | 说明 |", "|---|---|---|---|---|"]
+    for a in items:
+        latest = a.get("latest") or {}
+        size = f"{latest['size']} B" if latest.get("size") is not None else "-"
+        lines.append(
+            f"| `{a.get('kind')}/{a.get('name')}` | rev {a.get('latest_rev')} | {size} "
+            f"| {fmt_local(a.get('created_at'))} | {truncate(a.get('description') or '-', 40)} |"
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------- 会话与对比
+
+
+def _msg_text(msg: Any) -> str:
+    if isinstance(msg, dict):
+        c = msg.get("content")
+        if isinstance(c, list):
+            return "".join(p.get("text", "") for p in c if isinstance(p, dict))
+        return c if isinstance(c, str) else ""
+    return msg if isinstance(msg, str) else ""
+
+
+def _turn_summary(turn: dict[str, Any]) -> dict[str, Any]:
+    """TurnOut -> 文本、工具调用（含结果）；与 actions.summarize_turn 一致（render 不依赖 actions）。"""
+    output = turn.get("output") or {}
+    text = _msg_text(output.get("final")) or output.get("partial_text") or ""
+    results: dict[str, Any] = {}
+    calls: list[dict[str, Any]] = []
+    for m in output.get("messages") or []:
+        if m.get("role") == "tool":
+            results[m.get("tool_call_id")] = m.get("content")
+        for tc in m.get("tool_calls") or []:
+            calls.append({"id": tc.get("id"), "name": tc.get("name"), "arguments": tc.get("arguments")})
+    for c in calls:
+        c["result"] = results.get(c["id"])
+    return {"text": text, "tool_calls": calls}
+
+
+def _event_brief(ev: dict[str, Any]) -> str:
+    p = ev.get("payload") or {}
+    if "$blob" in p:
+        return "（内容较大，已转存，请在 Web UI 查看）"
+    t = ev.get("type")
+    if t == "llm.request":
+        return f"模型 {p.get('model')}，{len(p.get('messages') or [])} 条消息"
+    if t == "llm.response":
+        u = p.get("usage") or {}
+        return truncate(
+            f"{p.get('finish_reason') or ''} "
+            f"tokens {u.get('prompt_tokens', '-')}/{u.get('completion_tokens', '-')}"
+            + (f" 工具调用 {len(p['tool_calls'])} 个" if p.get("tool_calls") else ""),
+            120,
+        )
+    if t == "tool.call":
+        return f"{p.get('name')}({truncate(p.get('arguments'), 100)})"
+    if t == "tool.result":
+        return (
+            f"{p.get('name')} {'失败' if p.get('is_error') else '完成'}"
+            + (f" {p['latency_ms']}ms" if p.get("latency_ms") is not None else "")
+            + f": {truncate(p.get('output'), 100)}"
+        )
+    if t == "error":
+        return f"{p.get('code', '')} {truncate(p.get('message'), 120)}".strip()
+    if t in ("span.start", "span.end"):
+        return truncate(p.get("name") or p, 100)
+    if t == "turn.end":
+        return f"状态 {p.get('status')}" + (
+            f"，{p['latency_ms']}ms" if p.get("latency_ms") is not None else ""
+        )
+    return truncate(p, 100) if p else ""
+
+
+def render_session(
+    detail: dict[str, Any],
+    *,
+    turn: int | None = None,
+    full: bool = False,
+    max_turns: int = 30,
+    web_url: str | None = None,
+) -> str:
+    """会话记录：默认每轮一段摘要；``turn`` 指定时展开该轮；``full`` 且带 events 时附上 trace 步骤。"""
+    s = detail.get("session") or {}
+    turns = detail.get("turns") or []
+    stats = s.get("stats") or {}
+    lines = [
+        f"## 会话 `{s.get('id')}`",
+        "",
+        f"- agent: `{s.get('agent_name') or s.get('agent_id')}` {version_label(s.get('version_seq'))}"
+        f" · 模式 {s.get('mode')} · 状态 {s.get('status')} · 共 {len(turns)} 轮",
+    ]
+    if s.get("title"):
+        lines.append(f"- 标题: {truncate(s['title'], 80)}")
+    if s.get("source_session_id"):
+        lines.append(f"- 重放自: `{s['source_session_id']}`")
+    if stats.get("cost") or stats.get("prompt_tokens"):
+        lines.append(
+            f"- 累计: tokens {stats.get('prompt_tokens', 0)}/{stats.get('completion_tokens', 0)}，"
+            f"成本 {num(stats.get('cost') or 0.0, 4)}"
+        )
+    if web_url:
+        lines.append(f"- Web UI（含 trace）: {web_url}")
+    events = detail.get("events")
+    if turn is not None:
+        chosen = [t for t in turns if t.get("idx") == turn]
+        if not chosen:
+            have = ", ".join(str(t.get("idx")) for t in turns[:20])
+            return "\n".join(lines + ["", f"**没有第 {turn} 轮**（现有轮次 idx: {have or '无'}）。"])
+        shown = chosen
+    else:
+        shown = turns[-max_turns:]
+        if len(turns) > len(shown):
+            lines += [
+                "",
+                f"（共 {len(turns)} 轮，只显示最后 {len(shown)} 轮；用 turn 参数查看某一轮的详情。）",
+            ]
+    for t in shown:
+        sm = _turn_summary(t)
+        u = t.get("usage") or {}
+        meta = [f"状态 {t.get('status')}"]
+        if t.get("latency_ms") is not None:
+            meta.append(f"{t['latency_ms'] / 1000:.1f}s")
+        if u.get("prompt_tokens") is not None:
+            meta.append(f"tokens {u.get('prompt_tokens')}/{u.get('completion_tokens')}")
+        if sm["tool_calls"]:
+            meta.append(f"工具 {len(sm['tool_calls'])} 次")
+        lines += ["", f"### 第 {t.get('idx')} 轮（{'，'.join(meta)}）", ""]
+        detail_mode = turn is not None
+        inp, reply = _msg_text(t.get("input")), sm["text"]
+        if detail_mode:
+            lines += [
+                "用户:",
+                "",
+                cut_block(inp, 1500),
+                "",
+                "agent:",
+                "",
+                cut_block(reply, 4000) or "（没有文本回复）",
+            ]
+        else:
+            lines.append(f"- 用户: {truncate(inp, 160)}")
+            lines.append(f"- agent: {truncate(reply, 300)}" if reply else "- agent: （没有文本回复）")
+        if t.get("error"):
+            err = t["error"]
+            lines.append(f"- 错误: {err.get('code', '')} {truncate(err.get('message'), 300)}")
+        calls = sm["tool_calls"]
+        limit = len(calls) if detail_mode else 5
+        for c in calls[:limit]:
+            arg = truncate(c["arguments"], 400 if detail_mode else 80)
+            res = (
+                f" -> {truncate(c['result'], 400 if detail_mode else 80)}"
+                if c.get("result") is not None
+                else ""
+            )
+            lines.append(f"- 工具 `{c['name']}({arg})`{res}")
+        if len(calls) > limit:
+            lines.append(f"- ……另有 {len(calls) - limit} 次工具调用")
+        if full and events is not None:
+            evs = [e for e in events if e.get("turn_id") == t.get("id") and e.get("type") != "llm.delta"]
+            lines += ["", "trace:"]
+            for e in evs[:60]:
+                lines.append(f"  - #{e.get('seq')} `{e.get('type')}` {_event_brief(e)}".rstrip())
+            if len(evs) > 60:
+                lines.append(f"  - ……另有 {len(evs) - 60} 个事件，请在 Web UI 查看完整 trace")
+    if full and turn is None:
+        lines += ["", "（detail=full 的 trace 步骤只在指定 turn 时展开，避免输出过长。）"]
+    return "\n".join(lines) + "\n"
+
+
+def _pair_differs(p: dict[str, Any]) -> bool:
+    ft = p.get("final_text") or {}
+    return (
+        any(st.get("op") != "equal" for st in p.get("steps") or [])
+        or ft.get("left") != ft.get("right")
+        or bool(p.get("tool_args_diff"))
+    )
+
+
+def _metric_delta(label: str, left: Any, right: Any, digits: int = 0, unit: str = "") -> str | None:
+    if not isinstance(left, int | float) or not isinstance(right, int | float) or left == right:
+        return None
+    return (
+        f"{label} {num(left, digits)}{unit} -> {num(right, digits)}{unit}（{signed(right - left, digits)}）"
+    )
+
+
+def render_alignment(
+    group: dict[str, Any],
+    alignment: dict[str, Any],
+    *,
+    max_turns: int = 5,
+    diff_lines: int = 20,
+    web_url: str | None = None,
+    unfinished: bool = False,
+) -> str:
+    """会话对比摘要：逐轮的步骤增减、指标差值、工具参数差异和回复 diff（只展开有差异的前几轮）。"""
+    left, right = group.get("left") or {}, group.get("right") or {}
+
+    def name(side: dict[str, Any]) -> str:
+        who = f"{side.get('agent_name') or ''} {version_label(side.get('version_seq'))}".strip()
+        return f"`{side.get('session_id')}`" + (f"（{who}）" if who else "")
+
+    pairs = alignment.get("turns") or []
+    differing = [p for p in pairs if _pair_differs(p)]
+    lines = [
+        "## 会话对比",
+        "",
+        f"- 左: {name(left)}",
+        f"- 右: {name(right)}",
+        f"- 共 {len(pairs)} 轮对齐，其中 {len(differing)} 轮有差异",
+    ]
+    if unfinished:
+        lines.append("- **重放尚未完成**，以下为当前进度。")
+    for p in differing[:max_turns]:
+        steps = p.get("steps") or []
+        deleted = [st["sig"] for st in steps if st.get("op") == "delete"]
+        inserted = [st["sig"] for st in steps if st.get("op") == "insert"]
+        status = p.get("status") or {}
+        lines += ["", f"### 第 {p.get('pair')} 轮"]
+        inp = (p.get("input") or {}).get("left") or (p.get("input") or {}).get("right")
+        if inp:
+            lines.append(f"- 输入: {truncate(inp, 160)}")
+        if status.get("left") != status.get("right"):
+            lines.append(f"- 状态: {status.get('left')} -> {status.get('right')}")
+        if deleted or inserted:
+            lines.append(
+                f"- 步骤: 左侧独有 {len(deleted)} 个（{truncate(', '.join(deleted), 120) or '-'}），"
+                f"右侧独有 {len(inserted)} 个（{truncate(', '.join(inserted), 120) or '-'}）"
+            )
+        m = p.get("metrics") or {}
+        lm, rm = m.get("left") or {}, m.get("right") or {}
+        deltas = [
+            d
+            for d in (
+                _metric_delta("延迟", lm.get("latency_ms"), rm.get("latency_ms"), 0, " ms"),
+                _metric_delta("tokens", lm.get("tokens"), rm.get("tokens")),
+                _metric_delta("成本", lm.get("cost"), rm.get("cost"), 4),
+                _metric_delta("工具调用", lm.get("tool_calls"), rm.get("tool_calls")),
+            )
+            if d
+        ]
+        if deltas:
+            lines.append("- 指标: " + "；".join(deltas))
+        for d in (p.get("tool_args_diff") or [])[:3]:
+            for ch in (d.get("changes") or [])[:3]:
+                old, new = truncate(ch.get("left"), 60), truncate(ch.get("right"), 60)
+                lines.append(f"- 工具参数 `{ch.get('path')}`: {old} -> {new}")
+        ft = p.get("final_text") or {}
+        if ft.get("left") != ft.get("right"):
+            diff = list(
+                difflib.unified_diff(
+                    (ft.get("left") or "").splitlines(),
+                    (ft.get("right") or "").splitlines(),
+                    "左",
+                    "右",
+                    lineterm="",
+                    n=1,
+                )
+            )
+            shown = diff[:diff_lines]
+            lines += [
+                "- 回复差异:",
+                "",
+                "```diff",
+                *[truncate(x, 200) if len(x) > 200 else x for x in shown],
+                "```",
+            ]
+            if len(diff) > len(shown):
+                lines.append(f"（回复 diff 已截断，省略 {len(diff) - len(shown)} 行）")
+    if len(differing) > max_turns:
+        lines += [
+            "",
+            f"（还有 {len(differing) - max_turns} 轮有差异未展开，可调大 max_turns 或在 Web UI 查看。）",
+        ]
+    if web_url:
+        lines += ["", f"Web UI: {web_url}"]
+    return "\n".join(lines) + "\n"

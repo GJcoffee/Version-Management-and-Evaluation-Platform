@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import time
 from collections.abc import Callable
@@ -82,6 +83,53 @@ def load_evaluators(
     return data
 
 
+# ---------------------------------------------------------------------- 评测默认配置（.evalp.toml 的 [eval]）
+
+
+@dataclass
+class EvalArgs:
+    """合并后的评测参数：命令行 / 工具参数 > ``.evalp.toml`` 的 ``[eval]`` > 内置默认。"""
+
+    dataset: str
+    evaluators: list[dict[str, Any]]
+    versions: list[str] | None = None
+    repeats: int | None = None
+    baseline: str | None = None
+    concurrency: int | None = None
+
+
+def resolve_eval_args(
+    project: ProjectConfig | None,
+    *,
+    dataset: str | None = None,
+    versions: list[str] | None = None,
+    evaluators: str | Path | list[dict[str, Any]] | None = None,
+    repeats: int | None = None,
+    baseline: str | None = None,
+    concurrency: int | None = None,
+) -> EvalArgs:
+    """按优先级合并评测参数；显式传入的值（非 None）覆盖 ``[eval]`` 里的默认值。"""
+    defaults = project.eval if project else {}
+    ds = dataset or defaults.get("dataset")
+    if not ds:
+        raise WorkspaceError(
+            "未指定数据集。请用 --dataset（MCP 为 dataset 参数）指定，"
+            "或在 .evalp.toml 的 [eval] 段设置 dataset。"
+        )
+    ev_source = evaluators if evaluators else defaults.get("evaluators")
+    root = project.root if project else Path.cwd()
+    return EvalArgs(
+        dataset=ds,
+        evaluators=load_evaluators(ev_source, root),
+        versions=list(versions)
+        if versions
+        else (list(defaults["versions"]) if defaults.get("versions") else None),
+        repeats=repeats if repeats is not None else defaults.get("repeats"),
+        baseline=baseline or defaults.get("baseline"),
+        concurrency=concurrency if concurrency is not None else defaults.get("concurrency"),
+    )
+
+
 # ---------------------------------------------------------------------- 发布
 
 
@@ -143,6 +191,7 @@ async def create_eval(
     versions: list[str] | None = None,
     baseline: str | None = None,
     repeats: int | None = None,
+    concurrency: int | None = None,
     name: str | None = None,
     via: str = "cli",
 ) -> EvalBatch:
@@ -166,6 +215,8 @@ async def create_eval(
     }
     if repeats is not None:
         body["repeats"] = repeats
+    if concurrency is not None:
+        body["concurrency"] = concurrency
     if name:
         body["name"] = name
     out = await client.post("/evals", body)
@@ -358,3 +409,244 @@ def project_or_none(start: Path | None = None) -> ProjectConfig | None:
         return find_project(start)
     except ProjectNotFound:
         return None
+
+
+# ---------------------------------------------------------------------- 资产与数据集
+
+INLINE_UPLOAD_LIMIT = 1_000_000  # 超过这个大小（或非 UTF-8）的文件走 /assets/upload，不放进 JSON 请求体
+ASSET_KIND_NAMES = ("prompt", "tool", "knowledge", "dataset", "file")
+
+
+def parse_asset_ref(ref: str) -> tuple[str, int | None]:
+    """资产引用 -> (``kind/name`` 或 ``ast_…``, 修订号)。
+
+    支持 ``prompt/system``、``prompt/system@3``、``asset://prompt/system@latest``、``ast_…``；
+    ``latest`` 或未写修订时修订号为 None。
+    """
+    ref = ref.strip()
+    if ref.startswith("asset://"):
+        ref = ref[len("asset://") :]
+    rev: int | None = None
+    if "@" in ref:
+        ref, _, rev_text = ref.partition("@")
+        if rev_text and rev_text != "latest":
+            if not rev_text.isdigit():
+                raise WorkspaceError(f"修订号应是整数或 latest: {rev_text!r}")
+            rev = int(rev_text)
+    return ref, rev
+
+
+def split_kind_name(ref: str) -> tuple[str, str]:
+    """``kind/name`` -> (kind, name)；格式不对时抛 WorkspaceError。"""
+    kind, sep, name = ref.partition("/")
+    if not sep or kind not in ASSET_KIND_NAMES or not name:
+        raise WorkspaceError(
+            f"资产应写成 kind/name（kind 取 {' / '.join(ASSET_KIND_NAMES)}），例如 prompt/cs-system: {ref!r}"
+        )
+    return kind, name
+
+
+async def find_asset(client: EvalpClient, ref: str) -> dict[str, Any]:
+    """按 ``kind/name`` 或 ``ast_…`` 找到资产（AssetOut）。"""
+    base, _ = parse_asset_ref(ref)
+    if base.startswith("ast_"):
+        return await client.get(f"/assets/{base}")
+    kind, name = split_kind_name(base)
+    page = await client.get("/assets", params={"kind": kind, "q": name, "limit": 200})
+    for a in page.get("items", []):
+        if a.get("name") == name and a.get("kind") == kind:
+            return a
+    raise EvalpClientError(f"资产不存在: {kind}/{name}", code="NOT_FOUND", status=404)
+
+
+async def upsert_asset(
+    client: EvalpClient,
+    kind: str,
+    name: str,
+    *,
+    content: str | None = None,
+    path: Path | None = None,
+    message: str | None = None,
+    description: str | None = None,
+) -> dict[str, Any]:
+    """创建资产，或给同名资产追加修订（内容相同则 ``existed=true``）。``content`` 与 ``path`` 二选一。"""
+    if (content is None) == (path is None):
+        raise WorkspaceError("content 与 path 必须且只能提供一个。")
+    body: dict[str, Any] = {"kind": kind, "name": name}
+    if message:
+        body["message"] = message
+    if description:
+        body["description"] = description
+    if content is not None:
+        body["content"] = content
+    else:
+        assert path is not None
+        if not path.is_file():
+            raise WorkspaceError(f"找不到文件: {path}")
+        data = path.read_bytes()
+        text: str | None = None
+        if len(data) <= INLINE_UPLOAD_LIMIT:
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+        if text is not None:
+            body["content"] = text
+        else:
+            body["blob_upload_id"] = (await client.upload_blob(data, path.name))["blob_upload_id"]
+    return await client.post("/assets", body)
+
+
+def parse_column_map(spec: str | None) -> dict[str, str] | None:
+    """``input=问题,expected=答案`` -> ``{"input": "问题", "expected": "答案"}``。"""
+    if not spec or not spec.strip():
+        return None
+    out: dict[str, str] = {}
+    for part in spec.split(","):
+        field_, sep, column = part.partition("=")
+        if not sep or not field_.strip() or not column.strip():
+            raise WorkspaceError(
+                f"列映射应写成 字段=列名，多个用逗号分隔，如 input=问题,expected=答案: {part!r}"
+            )
+        out[field_.strip()] = column.strip()
+    return out
+
+
+async def import_dataset(
+    client: EvalpClient,
+    name: str,
+    path: Path,
+    *,
+    fmt: str | None = None,
+    column_map: dict[str, Any] | None = None,
+    description: str | None = None,
+    message: str | None = None,
+) -> dict[str, Any]:
+    """导入 JSONL / CSV 为数据集资产（同名则新增修订）。``fmt`` 缺省按扩展名判断（.csv -> csv）。"""
+    if not path.is_file():
+        raise WorkspaceError(f"找不到文件: {path}")
+    fmt = fmt or ("csv" if path.suffix.lower() == ".csv" else "jsonl")
+    try:
+        content = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise WorkspaceError(f"{path} 不是 UTF-8 编码的文本文件: {e}") from e
+    body: dict[str, Any] = {"name": name, "content": content, "format": fmt}
+    if column_map:
+        body["column_map"] = column_map
+    if description:
+        body["description"] = description
+    if message:
+        body["message"] = message
+    return await client.post("/datasets/import", body)
+
+
+# ---------------------------------------------------------------------- 草稿
+
+
+def merge_patch(target: Any, patch: Any) -> Any:
+    """JSON Merge Patch（RFC 7396）：``patch`` 为对象时逐键合并，值为 null 的键删除，其他值整体替换。"""
+    if not isinstance(patch, dict):
+        return copy.deepcopy(patch)
+    result = copy.deepcopy(target) if isinstance(target, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            result.pop(key, None)
+        else:
+            result[key] = merge_patch(result.get(key), value)
+    return result
+
+
+async def find_draft(client: EvalpClient, agent: str, draft_name: str = "main") -> dict[str, Any]:
+    """agent 的某个草稿（DraftOut）；服务端还没有时抛 NOT_FOUND（提示先 push）。"""
+    try:
+        drafts = await client.get(f"/agents/{agent}/drafts")
+    except EvalpClientError as e:
+        if e.status != 404:
+            raise
+        raise EvalpClientError(
+            f"服务端还没有 agent {agent}。请先 push 本地 agent.yaml（push_draft / evalp push）。",
+            code="NOT_FOUND",
+            status=404,
+        ) from e
+    for d in drafts:
+        if d.get("name") == draft_name:
+            return d
+    raise EvalpClientError(
+        f"agent {agent} 还没有草稿 {draft_name}。请先 push 本地 agent.yaml（push_draft / evalp push）。",
+        code="NOT_FOUND",
+        status=404,
+    )
+
+
+async def update_draft(
+    client: EvalpClient, draft: dict[str, Any], patch: dict[str, Any], expected_revision: int
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """对草稿 spec 应用 JSON Merge Patch 并保存（乐观锁），返回 (新草稿, 校验结果)。"""
+    spec = merge_patch(draft["spec"], patch)
+    if not isinstance(spec, dict):
+        raise WorkspaceError("补丁应用后的 spec 必须是对象。")
+    out = await client.put(f"/drafts/{draft['id']}", {"spec": spec, "expected_revision": expected_revision})
+    saved = out["draft"]
+    try:
+        validation = await client.post(f"/drafts/{saved['id']}/validate", {})
+    except EvalpClientError:
+        validation = None
+    return saved, validation
+
+
+# ---------------------------------------------------------------------- 会话、重放与对比
+
+
+async def replay_session(
+    client: EvalpClient,
+    session_id: str,
+    target: str,
+    *,
+    agent: str | None = None,
+    turns: list[int] | None = None,
+    mode: str = "anchored",
+) -> dict[str, Any]:
+    """用另一个版本重放历史会话；``target`` 写 v13 / 标签时，agent 缺省取原会话的 agent。"""
+    if not target.startswith(("ver_", "drf_")) and ":" not in target and not agent:
+        detail = await client.get(f"/sessions/{session_id}", params={"include": ""})
+        agent = (detail.get("session") or {}).get("agent_name")
+    body: dict[str, Any] = {"target_version_id": qualify_version(agent, target), "mode": mode}
+    if turns:
+        body["turns"] = turns
+    return await client.post(f"/sessions/{session_id}/replay", body)
+
+
+def replay_finished(alignment: dict[str, Any]) -> bool:
+    """重放是否已完成：每个被选中的轮次在新会话一侧都有了结果（不再是 running）。"""
+    pairs = alignment.get("turns") or []
+    if not pairs:
+        return False
+    return all(
+        p.get("right_turn_id") is not None and (p.get("status") or {}).get("right") not in (None, "running")
+        for p in pairs
+    )
+
+
+async def wait_replay(
+    client: EvalpClient, compare_id: str, *, interval: float = 1.0, timeout: float | None = None
+) -> tuple[dict[str, Any], bool]:
+    """轮询对比的对齐结果，直到重放完成。返回 (对齐结果, 是否超时)。"""
+    start = time.monotonic()
+    while True:
+        alignment = await client.get(f"/compare/{compare_id}/alignment")
+        if replay_finished(alignment):
+            return alignment, False
+        if timeout is not None and time.monotonic() - start >= timeout:
+            return alignment, True
+        await asyncio.sleep(interval)
+
+
+async def compare_sessions(
+    client: EvalpClient, left: str, right: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """历史会话对比：创建对比组并取对齐结果，返回 (对比组, 对齐结果)。"""
+    group = await client.post(
+        "/compare",
+        {"kind": "session", "mode": "history", "left": {"session_id": left}, "right": {"session_id": right}},
+    )
+    return group, await client.get(f"/compare/{group['id']}/alignment")

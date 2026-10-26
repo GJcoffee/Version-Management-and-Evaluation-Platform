@@ -261,8 +261,8 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 
 - **mcp SDK 是 2.x**：`FastMCP` 更名为 `mcp.server.mcpserver.MCPServer`，`mcp.server.fastmcp` 导入会直接报错。`evalp/mcp/server.py` 优先导入
   `MCPServer`，失败再退回 1.x 的 `FastMCP`。工具失败抛 `ToolError`（客户端看到 `isError=true` 和中文原因）。
-- **评测的默认值**：`.evalp.toml` 的 `[eval]`（BACKLOG）不实现，所以 `dataset` 必填；评估器配置默认读项目根目录的 `evals.yaml`（`evalp init` 会生成），
-  也可以 `--evaluators` 指定；MCP 的 `evaluators` 还可以直接传对象列表。`--repeats` 缺省时不传，由服务端取默认值。
+- **评测的默认值**：评估器配置默认读项目根目录的 `evals.yaml`（`evalp init` 会生成），也可以 `--evaluators` 指定；
+  MCP 的 `evaluators` 还可以直接传对象列表。`--repeats` 缺省时不传，由服务端取默认值。（`.evalp.toml` 的 `[eval]` 已在后续补上，见文末"接入层补全"一节。）
 - **基线约定**：`eval run` / `run_eval` 增加 `--baseline`。给了 baseline 时它排在第一位（对比的左侧）；没给且有多个版本时以第一个版本为基线；
   每个非基线版本各与基线做一次对比。详设示例 `--versions v13,baseline` 的顺序在这个约定下会把 v13 当基线，请用 `--baseline baseline`。
 - **`eval run` 的 `--wait` 默认关闭**（与 13 节的 `[--wait]` 一致）；不带时只打印 run id 和链接。MCP 的 `run_eval` 默认 `wait=true`，最多等 10 分钟，超时不取消评测。
@@ -277,9 +277,8 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 - **`[assets]` 的 `{stem}`** 会规范化为合法资产名（小写，非字母数字转连字符），如 `Query_Order.yaml` → `query-order`。
   精确路径（不含通配符）的映射在本地文件被删除时仍参与 pull，用于还原文件；通配符映射只匹配本地已存在的文件。
 - **pull 的保护**：本地文件或 `agent.yaml` 相对上次同步有未推送的修改、且与服务端内容不同时，pull 拒绝覆盖并列出文件，`--force` 才覆盖
-  （详设没有这一步；避免 MCP / 误操作丢失本地修改）。pull 重写 `agent.yaml` 时不保留注释；内容没变则不重写。
-- **未做**（BACKLOG）：MCP 启动时自动拉起 `evalp serve`；`list_agents` 等其余工具；`asset` / `dataset import` / `replay` 等命令。
-  chat 只能选已发布的版本（会话基于版本），不能直接和草稿对话。
+  （详设没有这一步；避免 MCP / 误操作丢失本地修改）。pull 重写 `agent.yaml` 时保留注释（见文末"接入层补全"一节）；内容没变则不重写。
+- **未做**：chat 只能选已发布的版本（会话基于版本），不能直接和草稿对话（BACKLOG）。其余项（自动拉起 `evalp serve`、其余 MCP 工具与 CLI 命令）已在后续补上。
 
 ## 后端改进（前端联调反馈）— SSE 的 `error` 帧改名为 `agent.error`，只在 SSE 输出层映射
 
@@ -322,3 +321,45 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 
 - `AgentOut` 增加 `tags: list[str]`（该 agent 全部版本标签名，字典序），`GET /agents` 一次查询批量取出；前端 `useAgentTags` 随之删除（`GET /agents/{ref}/tags` 保留）。
 - 新增 `PATCH /sessions/{id}`（只能改 `title`：去空白后 1 到 120 个字符，不可清空），返回 `{"session": SessionOut}`；详设 11.3 的会话接口里没有该项。
+
+## 接入层补全 — 其余 MCP 工具 / CLI 命令、`[eval]` 默认配置、MCP 自动拉起服务、pull 保留注释
+
+**新增文件**：`evalp/cli/{asset,dataset,replay,adapter,gc}.py`、`evalp/mcp/autostart.py`、`evalp/yamlio.py`；
+`actions.py` / `render.py` / `workspace_client.py` / `client.py` 增加了对应的共享逻辑。仍然全部走 REST API，**没有新增或修改任何服务端接口**（`docs/api.md` 不变）。
+
+- **新增依赖 `ruamel.yaml>=0.18`**（`backend/pyproject.toml`）：仓库原来只有 PyYAML，往返编辑（保留注释 / 键顺序 / 缩进）只能靠 ruamel。
+  选择它而不是自己写"按行打补丁"的方案，是因为后者对列表、多行标量、锚点等情况容易写坏用户文件；ruamel 是纯 Python wheel，无需编译。
+  保守处理：往返结果会与目标数据逐项比较（`yaml.safe_load` 相等），不一致、原文件无法解析或顶层不是映射时，退化为 PyYAML 整体重写（丢注释但内容正确）。
+  只有 spec 与服务端不同、确实需要重写 `agent.yaml` 时才走这条路径；内容没变仍然不重写。缩进风格（序列是否缩进）从原文件推断。
+- **`.evalp.toml` 的 `[eval]`**：详设 12.2 列出 `dataset` / `repeats` / `baseline` / `evaluators`；这里另外支持 `versions`（默认评测哪些版本）和 `concurrency`
+  （对应 `POST /evals` 的 `concurrency`）。`evaluators` 可以是文件路径（相对项目目录）或 `[[eval.evaluators]]` 表数组。优先级：命令行 / 工具参数 > `[eval]` > 内置默认。
+  未知键或类型错误会让读取项目配置的命令直接报错（带 `.evalp.toml` 路径和键名），而不是静默忽略——拼写错误能立刻发现。
+  `eval run --dataset` 与 MCP `run_eval.dataset` 因此变成可选（两处都没有时报"未指定数据集"）。`evalp init` 生成的模板默认写入 `dataset` 和 `evaluators`，其余以注释给出。
+- **`.evalp.toml` 的 `[mcp] autostart`**（详设没有）：设为 `false` 关闭自动拉起；`evalp mcp --no-autostart` 效果相同（详设 12.1 已有此参数名）。
+- **MCP 自动拉起 `evalp serve`**：① 判断"在运行"用的是任意 HTTP 响应（包括 401），因此不需要 token；② 只在 `[server].url` 是本机地址时拉起，远程地址直接报错；
+  ③ 子进程为 `python -m evalp serve --host --port [--data-dir]`，stdin 接 /dev/null、stdout/stderr 写数据目录下的 `mcp-autostart.log`（MCP 的 stdout 是协议通道，绝不能被占用）；
+  ④ **子进程归拉起它的 MCP 进程所有**：MCP 退出（stdin 关闭、SIGTERM、`atexit`）时先 `terminate` 并等待，超时再用 `procutil.kill_process_tree` 杀整个进程树，最后 `wait()` 回收，不留僵尸；
+  ⑤ 每次工具调用前都会确认服务可用（探测很快），所以服务中途被其他 MCP 进程带走也会被重新拉起；⑥ 启动时先尽早 `Popen`（不等待就绪），就绪等待（最多 30 秒）放在第一次工具调用里，避免拖慢 MCP 握手。
+  取舍：多个 MCP 进程共享同一个服务时，先退出的那个如果是"拥有者"会把服务一起带走（评测依赖"重启恢复"继续）。没有选择"脱离父进程常驻"，因为那会留下用户不知道的后台进程。
+  若 MCP 进程被 `SIGKILL`，子进程不会被清理（无法在进程内处理），下次启动时探测到服务仍在运行会直接复用。
+- **MCP 工具**（详设 12.2 其余 10 个，共 19 个）：与详设的差异：
+  - `update_draft` 的 `patch` 是对**服务端草稿 spec**（YAML 解析后的对象）做 JSON Merge Patch，`expected_revision` 必填；不改本地文件，返回里提示需要 `pull_draft`。
+  - `upsert_asset` / `import_dataset` 的 `path` 相对项目目录解析，且**必须位于项目目录之内**（MCP 的调用方是 LLM，避免被诱导上传任意本地文件）；CLI 的对应命令不受此限。
+    非 UTF-8 或超过 1MB 的文件走 `POST /assets/upload`（`blob_upload_id`），其余内联 `content`。`import_dataset` 增加了参数以外的行为：`name` 带 `dataset/` 前缀时自动去掉。
+  - `replay_session` 的 `mode` 只接受 `anchored`（后端一期只实现锚定模式），另增 `turns?`、`wait?`（默认等待，最多 10 分钟）、`agent?`；"对比摘要"取自对比组的对齐结果。
+    重放完成的判断是"每个被选轮次在新会话一侧都有结果且不是 running"（会话 status 在轮次间隙会回到 idle，不可靠）。
+  - `compare_sessions` 每次调用会创建一个 history 对比组（`POST /compare`）；另增 `max_turns?`。`get_session` 的 `detail=full` 只在指定 `turn` 时才取事件并列出 trace 步骤（避免长会话输出爆炸），不指定 `turn` 时摘要最多显示最近 30 轮。
+  - `list_agents` / `list_assets` 另增 `limit?`（`list_assets` 的 `kind?`、`q?` 见详设）；`run_eval` 另增 `concurrency?`。
+- **CLI 命令**（详设 13 其余项）与详设的差异：
+  - `evalp eval gate`：位置参数 `RUN_ID`（与 `report` / `compare` 一致），同时保留详设的 `--run <id>`；另增 `--min-pass-rate`、`--threshold`、`--wait`（先等评测 / 基线结束）、`--timeout`、`--json`（等同 `--format json`）。
+    退出码：门禁通过 0，**未通过 1**（详设 13 节约定），用法错误 2；服务端 / 连接错误按全局约定也是 1（错误原因写 stderr，`--json` 时 stdout 只有 JSON）。CI 若要区分"未通过"与"基础设施故障"，请看 stderr 或用 `--json`。
+    没有设置基线和 `--min-pass-rate` 时，已成功结束的评测视为通过（这是 `/evals/{id}/gate` 的既有语义），输出里会提示"通过率不参与判定"。
+  - `evalp asset ls|show|add|diff`：`add` 的资产参数写 `kind/name`；`show` 把基本信息写 stderr、内容写 stdout（可重定向）；`diff` 默认比较最新修订与上一个，用 `--from/--to` 指定。
+    `kind/name` 到 `ast_` id 的解析在客户端完成（`GET /assets?kind&q` 后精确匹配），没有新增服务端接口。
+  - `evalp dataset import <file> --name x [--map 字段=列名,…]`：`--map` 用 `input=问题,expected=答案` 的写法（对应请求体的 `column_map`），按扩展名判断格式，可用 `--format` 覆盖。
+  - `evalp replay <session> --to v13 [--mode anchored] [--turns 0,2] [--wait]`：不带 `--wait` 时只打印新会话 id 与对比链接（与 `eval run` 一致）。`--to` 写 `vN` / 标签且没有项目时，agent 取自原会话。
+  - `evalp adapter check [--version]`：对应 `POST /versions/{ref}/adapter-check`，有失败项时退出码 1；配置型 agent 也能用（会真实调用 LLM）。
+  - `evalp eval status <run>`：进度与预计剩余时间；"预计剩余"在客户端按已完成用例的平均速度估算（接口没有 ETA 字段）。
+  - `evalp gc`：`POST /system/gc`。
+- **未做**：`chat` 直接与草稿对话——会话（`sessions.version_id` 非空、重放 / 评测 / trace 都以版本为锚）不支持草稿，要改需要 schema、Runner 与前端同时调整，超出"极小补丁"，保留在 BACKLOG。
+

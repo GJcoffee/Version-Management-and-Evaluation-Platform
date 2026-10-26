@@ -1,4 +1,4 @@
-"""evalp eval run / report / compare。"""
+"""evalp eval run / status / report / compare / gate。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from evalp import actions, render
 from evalp.cli.common import AgentOpt, DataDirOpt, cli_errors, console, err_console, open_client, run
 from evalp.client import EvalpClient
 
-app = typer.Typer(help="评测：发起、报告、对比", no_args_is_help=True)
+app = typer.Typer(help="评测：发起、状态、报告、对比、CI 门禁", no_args_is_help=True)
 
 
 class Format(StrEnum):
@@ -39,21 +39,39 @@ def _label(run_: dict[str, Any]) -> str:
 @cli_errors
 def eval_run(
     dataset: Annotated[
-        str,
-        typer.Option("--dataset", help="数据集名称或引用，如 cs-regression、dataset/cs-regression@3、arv_…"),
-    ],
+        str | None,
+        typer.Option(
+            "--dataset",
+            help="数据集名称或引用，如 cs-regression、dataset/cs-regression@3、arv_…"
+            "（默认取 .evalp.toml [eval].dataset）",
+        ),
+    ] = None,
     versions: Annotated[
-        str | None, typer.Option("--versions", help="逗号分隔的版本，如 v3,baseline（默认最新版本）")
+        str | None,
+        typer.Option(
+            "--versions", help="逗号分隔的版本，如 v3,baseline（默认取 [eval].versions，再默认最新版本）"
+        ),
     ] = None,
     evaluators: Annotated[
-        Path | None, typer.Option("--evaluators", help="评估器配置文件（默认项目根目录的 evals.yaml）")
+        Path | None,
+        typer.Option(
+            "--evaluators", help="评估器配置文件（默认取 [eval].evaluators，再默认项目根目录的 evals.yaml）"
+        ),
     ] = None,
     repeats: Annotated[
-        int | None, typer.Option("--repeats", min=1, help="每个用例重复次数（默认取服务端设置）")
+        int | None,
+        typer.Option("--repeats", min=1, help="每个用例重复次数（默认取 [eval].repeats，再取服务端设置）"),
+    ] = None,
+    concurrency: Annotated[
+        int | None,
+        typer.Option("--concurrency", min=1, max=512, help="每个评测的并发上限（默认取 [eval].concurrency）"),
     ] = None,
     baseline: Annotated[
         str | None,
-        typer.Option("--baseline", help="基线版本；多个版本对比时，基线在左侧（默认以第一个版本为基线）"),
+        typer.Option(
+            "--baseline",
+            help="基线版本；多个版本对比时，基线在左侧（默认取 [eval].baseline，再以第一个版本为基线）",
+        ),
     ] = None,
     name: Annotated[str | None, typer.Option("--name", help="评测名称")] = None,
     wait: Annotated[bool, typer.Option("--wait", help="等待评测结束，显示进度条和报告摘要")] = False,
@@ -61,22 +79,35 @@ def eval_run(
     agent: AgentOpt = None,
     data_dir: DataDirOpt = None,
 ) -> None:
-    """发起评测：每个版本一个 Run，同属一个批次。"""
+    """发起评测：每个版本一个 Run，同属一个批次。
+
+    --dataset / --evaluators / --repeats / --baseline / --versions / --concurrency 省略时，
+    读取 .evalp.toml 的 [eval] 段；命令行参数优先。
+    """
     project = actions.project_or_none()
     agent_ = agent or (project.agent_name if project else None)
-    ev_list = actions.load_evaluators(evaluators, project.root if project else Path.cwd())
     refs = [v.strip() for v in versions.split(",") if v.strip()] if versions else None
+    args = actions.resolve_eval_args(
+        project,
+        dataset=dataset,
+        versions=refs,
+        evaluators=evaluators,
+        repeats=repeats,
+        baseline=baseline,
+        concurrency=concurrency,
+    )
 
     async def go() -> int:
         async with open_client(project, data_dir) as c:
             batch = await actions.create_eval(
                 c,
                 agent=agent_,
-                dataset=dataset,
-                evaluators=ev_list,
-                versions=refs,
-                baseline=baseline,
-                repeats=repeats,
+                dataset=args.dataset,
+                evaluators=args.evaluators,
+                versions=args.versions,
+                baseline=args.baseline,
+                repeats=args.repeats,
+                concurrency=args.concurrency,
                 name=name,
             )
             console.print(f"[green]已发起评测[/green] 批次 {batch.batch_id}")
@@ -209,3 +240,89 @@ def eval_compare(
         typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
         return
     emit(render.render_compare(data, limit=limit, web_url=url, case_class=case_class, details=details))
+
+
+@app.command("status")
+@cli_errors
+def eval_status(
+    run_id: Annotated[str, typer.Argument(help="评测 Run id（evr_…）")],
+    fmt: Annotated[Format, typer.Option("--format", help="输出格式")] = Format.md,
+    data_dir: DataDirOpt = None,
+) -> None:
+    """查看评测的运行状态：进度和预计剩余时间（用例明细用 evalp eval report）。"""
+    project = actions.project_or_none()
+
+    async def go() -> tuple[dict[str, Any], str]:
+        async with open_client(project, data_dir) as c:
+            return await c.get(f"/evals/{run_id}"), c.web_url(f"/evals/{run_id}")
+
+    r, url = run(go())
+    if fmt is Format.json:
+        out = {"run": r, "eta_seconds": render.eta_seconds(r)}
+        typer.echo(json.dumps(out, ensure_ascii=False, indent=2))
+        return
+    emit(render.render_eval_status(r, url))
+
+
+@app.command("gate")
+@cli_errors
+def eval_gate(
+    run_id: Annotated[str | None, typer.Argument(help="被检查的评测 Run id（也可用 --run 指定）")] = None,
+    run_opt: Annotated[str | None, typer.Option("--run", help="被检查的评测 Run id（同位置参数）")] = None,
+    baseline: Annotated[
+        str | None, typer.Option("--baseline", help="基线 Run id；指定后检查相对基线的退化用例数")
+    ] = None,
+    max_regressions: Annotated[
+        int, typer.Option("--max-regressions", min=0, help="允许相对基线退化的用例数")
+    ] = 0,
+    min_pass_rate: Annotated[
+        float | None,
+        typer.Option("--min-pass-rate", min=0, max=1, help="最低通过率，0 到 1，如 0.9"),
+    ] = None,
+    threshold: Annotated[
+        float | None, typer.Option("--threshold", min=0, help="|Δ| 小于该值视为不变（默认取服务端）")
+    ] = None,
+    wait: Annotated[bool, typer.Option("--wait", help="评测（和基线）还没结束时先等待")] = False,
+    timeout: Annotated[
+        float | None, typer.Option("--timeout", min=1, help="--wait 最多等待多少秒（默认一直等）")
+    ] = None,
+    json_out: Annotated[bool, typer.Option("--json", help="输出 JSON（等同 --format json）")] = False,
+    fmt: Annotated[Format, typer.Option("--format", help="输出格式")] = Format.md,
+    poll_interval: Annotated[float, typer.Option("--poll-interval", hidden=True)] = 2.0,
+    data_dir: DataDirOpt = None,
+) -> None:
+    """CI 门禁：不满足条件时以退出码 1 结束（通过为 0）。
+
+    条件：评测已成功结束；相对基线退化的用例数不超过 --max-regressions（需要 --baseline）；
+    通过率不低于 --min-pass-rate。接口或连接错误同样以退出码 1 结束，并把原因写到 stderr。
+    """
+    if run_id and run_opt and run_id != run_opt:
+        raise typer.BadParameter("位置参数与 --run 指定了不同的评测 id。")
+    target = run_id or run_opt
+    if not target:
+        raise typer.BadParameter("请指定评测 Run id（位置参数或 --run）。")
+    project = actions.project_or_none()
+
+    async def go() -> tuple[dict[str, Any], str]:
+        async with open_client(project, data_dir) as c:
+            if wait:
+                ids = [target, *([baseline] if baseline else [])]
+                err_console.print("等待评测结束……")
+                await actions.wait_for_runs(c, ids, interval=poll_interval, timeout=timeout)
+            result = await c.get(
+                f"/evals/{target}/gate",
+                params={
+                    "baseline": baseline,
+                    "max_regressions": max_regressions,
+                    "min_pass_rate": min_pass_rate,
+                    "threshold": threshold,
+                },
+            )
+            return result, c.web_url(f"/evals/{target}")
+
+    result, url = run(go())
+    if json_out or fmt is Format.json:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        emit(render.render_gate(result, url))
+    raise typer.Exit(0 if result.get("passed") else 1)

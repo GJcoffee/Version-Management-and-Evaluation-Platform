@@ -77,7 +77,11 @@ def test_init_generates_project(tmp_path, monkeypatch):
     # 生成的配置可以被客户端解析
     from evalp.workspace_client import find_project
 
-    assert find_project(tmp_path).agent_name == "My-Bot"
+    project = find_project(tmp_path)
+    assert project.agent_name == "My-Bot"
+    # 模板带 [eval] 默认配置（数据集 / 评估器指向 init 生成的文件），[mcp] 与其余默认值以注释给出
+    assert project.eval == {"dataset": "dataset/my-bot-regression", "evaluators": "evals.yaml"}
+    assert project.mcp_autostart is True and "# autostart = false" in toml and "# repeats = 3" in toml
     assert invoke("init").exit_code == 1  # 已存在
     assert invoke("init", "--force").exit_code == 0
     assert (tmp_path / ".gitignore").read_text(encoding="utf-8").count(".evalp/") == 1

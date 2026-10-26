@@ -121,3 +121,65 @@ def test_project_discovery_and_stem(project_dir):
     assert find_project(sub).root == project_dir.resolve()
     assert normalize_stem("Query_Order") == "query-order"
     assert json.loads(json.dumps(find_project(sub).assets))["tools/*.yaml"] == "tool/{stem}"
+
+
+async def test_pull_keeps_comments_in_agent_yaml(ws, evalp_client, provider, client, project_dir):
+    """服务端草稿被改后 pull：agent.yaml 里的注释保留，改动的值更新，file: 引用保持。"""
+    spec_file = project_dir / "agent.yaml"
+    spec_file.write_text(
+        "# 客服 agent\n"
+        "schema: evalp/v1\n"
+        "kind: config\n"
+        "model:\n"
+        "  provider: deepseek     # Provider 名称\n"
+        "  name: deepseek-chat\n"
+        "prompts:\n"
+        "  system: file:prompts/system.md   # 提示词\n"
+        "tools:\n"
+        "  # 查订单\n"
+        "  - file:tools/query-order.yaml\n",
+        encoding="utf-8",
+    )
+    await ws.push(evalp_client)
+    draft = (await client.get(f"{API}/agents/support/drafts")).json()[0]
+    spec = {
+        **draft["spec"],
+        "model": {"provider": "deepseek", "name": "deepseek-chat", "params": {"temperature": 0.1}},
+    }
+    assert (
+        await client.put(
+            f"{API}/drafts/{draft['id']}", json={"spec": spec, "expected_revision": draft["revision"]}
+        )
+    ).status_code == 200
+
+    result = await ws.pull(evalp_client)
+    assert "agent.yaml" in result.written
+    text = spec_file.read_text(encoding="utf-8")
+    for kept in ("# 客服 agent", "# Provider 名称", "# 提示词", "# 查订单"):
+        assert kept in text
+    assert "temperature: 0.1" in text and "file:prompts/system.md" in text and "asset://" not in text
+    # pull 后状态同步：不需要再推送
+    assert (await ws.push(evalp_client)).unchanged
+
+
+def test_eval_and_mcp_sections_are_loaded(project_dir):
+    toml = project_dir / ".evalp.toml"
+    base = toml.read_text(encoding="utf-8")
+    assert find_project(project_dir).eval == {} and find_project(project_dir).mcp_autostart is True
+    toml.write_text(
+        base + '\n[eval]\ndataset = "dataset/x"\nevaluators = "e.yaml"\nrepeats = 3\nbaseline = "baseline"\n'
+        'concurrency = 8\nversions = "v2, v3"\n\n[mcp]\nautostart = false\n',
+        encoding="utf-8",
+    )
+    p = find_project(project_dir)
+    assert p.eval == {
+        "dataset": "dataset/x", "evaluators": "e.yaml", "repeats": 3, "baseline": "baseline",
+        "concurrency": 8, "versions": ["v2", "v3"],
+    }  # fmt: skip
+    assert p.mcp_autostart is False
+    toml.write_text(base + '\n[[eval.evaluators]]\nkey = "kw"\ntype = "contains"\n', encoding="utf-8")
+    assert find_project(project_dir).eval["evaluators"] == [{"key": "kw", "type": "contains"}]
+    for bad in ("repeats = true", "repeats = 1.5", "versions = []", "evaluators = 3", 'baseline = ""'):
+        toml.write_text(base + f"\n[eval]\n{bad}\n", encoding="utf-8")
+        with pytest.raises(WorkspaceError, match=r"\[eval\]"):
+            find_project(project_dir)
