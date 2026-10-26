@@ -12,7 +12,7 @@ export function AppLayout() {
     <div className="flex h-full bg-background text-foreground">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-border px-5">
+        <header className="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-border px-5 narrow:px-3">
           <Breadcrumbs />
           <ThemeToggle />
         </header>

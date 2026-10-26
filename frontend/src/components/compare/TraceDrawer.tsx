@@ -23,7 +23,7 @@ export function TraceDrawer({ title, turn, sessionId, selectedStepId, onSelectSt
   }, [onClose])
   return (
     <aside
-      className="absolute inset-y-0 right-0 z-30 flex w-[min(62%,860px)] flex-col border-l border-border bg-card shadow-xl"
+      className="absolute inset-y-0 right-0 z-30 flex w-[min(62%,860px)] flex-col narrow:w-full border-l border-border bg-card shadow-xl"
       aria-label="Trace"
       data-testid="trace-drawer"
     >

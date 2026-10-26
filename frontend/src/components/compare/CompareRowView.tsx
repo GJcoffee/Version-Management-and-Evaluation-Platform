@@ -106,7 +106,7 @@ export const CompareRowView = memo(function CompareRowView(p: CompareRowViewProp
         )}
         <span className="h-px flex-1 bg-border" />
       </div>
-      <div className="grid grid-cols-2 items-stretch gap-3">
+      <div className="grid grid-cols-2 items-stretch gap-3 narrow:grid-cols-1">
         <Cell
           side="left"
           turnId={p.row.leftTurnId}

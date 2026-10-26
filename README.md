@@ -39,6 +39,28 @@ npm run build
 cd ..
 ```
 
+### 从 wheel 安装
+
+wheel 内置前端产物（`evalp/static`）和 Alembic 迁移，装好即可 `evalp serve`，不需要 Node.js：
+
+```bash
+python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
+pip install evalp-0.1.0-py3-none-any.whl
+evalp --help
+evalp serve
+```
+
+自己构建 wheel（需要 Node.js ≥ 20 和 `pip install build`）：
+
+```bash
+python scripts/build_wheel.py                  # 先构建前端，再打 wheel，输出到 dist/，并检查 wheel 内容
+python scripts/build_wheel.py --skip-frontend  # 复用已有的 backend/evalp/static
+python scripts/build_wheel.py --check dist/evalp-0.1.0-py3-none-any.whl   # 只检查已有 wheel
+```
+
+检查项：`index.html` 与静态资源、全部迁移脚本（`env.py`、`script.py.mako`、`versions/*.py`）、`evalp` 命令入口；缺任何一项退出码为 1。
+`dist/`、`build/`、`*.egg-info/` 已在 `.gitignore` 中。
+
 ## 启动
 
 ```bash
@@ -80,10 +102,31 @@ evalp chat --version v2
 
 ```bash
 pytest tests -q                # 后端测试（使用内置 Fake OpenAI 服务，不调用真实模型）
-ruff check backend tests sdk
+ruff check .
 cd frontend && npm run typecheck && npm run lint && npm test
 npm run dev                    # 前端开发服务器，/api 代理到 7860（EVALP_BACKEND_PORT 可改）
 ```
+
+CI（`.github/workflows/ci.yml`）：后端在 Linux（Python 3.11 / 3.12）、macOS、Windows 上跑 `ruff check .` 与 `pytest`；前端（Linux）跑 `tsc`、`eslint`、`vitest`、`vite build`；另有一个 wheel 任务构建 wheel、装进干净 venv 并冒烟 `evalp serve`。
+
+### 性能压测
+
+```bash
+python scripts/loadtest_eval.py                         # 2000 用例 × 并发 64，Fake 模型延迟 200ms
+python scripts/loadtest_eval.py --cases 10000           # 详设 15.1 的完整规模
+python scripts/loadtest_eval.py --profile /tmp/x.prof   # 用 cProfile 包住服务进程的主线程
+```
+
+脚本用临时数据目录启动真实的 `evalp serve` 子进程，本进程里启动 Fake OpenAI，输出吞吐、平台开销、服务进程 CPU / 内存、数据库体积和报告首屏耗时。
+有效并发取 `min(评测并发, scheduler.workers, Provider.max_concurrency)`（默认值分别是 8 / 32 / 8），脚本会把后两者设为 `--concurrency`；
+实际使用时要跑到 64 并发，需要在「设置」里同时调高调度器的 workers 和 Provider 的最大并发。
+实测结果与瓶颈分析见 [docs/DEVIATIONS.md](docs/DEVIATIONS.md)。
+
+### 窄屏与安全说明
+
+- 视口宽度 ≤800px 时，侧边栏收成图标栏，双栏对比上下堆叠，会话页的 Trace 面板改为从底部弹出的抽屉（默认收起，点「Trace」或某一轮下方的「查看 Trace」打开）。
+- 超过 60 轮的会话，对话区使用虚拟滚动，只渲染可视区附近的轮次；自动贴底、流式输出、「回到底部」的行为不变。
+- API token 与 `secrets.enc` 只允许当前用户读写：POSIX 为 `chmod 600`，Windows 通过系统自带的 `icacls` 去掉继承权限、只授予当前用户。
 
 ## 文档
 

@@ -34,18 +34,12 @@
 
 ## 前端
 
-| 条目 | 说明 |
-|---|---|
-| ChatPane 虚拟滚动（几百轮的长会话） | 性能 |
-| 窄屏（≤800px）布局，Trace 面板自适应 | 体验 |
-| Monaco 按需打包语言，缩小静态资源体积（目前约 15MB） | 体积 |
-| 处理 `npm audit` 的传递依赖告警 | 安全 |
+> 说明：ChatPane 虚拟滚动（超过 60 轮启用）、窄屏（≤800px）布局与 Trace 抽屉、Monaco 按需打包（静态资源 15MB → 6MB）与编辑器页面路由懒加载、`npm audit` 告警处理（11 → 5，无 critical）均已完成，这一节目前没有未完成条目。`npm audit` 剩余的 5 条（react-router-dom 6.x、echarts 5.x、vitest 3.x 及其 `@vitest/mocker`）都只能靠大版本升级消除，见 `docs/DEVIATIONS.md`。
 
 ## 平台与工程
 
+> 说明：Windows token 文件 ACL（icacls）、wheel 打包发布流程与安装文档（`scripts/build_wheel.py`）、Windows / macOS / Linux CI 矩阵（`.github/workflows/ci.yml`）、压测脚本（`scripts/loadtest_eval.py`）均已完成。CI 与 Windows ACL 只做了本地检查（YAML 合法性、mock 平台判断后的调用参数），尚未在真实的 GitHub runner / Windows 机器上跑过。下表是仍未完成的部分。
+
 | 条目 | 出处 |
 |---|---|
-| Windows 上 token 文件 ACL 限制（目前仅 POSIX chmod 600） | 16.1 |
-| 性能压测（1 万用例 × 并发 64）与优化 | 15.1 |
-| Windows / macOS / Linux CI 矩阵 | 15.1 |
-| wheel 打包发布流程（前端产物内置）与安装文档 | 12 |
+| 评测吞吐优化：压测（2000 用例 × 并发 64，模型延迟 200ms）实测约 10 条/秒（理想值 320 条/秒），服务进程单核跑满；瓶颈是每个用例约 75 条 SQL（12 次写事务 + 11 次读事务）带来的事件循环与 aiosqlite 线程往返开销，详见 `docs/DEVIATIONS.md`。要显著提升需要合并写事务（会话创建 / Turn 收尾 / 评分落库）、缓存不可变的版本 / 用例读取，改动面较大，本次未做。完整规模（1 万用例）尚未实测，按线性外推约 16 分钟 | 15.1 |

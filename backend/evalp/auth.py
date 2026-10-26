@@ -1,6 +1,7 @@
 """API token 与鉴权中间件（详设 11.1、16.1）。
 
-- token 首次启动时由 ``secrets.token_urlsafe(32)`` 生成，写入 ``{data_dir}/token``（权限 600）；
+- token 首次启动时由 ``secrets.token_urlsafe(32)`` 生成，写入 ``{data_dir}/token``；
+  文件权限限制为仅当前用户（POSIX 为 600，Windows 用 icacls，见 ``evalp.utils.fsperm``）；
 - ``/api/*`` 需要 ``Authorization: Bearer <token>`` 或 Cookie ``evalp_token``；
 - 使用纯 ASGI 中间件（不包装响应体），不影响 SSE 流式输出。
 """
@@ -15,6 +16,7 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from evalp.errors import Unauthorized
+from evalp.utils.fsperm import restrict_to_owner
 
 COOKIE_NAME = "evalp_token"
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"}
@@ -28,21 +30,18 @@ def is_loopback(host: str | None) -> bool:
 
 
 def ensure_token(token_path: Path) -> str:
-    """读取或首次生成 API token，文件权限设为 600。"""
+    """读取或首次生成 API token，文件权限限制为仅当前用户（POSIX 600 / Windows ACL）。"""
     token_path.parent.mkdir(parents=True, exist_ok=True)
     if token_path.is_file():
         token = token_path.read_text(encoding="utf-8").strip()
         if token:
-            try:
-                os.chmod(token_path, 0o600)
-            except OSError:
-                pass
+            restrict_to_owner(token_path)
             return token
     token = secrets.token_urlsafe(32)
-    fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(token)
-    os.chmod(token_path, 0o600)
+    # 先建空文件并收紧权限，再写入 token：Windows 上不会出现“已写入但 ACL 尚未收紧”的窗口
+    os.close(os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
+    restrict_to_owner(token_path)
+    token_path.write_text(token, encoding="utf-8")
     return token
 
 

@@ -25,12 +25,12 @@ export function Sidebar() {
   const text = { ok: '服务正常', warn: '服务异常', down: '无法连接', unknown: '检测中…' }[state]
 
   return (
-    <aside className="flex w-52 shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground">
-      <div className="flex h-12 items-center gap-2 border-b border-border px-4">
+    <aside className="flex w-52 shrink-0 flex-col narrow:w-14 border-r border-border bg-sidebar text-sidebar-foreground">
+      <div className="flex h-12 items-center gap-2 border-b border-border px-4 narrow:justify-center narrow:px-0">
         <div className="flex h-6 w-6 items-center justify-center rounded bg-primary font-mono text-xs font-bold text-primary-foreground">
           E
         </div>
-        <div className="leading-tight">
+        <div className="leading-tight narrow:hidden">
           <div className="text-sm font-semibold text-foreground">EvalP</div>
           <div className="text-[10px] text-muted-foreground">版本管理与评测</div>
         </div>
@@ -40,10 +40,11 @@ export function Sidebar() {
           <NavLink
             key={to}
             to={to}
+            title={label}
             end={end}
             className={({ isActive }) =>
               cn(
-                'flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors',
+                'flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors narrow:justify-center narrow:px-0',
                 isActive
                   ? 'bg-accent font-medium text-foreground'
                   : 'text-sidebar-foreground hover:bg-accent/60 hover:text-foreground',
@@ -51,14 +52,14 @@ export function Sidebar() {
             }
           >
             <Icon className="h-4 w-4" />
-            {label}
+            <span className="narrow:sr-only">{label}</span>
           </NavLink>
         ))}
       </nav>
-      <div className="flex items-center gap-2 border-t border-border px-4 py-2.5 text-xs text-muted-foreground">
+      <div className="flex items-center gap-2 border-t border-border px-4 py-2.5 text-xs text-muted-foreground narrow:justify-center narrow:px-0" title={text}>
         <span className={cn('h-2 w-2 rounded-full', dot)} />
-        <span>{text}</span>
-        {data?.version && <span className="ml-auto font-mono">v{data.version}</span>}
+        <span className="narrow:sr-only">{text}</span>
+        {data?.version && <span className="ml-auto font-mono narrow:hidden">v{data.version}</span>}
       </div>
     </aside>
   )

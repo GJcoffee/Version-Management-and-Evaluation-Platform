@@ -25,6 +25,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from evalp.errors import InternalError
 from evalp.logging import get_logger
+from evalp.utils.fsperm import restrict_to_owner
 
 log = get_logger(__name__)
 
@@ -114,10 +115,7 @@ class SecretStore:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, self.path)
-        try:
-            os.chmod(self.path, 0o600)
-        except OSError:
-            pass
+        restrict_to_owner(self.path)
 
     def _file_set(self, key: str, value: str) -> None:
         with self._file_lock:

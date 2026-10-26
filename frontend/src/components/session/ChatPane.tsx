@@ -30,6 +30,8 @@ export interface ChatPaneProps {
   /** 当前选中的轮次（高亮左边框），如 Trace 正在显示的那一轮 */
   selectedTurnId?: string | null
   onSelectTurn?: (turnId: string) => void
+  /** 点击轮次底部「查看 Trace」按钮：默认等同 onSelectTurn；窄屏下用来打开 Trace 抽屉 */
+  onOpenTrace?: (turnId: string) => void
   /**
    * 高亮的步骤集合（双栏对比时标出差异）。元素是 step_id（如 `s2`，匹配所有轮次），
    * 或限定轮次的 `trn_xxx:s2`（见 highlightKey）。
@@ -50,6 +52,7 @@ export function ChatPane({
   loading,
   selectedTurnId,
   onSelectTurn,
+  onOpenTrace,
   highlightSteps,
   onSelectStep,
   emptyState,
@@ -151,6 +154,7 @@ export function ChatPane({
                     sessionId={sessionId}
                     selected={selectedTurnId === t.id}
                     onSelectTurn={onSelectTurn}
+                    onOpenTrace={onOpenTrace}
                     highlightSteps={highlightSteps}
                     onSelectStep={onSelectStep}
                   />
@@ -167,6 +171,7 @@ export function ChatPane({
                 sessionId={sessionId}
                 selected={selectedTurnId === t.id}
                 onSelectTurn={onSelectTurn}
+                onOpenTrace={onOpenTrace}
                 highlightSteps={highlightSteps}
                 onSelectStep={onSelectStep}
               />
@@ -195,13 +200,14 @@ export interface TurnViewProps {
   sessionId?: string
   selected?: boolean
   onSelectTurn?: (turnId: string) => void
+  onOpenTrace?: (turnId: string) => void
   highlightSteps?: ReadonlySet<string>
   onSelectStep?: (turnId: string, stepId: string) => void
   className?: string
 }
 
 /** 一轮对话：用户消息 -> assistant 消息（含工具调用卡片） -> 状态提示 -> 指标条。可单独使用（双栏对比按行对齐时）。 */
-export function TurnView({ turn, sessionId, selected, onSelectTurn, highlightSteps, onSelectStep, className }: TurnViewProps) {
+export function TurnView({ turn, sessionId, selected, onSelectTurn, onOpenTrace, highlightSteps, onSelectStep, className }: TurnViewProps) {
   return (
     <section
       data-testid="turn"
@@ -250,7 +256,8 @@ export function TurnView({ turn, sessionId, selected, onSelectTurn, highlightSte
             )}
             onClick={(e) => {
               e.stopPropagation()
-              onSelectTurn(turn.id)
+              if (onOpenTrace) onOpenTrace(turn.id)
+              else onSelectTurn(turn.id)
             }}
             data-testid="select-turn"
           >
