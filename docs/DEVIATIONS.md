@@ -397,3 +397,47 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 - **alignment 缓存**：进程内 LRU（64 条），键 = 对比模式 + 重放所选轮次 + 两侧会话的 `last_seq` 与各轮 `(id, status, finished_at)`；任一侧有轮次在执行（库里 running 或内存里占着槽位）、或重放未结束时不缓存，且计算前后签名不一致也不缓存。不落库，重启后重算。
 - **前端增量对齐**（详设 9.2）：运行中的行用浏览器里根据 SSE 事件算出的对齐（`incrementalAlign.ts`，`difflib.SequenceMatcher` 的最长连续匹配递归在 TS 里重写一份，用后端生成的 42 组用例做一致性测试）；两侧都结束后以服务端结果为准。只覆盖步骤对齐、参数 diff 和 final_text，指标仍取自 SSE 还原出的轮次。
 - **会话列表**：API 缺省（`chat,replay`）保持不变以兼容旧客户端；前端“与其他会话对比”选择器改为默认 `mode=chat`，可勾选“包含重放会话”。
+
+## 前端 — Monaco 按需打包与编辑器页面懒加载
+
+详设没有规定 Monaco 的打包方式。原来 `import * as monaco from 'monaco-editor'` 会带入全部 80+ 种语言和 css / html / ts 语言服务，静态资源约 15MB（`ts.worker` 7.0MB、主 chunk 4.09MB）。编辑器实际用到的只有 `CodeLanguage = yaml | json | markdown | plaintext`，所以：
+- `components/ui/monaco/setup.ts` 改为 `monaco-editor/editor/editor.api` + `features.ts` + 本地 worker（只剩 editor 与 json 两个）；
+- `features.ts` 是 `monaco-editor/esm/vs/editor/editor.main.js` 里除语言以外的 import 原样抄出（编辑器核心功能：查找、折叠、hover、diff 编辑器等一个不少），再加 yaml / markdown 的 Monarch 词法高亮和 json 语言服务；plaintext 为内置。升级 monaco-editor 时需要对照 `editor.main.js` 同步这份列表（`bundle.test.ts` 里有守卫用例，防止误引入多余语言）；
+- 路由 `draft/:draftId`、`versions/diff`、资产库与详情、会话页、对比页改为 `React.lazy`，`AppLayout` 里加 `Suspense`；`CodeEditor` / `DiffEditor` 本来就是懒加载。
+结果：`backend/evalp/static` 由 15,357,594 字节（`du -sh` 15M）降到 6,027,306 字节（6.0M）；最大 chunk 是编辑器核心（`setup-*.js`，3.99MB，原来 4.09MB 并伴随 7.0MB 的 ts.worker），首屏入口 `index-*.js` 约 691KB（原 921KB）。`chunkSizeWarningLimit` 仍为 4000，编辑器核心 chunk 离该值只差约 10KB，Monaco 升级后可能再次触发警告。
+取舍与风险：构建和 vitest 已验证，但当前环境没有浏览器，未在真实浏览器里点过编辑器。json 保留了语言服务（校验 / 补全，json.worker 约 400KB），其余语言（含 python / typescript / css / html）在编辑器里不再有高亮；如果以后要在编辑器里显示 python 代码，需要往 `features.ts` 加一行 `monaco-editor/languages/definitions/python/register`。
+
+## 前端 — `npm audit`：用 `overrides` 处理传递依赖，其余需大版本升级的保留
+
+处理前 `npm audit`：11 条（1 low、7 moderate、3 critical）；处理后 5 条（全部 moderate，0 critical）。在 `frontend/package.json` 加了 `overrides`（只改传递依赖，不动直接依赖的版本）：
+- `dompurify` → `^3.4.17`（monaco-editor 自带的 3.4.15，多条 DOMPurify 告警，同时消除 monaco-editor 的 low 告警）；
+- `postcss-selector-parser` → `^7.1.7`（tailwindcss 3 → postcss-nested 带入的 6.1.5；构建出的 CSS 与处理前逐字节一致）；
+- `tinypool` → `^2.2.0`（vitest 3.2.7 带入的 1.1.1，critical 的原型污染 / RCE；394 个 vitest 用例全部通过）。
+保留的 5 条：`react-router` / `react-router-dom`（6.x 全系受影响，修复在 7.x，是大版本升级；漏洞涉及 SSR 水合与 `<Link>` 的开放重定向，本项目是纯客户端渲染）、`echarts`（5.x，修复在 6.x；项目目前没有任何地方 import echarts，也不在构建产物里，建议直接从依赖里删掉，这里没有动）、`vitest` / `@vitest/mocker`（3.x，修复在 5.x，仅开发时使用）。不做破坏性大版本升级。
+
+## 前端 — ChatPane 虚拟滚动
+
+复用已有依赖 `@tanstack/react-virtual`（评测用例表在用）。以「轮」为单位虚拟化，超过 `VIRTUALIZE_THRESHOLD = 60` 轮才启用，60 轮及以下仍是完整渲染，所以短会话、双栏对比（用 `TurnView` 直接渲染）的行为和测试完全不变。启用后：动态测量每轮高度（展开工具卡片、流式增长都会触发重新测量）；贴底逻辑沿用原来的 `stuck` 判断，并在新内容到达后的 600ms 内跟随总高度的测量修正继续贴底，超过之后（例如用户手动展开某张卡片）不再强制贴底。取舍：虚拟列表里没渲染的轮次不在 DOM 中，浏览器的页内查找（Ctrl+F）搜不到它们。`TurnView` 新增可选的 `onOpenTrace`（轮次底部「查看 Trace」按钮的专用回调，缺省等同 `onSelectTurn`），用于窄屏下点按钮才打开 Trace 抽屉。
+
+## 前端 — 窄屏（≤800px）布局
+
+断点用 Tailwind 自定义屏幕 `narrow: { max: '800px' }` 与 `useMediaQuery('(max-width: 800px)')`（需要改变渲染结构的地方用后者）。改动：侧边栏收成 56px 图标栏；双栏对比的每一行上下堆叠，Trace 抽屉铺满；会话页的 Trace 面板变成占 70% 高度的底部抽屉，默认收起，开合状态不写入 localStorage（宽屏的侧栏偏好不受影响），窄屏下隐藏「加宽」按钮。其余页面（表格等）沿用原有的横向滚动，没有逐页适配。
+
+## 平台 — Windows 上 token / secrets 文件的 ACL
+
+新增 `evalp/utils/fsperm.py::restrict_to_owner`。POSIX 行为不变（`chmod 600`）；Windows 调用 `icacls <文件> /inheritance:r /grant:r <域\用户>:(F)`（subprocess，无新依赖）。取舍：授予「完全控制」而不是只读写，因为只给 (R,W) 会让该用户之后无法删除或替换这个文件（`secrets.enc` 用 `os.replace` 原子替换）；仍然只有当前用户有权限。用户名取自 `USERDOMAIN\USERNAME` 环境变量。失败（icacls 缺失、超时、返回非零）只记警告日志，不让服务启动失败，和原先 `chmod` 失败时静默忽略的行为一致。`ensure_token` 现在先建空文件、收紧权限、再写入 token，Windows 上不存在「已写入但权限尚未收紧」的窗口；已存在的 token 每次启动都会重新收紧。`secrets.enc` 同样处理。测试用 mock 平台判断验证 icacls 的调用参数；**没有在真实 Windows 上跑过**。
+
+## 平台 — wheel 打包：`scripts/build_wheel.py`
+
+`pyproject.toml` 的 `package-data` 本来就声明了 `static/**/*`、迁移的 `*.mako` 与 `versions/*.py`（`versions/` 没有 `__init__.py`，只能靠 package-data 进 wheel）。新增 `scripts/build_wheel.py`：`npm ci`（仅当没有 `node_modules`，或加 `--npm-ci`）→ `npm run build` → `python -m build --wheel backend` → 检查 wheel 内容（`index.html`、`assets/*.js`、全部迁移脚本、入口点、无 `__pycache__` / tests / frontend），不通过退出码为 1；`--skip-frontend` 复用已有产物，`--check WHEEL` 只检查。已在本地真实构建一次（2.0MB，25 个静态文件、3 个迁移脚本），在临时 venv（Python 3.13）里 `pip install` 后验证：`evalp --help` 正常、`evalp serve` 能启动并迁移到 `0003`、`/` 返回 `<!doctype html>`、`/assets/index-*.js` 返回 200、`/agents`（SPA 回退）返回 HTML、`token` 文件权限 600。未引入新依赖（构建时需要 `pip install build`，不是运行时依赖）。`tests/unit/test_build_wheel.py` 用合成 wheel 测检查逻辑，真实构建的用例需 `EVALP_TEST_WHEEL=1` 且已安装 `build`。jieba 只有 sdist，安装时需要 setuptools：当前 pip 的构建隔离已自动提供，CI 里仍显式升级 `setuptools>=68`。
+
+## 平台 — CI 矩阵（`.github/workflows/ci.yml`）
+
+后端：Linux × Python 3.11 / 3.12、macOS × 3.12、Windows × 3.12（详设写的是三平台 × 双版本，这里裁剪为 4 个组合以控制时长），跑 `ruff check .` 与 `python -m pytest -q`；前端（Linux）：`npm ci`、`tsc --noEmit`、`npm run lint`、`vitest run`、`npm run build`；另有一个 wheel 任务（Linux）构建、检查、装进干净 venv 后冒烟 `evalp serve`。action 版本：`checkout@v4`、`setup-python@v5`、`setup-node@v4`。**只做了 YAML 合法性检查，没有在 GitHub 上实际跑过**；测试套件在 Windows 上（子进程 Adapter、进程树终止、路径分隔符等）可能有失败，需要首次运行后再逐个修复，所以 `fail-fast: false`。详设 15.1 兼容行里「安装、启动、子进程 Adapter、终止进程树」的冒烟，目前由完整的 pytest 覆盖，没有单独的冒烟任务。
+
+## 平台 — 性能压测与瓶颈（`scripts/loadtest_eval.py`）
+
+脚本：临时数据目录 + 真实 `evalp serve` 子进程 + 进程内 Fake OpenAI（延迟 200ms），REST 创建 Provider / agent / 数据集 / 评测，度量吞吐、服务进程 CPU / RSS、数据库体积、报告首屏耗时；`--profile` 可用 cProfile 包住服务主线程。注意有效并发 = `min(评测并发, scheduler.workers, Provider.max_concurrency)`，三者默认 64 / 32 / 8，脚本会把后两者设为并发数；用默认设置压测的话实际并发只有 8。
+本机（4 核沙箱）实测，2000 用例 × 并发 64、1 次重复、延迟 200ms：总耗时 191.7s，吞吐 10.4 条/秒（稳态 10.6），理想值 320 条/秒（64 / 0.2s）；服务进程 CPU 平均 106%（单核跑满，95 分位 109%）、RSS 峰值 190MB；数据库 13.9MB（约 7KB/条）；报告详情接口 12ms、用例表第一页 20ms；Fake 侧观测到的最大并发只有 10（模型调用只占每条用例耗时的很小一部分）。按线性外推 1 万用例约 16 分钟（未实测；在 100 / 300 / 500 / 600 / 2000 用例下吞吐都稳定在 9~13 条/秒，没有随规模变差）。
+瓶颈：吞吐与并发数、模型延迟、流式增量大小、事件落库间隔（50ms → 1000ms 只快约 9%）、`scheduler.workers` 都无关，是**服务进程单个事件循环的 CPU**。计数显示每条用例约 75 条 SQL（12 次写事务、11 次读事务，其中 sessions 5 次、eval_runs 4 次、eval_items 4 次、turns 4 次、agents 3 次、versions 3 次重复读取），每条 SQL 经 SQLAlchemy ORM + aiosqlite 线程往返，约 100ms 的事件循环时间/条。只有模型延迟高于约 6.4 秒（并发 64 ÷ 10 条/秒）时，并发数才会成为瓶颈；用快模型（<1s）做大规模评测时，平台开销占主导。
+没有做优化：试过的低成本手段（调整 workers、事件刷新间隔）收益 <10%；真正有效的做法是合并写事务（会话创建与 Turn 收尾、评分落库）、缓存不可变的版本 / agent / 用例读取，改动落在 SessionService / EvalService 核心路径上，风险与改动面都超出「明显、低风险」，留在 BACKLOG。顺带观察到：`tiktoken` 词表首次使用时会联网下载，离线环境会在第一次估算 token 时在事件循环里同步尝试联网，失败后才退化为启发式估算（没有测过它具体阻塞多久）。

@@ -12,6 +12,7 @@ import { ChatPane, EditableTitle, MessageInput, TraceViewer, totalMetrics, useSe
 import { cn } from '@/lib/cn'
 import { formatCost, formatTokens } from '@/lib/format'
 import { safeGet, safeSet } from '@/lib/safeStorage'
+import { useIsNarrow } from '@/lib/useMediaQuery'
 import { toast } from '@/stores/toast'
 import { MODE_LABEL, sessionTitle, versionLabel } from './session/sessionUtils'
 import { SessionStatusBadge } from './session/SessionList'
@@ -88,10 +89,18 @@ function SessionView({ sessionId }: { sessionId: string }) {
   const traceTurn = stream.turns.find((t) => t.id === pinnedTurnId) ?? lastTurn
   const traceTurnIndex = traceTurn ? stream.turns.indexOf(traceTurn) + 1 : 0
 
-  const [traceOpen, setTraceOpenState] = useState(() => safeGet(TRACE_KEY) !== '0')
+  // 窄屏（≤800px）：Trace 改为从底部弹出的抽屉，默认收起，开合状态不写入偏好（偏好只属于宽屏的侧栏）
+  const narrow = useIsNarrow()
+  const [sideOpen, setSideOpen] = useState(() => safeGet(TRACE_KEY) !== '0')
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const traceOpen = narrow ? drawerOpen : sideOpen
   const [wide, setWideState] = useState(() => safeGet(TRACE_WIDE_KEY) === '1')
   const setTraceOpen = (v: boolean) => {
-    setTraceOpenState(v)
+    if (narrow) {
+      setDrawerOpen(v)
+      return
+    }
+    setSideOpen(v)
     safeSet(TRACE_KEY, v ? '1' : '0')
   }
   const setWide = (v: boolean) => {
@@ -178,7 +187,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
             </Link>
           )}
         </div>
-        <div className="ml-auto flex items-center gap-3 font-mono text-xs text-muted-foreground" data-testid="session-metrics">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-x-3 gap-y-1 font-mono text-xs text-muted-foreground" data-testid="session-metrics">
           <span title="轮数">{metrics.turns} 轮</span>
           <span title="累计 tokens">{formatTokens(metrics.tokens)} tokens</span>
           <span title="累计成本">{formatCost(metrics.cost)}</span>
@@ -206,7 +215,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
         {/* 左：对话 */}
         <div className="flex min-w-0 flex-1 flex-col">
           <ChatPane
@@ -216,6 +225,10 @@ function SessionView({ sessionId }: { sessionId: string }) {
             loading={stream.loading}
             selectedTurnId={traceTurn?.id ?? null}
             onSelectTurn={selectTurn}
+            onOpenTrace={(turnId) => {
+              selectTurn(turnId)
+              if (narrow) setTraceOpen(true)
+            }}
             onSelectStep={(turnId, stepId) => {
               setPinnedTurnId(turnId)
               setSelectedStep(stepId)
@@ -238,11 +251,14 @@ function SessionView({ sessionId }: { sessionId: string }) {
         {traceOpen && (
           <aside
             className={cn(
-              'flex min-h-0 shrink-0 flex-col border-l border-border bg-card',
-              wide ? 'w-[min(60%,860px)]' : 'w-[min(42%,560px)]',
+              'flex min-h-0 flex-col bg-card',
+              narrow
+                ? 'absolute inset-x-0 bottom-0 z-20 h-[70%] border-t border-border shadow-xl'
+                : cn('shrink-0 border-l border-border', wide ? 'w-[min(60%,860px)]' : 'w-[min(42%,560px)]'),
             )}
             aria-label="Trace"
             data-testid="trace-panel"
+            data-layout={narrow ? 'drawer' : 'side'}
           >
             <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
               <span className="text-xs font-semibold">Trace</span>
@@ -254,9 +270,11 @@ function SessionView({ sessionId }: { sessionId: string }) {
                 <span className="text-xs text-muted-foreground">暂无轮次</span>
               )}
               <div className="ml-auto flex items-center gap-1">
-                <Button size="sm" variant="ghost" onClick={() => setWide(!wide)}>
-                  {wide ? '收窄' : '加宽'}
-                </Button>
+                {!narrow && (
+                  <Button size="sm" variant="ghost" onClick={() => setWide(!wide)}>
+                    {wide ? '收窄' : '加宽'}
+                  </Button>
+                )}
                 <Button size="icon" variant="ghost" aria-label="收起 Trace" onClick={() => setTraceOpen(false)} className="h-7 w-7">
                   <PanelRightClose className="h-3.5 w-3.5" />
                 </Button>

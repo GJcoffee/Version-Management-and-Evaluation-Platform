@@ -28,6 +28,8 @@ export default {
         sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
         mono: ['ui-monospace', 'SFMono-Regular', 'JetBrains Mono', 'Menlo', 'Consolas', 'monospace'],
       },
+      // 窄屏（≤800px）：`narrow:` 前缀。与 src/lib/useMediaQuery.ts 的 NARROW_QUERY 保持一致
+      screens: { narrow: { max: '800px' } },
       borderRadius: { lg: '0.5rem', md: '0.375rem', sm: '0.25rem' },
     },
   },
