@@ -24,6 +24,8 @@ interface CellProps {
   replayActive: boolean
   highlight: ReadonlySet<string> | undefined
   selected: boolean
+  /** 这一行是单侧消息（分叉） */
+  fork?: boolean
   onOpenTrace: (side: Side, turnId: string, stepId?: string) => void
 }
 
@@ -39,7 +41,7 @@ function Placeholder({ icon, text, testid }: { icon: React.ReactNode; text: stri
   )
 }
 
-function Cell({ side, turnId, turn, sessionId, mode, replayActive, highlight, selected, onOpenTrace }: CellProps) {
+function Cell({ side, turnId, turn, sessionId, mode, replayActive, highlight, selected, fork, onOpenTrace }: CellProps) {
   let body
   if (turn) {
     body = (
@@ -54,6 +56,8 @@ function Cell({ side, turnId, turn, sessionId, mode, replayActive, highlight, se
     )
   } else if (turnId) {
     body = <Placeholder icon={<Loader2 className="h-4 w-4 animate-spin" />} text="加载中…" testid="cell-loading" />
+  } else if (fork) {
+    body = <Placeholder icon={<Minus className="h-4 w-4" />} text="这条消息没有发给这一侧" testid="cell-missing" />
   } else if (mode === 'replay' && side === 'right') {
     body = replayActive ? (
       <Placeholder icon={<Hourglass className="h-4 w-4" />} text="排队中" testid="cell-queued" />
@@ -72,7 +76,7 @@ function Cell({ side, turnId, turn, sessionId, mode, replayActive, highlight, se
 
 export interface CompareRowViewProps {
   row: CompareRow
-  /** 行号（从 1 开始，展示用） */
+  /** 行号（从 1 开始，展示用；单侧消息没有行号） */
   ordinal: number
   mode: CompareMode
   left: TurnState | undefined
@@ -91,9 +95,15 @@ export interface CompareRowViewProps {
 export const CompareRowView = memo(function CompareRowView(p: CompareRowViewProps) {
   const { left, right } = p
   return (
-    <section className="space-y-2" data-testid="compare-row" data-pair={p.row.pair}>
+    <section className="space-y-2" data-testid="compare-row" data-pair={p.row.pair} data-fork={p.row.fork}>
       <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-        <span className="rounded bg-muted px-1.5 py-0.5 font-mono">第 {p.ordinal} 轮</span>
+        {p.row.fork ? (
+          <span className="rounded bg-warning/15 px-1.5 py-0.5 text-warning" data-testid="fork-label">
+            单侧消息 · 仅{p.row.fork === 'left' ? '左' : '右'}侧
+          </span>
+        ) : (
+          <span className="rounded bg-muted px-1.5 py-0.5 font-mono">第 {p.ordinal} 轮</span>
+        )}
         <span className="h-px flex-1 bg-border" />
       </div>
       <div className="grid grid-cols-2 items-stretch gap-3">
@@ -106,6 +116,7 @@ export const CompareRowView = memo(function CompareRowView(p: CompareRowViewProp
           replayActive={p.replayActive}
           highlight={p.alignOn ? p.leftHighlight : undefined}
           selected={p.trace?.side === 'left' && p.trace.turnId === p.row.leftTurnId}
+          fork={!!p.row.fork}
           onOpenTrace={p.onOpenTrace}
         />
         <Cell
@@ -117,11 +128,12 @@ export const CompareRowView = memo(function CompareRowView(p: CompareRowViewProp
           replayActive={p.replayActive}
           highlight={p.alignOn ? p.rightHighlight : undefined}
           selected={p.trace?.side === 'right' && p.trace.turnId === p.row.rightTurnId}
+          fork={!!p.row.fork}
           onOpenTrace={p.onOpenTrace}
         />
       </div>
-      <MetricsCompare left={left} right={right} />
-      {p.alignOn && <AlignmentPanel align={p.row.align} />}
+      {!p.row.fork && <MetricsCompare left={left} right={right} />}
+      {p.alignOn && !p.row.fork && <AlignmentPanel align={p.row.align} />}
     </section>
   )
 })

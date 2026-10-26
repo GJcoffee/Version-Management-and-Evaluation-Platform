@@ -120,7 +120,7 @@ Cursor 不一定在项目目录启动 MCP 进程，所以用 `--project-dir` 显
 | `upsert_asset` | `kind`、`name`、`content` 或 `path`、`message?` | 创建资产或新增修订（内容相同则不新增）；`path` 是项目目录内的文件，大文件 / 二进制自动走上传 |
 | `import_dataset` | `name`、`path`、`format?`、`column_map?` | 把项目目录内的 JSONL / CSV 导入为数据集（同名则新增修订）；返回用例数、引用和解析警告 |
 | `get_session` | `session_id`、`turn?`、`detail?` | 会话记录：每轮的输入、回复、工具调用、耗时与 tokens（摘要最多 30 轮）；指定 `turn` 展开该轮，`detail="full"` 再列出 trace 步骤 |
-| `replay_session` | `session_id`、`target_version`、`turns?`、`wait?` | 用另一个版本重放历史会话（锚定模式）；`wait` 默认 true，等重放结束后给出逐轮对比摘要 |
+| `replay_session` | `session_id`、`target_version`、`mode?`、`turns?`、`wait?` | 用另一个版本重放历史会话；`mode` 为 `anchored`（锚定，默认：每轮的上下文用原会话的历史，各轮并发）或 `free`（自由：新版本用自己的回复续写上下文，逐轮串行，更慢）；`wait` 默认 true，等重放结束后给出逐轮对比摘要 |
 | `compare_sessions` | `left`、`right`、`max_turns?` | 逐轮对比两个会话：步骤增减、指标差值、工具参数差异、回复 diff（只展开有差异的轮次） |
 
 约定：
@@ -129,7 +129,7 @@ Cursor 不一定在项目目录启动 MCP 进程，所以用 `--project-dir` 显
 - `evaluators` 省略时读取 `[eval].evaluators`，再省略则读项目根目录的 `evals.yaml`，也可以传评估器对象列表；
 - `versions` 省略时评测最新版本；给了 `baseline` 时每个版本都与基线对比，基线在对比的左侧；
 - 评测等待超时（10 分钟）不会取消评测，稍后用 `get_eval_report` / `get_eval_status` 查看；
-- `upsert_asset` / `import_dataset` 的 `path` 必须在项目目录内；`replay_session` 目前只支持锚定模式（每一轮的上下文用原会话的历史）。
+- `upsert_asset` / `import_dataset` 的 `path` 必须在项目目录内；`replay_session` 的 `mode=anchored` 精确比较单轮差异（排除前面轮次差异的累积影响），`mode=free` 观察整段对话的走向；自由模式只重放 `turns` 里选中的轮次时，上下文只含选中的前几轮。重放中途有轮次没能执行时，摘要里会注明「重放未能完整执行」。
 
 ### 默认评测配置（`.evalp.toml` 的 `[eval]`）
 

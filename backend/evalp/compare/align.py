@@ -25,6 +25,7 @@ __all__ = [
     "align_pair",
     "align_steps",
     "extract_steps",
+    "fork_turns",
     "json_diff",
     "pair_turns",
     "turn_metrics",
@@ -204,3 +205,31 @@ def align_pair(pair: int, left: AlignTurn | None, right: AlignTurn | None) -> di
             "right": right.input_text if right else None,
         },
     }
+
+
+def fork_turns(left: Sequence[AlignTurn], right: Sequence[AlignTurn]) -> list[dict[str, Any]]:
+    """单侧消息（分叉，``pair_index`` 为空）：不参与轮次对齐，单独列出供前端标注。
+
+    ``after_pair`` 是该侧在它之前最近一个成对轮次的 ``pair_index``（前面没有则为 None），前端据此把它
+    排在对应的行后面；同一位置的多条按（左侧先、idx 升序）输出。
+    """
+    out: list[dict[str, Any]] = []
+    for side, turns in (("left", left), ("right", right)):
+        last_pair: int | None = None
+        for t in sorted(turns, key=lambda x: x.idx):
+            if t.pair_index is not None:
+                last_pair = t.pair_index
+                continue
+            out.append(
+                {
+                    "side": side,
+                    "turn_id": t.id,
+                    "idx": t.idx,
+                    "after_pair": last_pair,
+                    "input": t.input_text,
+                    "final_text": t.final_text,
+                    "status": t.status,
+                    "metrics": turn_metrics(t),
+                }
+            )
+    return out

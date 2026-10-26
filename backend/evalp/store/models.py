@@ -361,6 +361,9 @@ class CompareGroup(Base):
     __table_args__ = (
         CheckConstraint("kind IN ('session','eval','version')", name="kind"),
         CheckConstraint("mode IN ('live','history','replay')", name="mode"),
+        CheckConstraint(
+            "replay_status IS NULL OR replay_status IN ('running','completed','failed')", name="replay_status"
+        ),
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -369,8 +372,12 @@ class CompareGroup(Base):
     left_ref: Mapped[str] = mapped_column(Text, nullable=False)
     right_ref: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
-    notes: Mapped[str | None] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text)  # 用户备注（0003 之前 replay 组在此存 JSON，已迁出）
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    # 以下三列仅 mode=replay 使用（迁移 0003）
+    replay_status: Mapped[str | None] = mapped_column(Text)  # running | completed | failed
+    replay_turns: Mapped[list[int] | None] = _json_col(nullable=True)  # 被选中重放的原轮次 idx
+    replay_error: Mapped[str | None] = mapped_column(Text)
 
 
 # ---------------------------------------------------------------- 任务 / 设置

@@ -186,6 +186,6 @@
 {"session_id": "ses_new", "compare_id": "cmp_…"}
 ```
 
-- 只实现锚定模式：第 k 轮的上下文用原会话前 k 轮的历史（`SessionService.get_history(src, upto_idx=k)` + `history_override`），各轮相互独立，在后台并发执行（不经过调度器，用 asyncio 任务，并发上限 4）；
+- 锚定模式（`mode` 缺省）：第 k 轮的上下文用原会话前 k 轮的历史（`SessionService.get_history(src, upto_idx=k)` + `history_override`），各轮相互独立，在后台并发执行（不经过调度器，用 asyncio 任务，并发上限 4）；`mode=free`（自由模式）逐轮串行；对比组的重放状态 / 备注 / 单侧发送等后续补充见 `docs/api.md`「对比与重放」；
 - 每一轮的 `anchored_from_turn_id` 指向原轮次，`pair_index` = 原轮次的 idx；
 - 自动创建 `CompareGroup(kind=session, mode=replay, left=原会话, right=新会话)`。

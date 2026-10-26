@@ -781,6 +781,9 @@ def render_alignment(
     ]
     if unfinished:
         lines.append("- **重放尚未完成**，以下为当前进度。")
+    if group.get("replay_status") == "failed":
+        why = f"：{group['replay_error']}" if group.get("replay_error") else ""
+        lines.append(f"- **重放未能完整执行**{why}")
     for p in differing[:max_turns]:
         steps = p.get("steps") or []
         deleted = [st["sig"] for st in steps if st.get("op") == "delete"]

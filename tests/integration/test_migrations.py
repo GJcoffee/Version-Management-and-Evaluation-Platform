@@ -58,7 +58,7 @@ def test_orm_metadata_covers_design_tables():
 def test_idempotent(migrated):
     run_migrations(migrated)  # 再次执行不报错
     con = sqlite3.connect(migrated)
-    assert con.execute("select version_num from alembic_version").fetchall() == [("0002",)]
+    assert con.execute("select version_num from alembic_version").fetchall() == [("0003",)]
     con.close()
 
 
@@ -163,3 +163,76 @@ def test_0002_keeps_desc_index_and_downgrade(tmp_path):
     con.close()
     assert "variables" not in cols and "anchored_from_turn_id" not in tcols
     assert "created_at DESC" in sql
+
+
+def _seed_replay_groups(path):
+    """0002 库：一个已完成的 replay 组、一个未跑完的、一个带自由备注的 history 组。"""
+    con = sqlite3.connect(path)
+    con.execute("PRAGMA foreign_keys=ON")
+    con.execute("insert into agents(id,name,kind,created_at,updated_at) values('a1','x','config','t','t')")
+    con.execute(
+        "insert into versions(id,agent_id,seq,spec_hash,spec,created_via,created_at) "
+        "values('v1','a1',1,'h','{}','publish','t')"
+    )
+    for sid, mode in (("src", "chat"), ("done", "replay"), ("half", "replay")):
+        con.execute(
+            "insert into sessions(id,agent_id,version_id,mode,created_at,updated_at) "
+            f"values('{sid}','a1','v1','{mode}','t','t')"
+        )
+    for sid, pairs in (("done", (1, 3)), ("half", (1,))):
+        for i, p in enumerate(pairs):
+            con.execute(
+                "insert into turns(id,session_id,idx,pair_index,status,input,started_at) "
+                f"values('{sid}{i}','{sid}',{i},{p},'ok','{{}}','t')"
+            )
+    rows = [
+        ("c1", "replay", "src", "done", '{"replay_turns": [1, 3]}'),
+        ("c2", "replay", "src", "half", '{"replay_turns": [1, 2]}'),
+        ("c3", "history", "src", "done", "我的备注"),
+    ]
+    for cid, mode, left, right, notes in rows:
+        con.execute(
+            "insert into compare_groups(id,kind,mode,left_ref,right_ref,notes,created_at) "
+            "values(?, 'session', ?, ?, ?, ?, 't')",
+            (cid, mode, left, right, notes),
+        )
+    con.commit()
+    con.close()
+
+
+def test_0003_moves_replay_state_out_of_notes(tmp_path):
+    """0002 -> 0003：notes 里的所选轮次迁到 replay_turns，状态按已有轮次推断，用户备注原样保留。"""
+    path = tmp_path / "r.db"
+    run_migrations(path, "0002")
+    _seed_replay_groups(path)
+    run_migrations(path)
+    con = sqlite3.connect(path)
+    got = {
+        r[0]: r[1:]
+        for r in con.execute("select id, replay_status, replay_turns, notes from compare_groups order by id")
+    }
+    assert got["c1"] == ("completed", "[1, 3]", None)
+    assert got["c2"][0] == "failed" and got["c2"][1] == "[1, 2]" and got["c2"][2] is None
+    assert got["c3"] == (None, None, "我的备注")
+    err = con.execute("select replay_error from compare_groups where id='c2'").fetchone()[0]
+    assert err
+    with pytest.raises(sqlite3.IntegrityError):  # CHECK(replay_status)
+        con.execute("update compare_groups set replay_status='bogus' where id='c1'")
+    con.close()
+
+
+def test_0003_downgrade_restores_notes(tmp_path):
+    from alembic import command
+    from evalp.store.migrate import make_alembic_config
+
+    path = tmp_path / "rd.db"
+    run_migrations(path, "0002")
+    _seed_replay_groups(path)
+    run_migrations(path)
+    command.downgrade(make_alembic_config(path), "0002")
+    con = sqlite3.connect(path)
+    cols = {r[1] for r in con.execute("pragma table_info(compare_groups)")}
+    notes = dict(con.execute("select id, notes from compare_groups"))
+    con.close()
+    assert not ({"replay_status", "replay_turns", "replay_error"} & cols)
+    assert notes["c1"] == '{"replay_turns": [1, 3]}' and notes["c3"] == "我的备注"

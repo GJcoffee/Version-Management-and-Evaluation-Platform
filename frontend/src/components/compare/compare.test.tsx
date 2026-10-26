@@ -55,6 +55,46 @@ describe('buildRows', () => {
   })
 })
 
+describe('buildRows：单侧消息（分叉）', () => {
+  const fork = (turn_id: string, side: 'left' | 'right', after_pair: number | null) => ({
+    side,
+    turn_id,
+    idx: 1,
+    after_pair,
+    input: 'x',
+    final_text: null,
+    status: 'ok',
+    metrics: null,
+  })
+
+  it('排在 after_pair 对应的行之后；只有一侧有轮次；before-any 的排在最前', () => {
+    const a: Alignment = {
+      turns: [
+        { ...align, pair: 0 },
+        { ...align, pair: 1 },
+      ],
+      forks: [fork('r_f', 'right', 0), fork('l_f', 'left', 0), fork('l_first', 'left', null)],
+    }
+    const rows = buildRows(a)
+    expect(rows.map((r) => r.key)).toEqual(['f:l_first', 'p0', 'f:r_f', 'f:l_f', 'p1'])
+    expect(rows[0]).toMatchObject({ fork: 'left', leftTurnId: 'l_first', rightTurnId: null })
+    expect(rows[2]).toMatchObject({ fork: 'right', leftTurnId: null, rightTurnId: 'r_f' })
+    expect(rows.filter((r) => !r.fork).map((r) => r.pair)).toEqual([0, 1])
+  })
+
+  it('本地刚发送的单侧消息先显示；服务端对齐结果里有了之后不重复；找不到对应成对行时放最后', () => {
+    const base: Alignment = { turns: [{ ...align, pair: 0 }] }
+    expect(buildRows(base, [], [{ side: 'right', turnId: 't1', afterPair: 0 }]).map((r) => r.key)).toEqual(['p0', 'f:t1'])
+    const withServer: Alignment = { ...base, forks: [fork('t1', 'right', 0)] }
+    expect(buildRows(withServer, [], [{ side: 'right', turnId: 't1', afterPair: 0 }]).map((r) => r.key)).toEqual(['p0', 'f:t1'])
+    expect(buildRows(base, [], [{ side: 'left', turnId: 't2', afterPair: 7 }]).map((r) => r.key)).toEqual(['p0', 'f:t2'])
+  })
+
+  it('旧服务端没有 forks 字段时和以前一样', () => {
+    expect(buildRows({ turns: [{ ...align, pair: 3 }] }).map((r) => r.key)).toEqual(['p3'])
+  })
+})
+
 describe('对齐高亮与摘要', () => {
   it('高亮 key 由 turn_id 与 step_id 组合；delete 在左、insert 在右、参数不同两侧都标', () => {
     expect(rowHighlights(align)).toEqual({
@@ -141,7 +181,7 @@ describe('CompareRowView', () => {
   )
 
   it('重放中右侧还没跑到的轮次显示“排队中”，结束后显示“未重放”', () => {
-    const row = { pair: 0, leftTurnId: 'trn_L', rightTurnId: null }
+    const row = { key: 'p0', pair: 0, leftTurnId: 'trn_L', rightTurnId: null }
     const { rerender } = render(
       wrap(<CompareRowView {...base} row={row} mode="replay" left={state.turns[0]} right={undefined} replayActive />),
     )
@@ -152,7 +192,7 @@ describe('CompareRowView', () => {
   })
 
   it('两侧都结束时显示指标对照与差值', () => {
-    const row = { pair: 0, leftTurnId: 'trn_L', rightTurnId: 'trn_L' }
+    const row = { key: 'p0', pair: 0, leftTurnId: 'trn_L', rightTurnId: 'trn_L' }
     render(wrap(<CompareRowView {...base} row={row} mode="live" left={state.turns[0]} right={state.turns[0]} replayActive={false} />))
     const cmp = screen.getByTestId('metrics-compare')
     expect(cmp).toHaveAttribute('data-settled')

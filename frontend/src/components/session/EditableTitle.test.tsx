@@ -51,4 +51,16 @@ describe('EditableTitle', () => {
     render(<EditableTitle value="a" onSave={vi.fn()} disabled />)
     expect(screen.queryByRole('button', { name: '编辑标题' })).not.toBeInTheDocument()
   })
+
+  it('可自定义 testId 与最大长度（对比标题复用）', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    render(<EditableTitle value="对比" testId="compare-title" maxLength={5} onSave={onSave} />)
+    expect(screen.getByTestId('compare-title')).toHaveTextContent('对比')
+    await userEvent.click(screen.getByRole('button', { name: '编辑标题' }))
+    const input = screen.getByTestId('compare-title-input')
+    await userEvent.clear(input)
+    await userEvent.type(input, '123456{Enter}')
+    expect(screen.getByRole('alert')).toHaveTextContent('最长 5')
+    expect(onSave).not.toHaveBeenCalled()
+  })
 })

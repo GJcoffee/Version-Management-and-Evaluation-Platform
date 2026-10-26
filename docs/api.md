@@ -531,6 +531,7 @@ CSV 需要 `column_map`（`{字段名: 列名}`）；字段名可用 `case_key /
 ### GET /sessions
 `?agent_id=（id 或名称）&version_id=&mode=chat,replay&q=标题关键字&limit=&cursor=`；`mode` 可逗号分隔，缺省为 `chat,replay`（**不含** `eval`、`judge`）。
 新的在前，分页同 0 节。
+想排除重放产生的会话，传 `mode=chat`（缺省值保持不变以兼容旧客户端；前端的“与其他会话对比”选择器默认就这样过滤，可勾选“包含重放会话”）。
 
 ### GET /sessions/{id}?include=turns,events
 `include` 缺省 `turns`；传空字符串则只要会话信息。返回 `{"session", "turns": [TurnOut], "events": [AgentEvent] | null}`。
@@ -572,9 +573,12 @@ id: 12                       // 事件 seq；llm.delta 没有 id（不落库、�
 event: tool.call             // 帧名：turn.start / llm.request / llm.delta / llm.response / tool.call / tool.result / span.* / log / message.assistant / agent.error / turn.end
 data: {"seq":12,"turn_id":"trn_…","ts":"…","type":"tool.call","step_id":"s2","parent_step_id":"s1","payload":{…}}
 
-event: idle                  // 没有轮次在运行（或正在运行的这一轮已结束且 turn.end 已落库）后发送，随后服务端关闭连接
+event: idle                  // 没有轮次在运行（或正在运行的这一轮已结束且 turn.end 已落库）后发送，随后服务端关闭连接；重放期间见下
 data: {"status":"idle","last_seq":12}
 ```
+**重放会话的 idle**：重放（`POST /sessions/{id}/replay`）创建的新会话，在重放结束前（包括轮次之间的空档、第一轮开始前、排队等待并发名额时）连接一直保持打开、不发 `idle`（空闲时只有 `: ping` 心跳）；重放结束且对比组的 `replay_status` 已写成终态后才发 `idle`。
+**同一会话的并发轮次**（只有锚定重放会产生）共用同一个事件序列：`seq` 单调递增，各轮事件交错，靠 `turn_id` 区分；所有并发轮次都结束（且没有重放持有）才发 `idle`。
+
 **`error` 事件的帧名是 `agent.error`**（避开浏览器 `EventSource.onerror` 的同名事件，客户端不会再把它误判为断线）。只有 `event:` 这一行改名：
 `data` 里的 `type` 仍是 `error`，库里的事件类型、`GET /sessions/{id}?include=events` 返回的 `type`、agent 对外协议（SDK / HTTP / 子进程）里的事件类型都不变。
 客户端要用 `addEventListener("agent.error", …)` 监听，不再有名为 `error` 的帧。
@@ -607,16 +611,34 @@ HTTP 状态恒为 200（版本不存在 404），agent 的任何问题都体现�
 - `live`：`version_id` 可写版本 id、`agent:vN`、`agent:标签`；自动创建两个 `mode=chat` 的会话（出现在会话列表里）。两侧可以是不同的 agent。
 - `history`：两侧是已有会话（任意 mode），会话不存在返回 404。
 - `replay` 模式只能由重放生成，不能直接创建。`kind` 目前只支持 `session`。
-- 响应：`{id, kind, mode, left:{session_id, version_id, version_seq, agent_name}, right:{…}, title, created_at}`。
+- 响应（CompareGroup）：
+  ```json
+  {"id": "cmp_…", "kind": "session", "mode": "live | history | replay",
+   "left": {"session_id", "version_id", "version_seq", "agent_name"}, "right": {…},
+   "title": "…" | null, "notes": "…" | null, "created_at": "…",
+   "replay_mode": "anchored | free" | null, "replay_status": "running | completed | failed" | null,
+   "replay_turns": [0, 2] | null, "replay_error": "…" | null}
+  ```
+  `notes` 是用户备注。后四项只有 `mode=replay` 有值，其余为 null：`replay_turns` 是被选中重放的原轮次 idx（升序）；
+  `replay_status`：`running` 后台仍在执行；`completed` 所有所选轮次都已执行完（**单轮 agent 报错 / 超时是重放的结果，不算失败**）；
+  `failed` 有轮次没能启动或被取消、整个任务出错、服务关闭或重启把重放打断（`replay_error` 给出原因）。
+  库里是 `running` 但后台任务已不在（服务重启 / 异常退出）时，读出来按 `failed` 返回。
 
 ### GET /compare、GET /compare/{id}
-列表按新到旧分页（只含 `kind=session`）；详情结构同上。
+列表按新到旧分页（只含 `kind=session`）；详情结构同上。重放进行中（`replay_status=running`）时前端每 2 秒刷新一次详情。
+
+### PATCH /compare/{id} → CompareGroup
+```json
+{"title": "新标题", "notes": "备注"}
+```
+只改请求里出现的字段；`null` 或空白字符串表示清空（标题清空后界面显示“会话对比”）。字符串先去首尾空白；标题最长 120、备注最长 2000 个字符，超长、空对象（一个字段都没给）或多余字段返回 400 `VALIDATION_ERROR`，对比不存在返回 404。任何模式（含重放）的对比都可以改，不影响重放字段。
 
 ### POST /compare/{id}/turns → 202（仅 live 模式）
-请求 `{"input": "…" | Message, "variables"?: {}}`，响应 `{"pair_index": 3, "left_turn_id": "trn_…", "right_turn_id": "trn_…"}`。
+请求 `{"input": "…" | Message, "variables"?: {}, "side"?: "both" | "left" | "right"}`，响应 `{"pair_index": 3, "left_turn_id": "trn_…", "right_turn_id": "trn_…", "side": "both"}`。
 - 两侧并发执行，立即返回；前端分别订阅两侧的 `GET /sessions/{id}/stream`（可用响应里的 turn id 区分，或用 `after_seq` = 发送前的 `last_seq`）。
 - `pair_index` = 两侧已有 pair_index 的最大值 + 1（从 0 开始）；两侧的轮次共享同一个 `pair_index`。
-- 任意一侧会话正在执行 → **409 `SESSION_BUSY`**（`details.session_id` 是忙的那一侧；此时两侧都不会启动）。
+- `side` 缺省 `both`。`left` / `right` 为**单侧消息（分叉）**：只向一侧发送，`pair_index` 为 null（不占用序号，之后双侧发送的序号照常往下数），另一侧的 turn id 为 null；这条消息进入该侧之后的上下文，所以两侧的历史从此不同。单侧消息不参与轮次对齐，由 alignment 的 `forks` 单独列出。
+- 目标会话（`both` 为两侧，单侧时只看那一侧）正在执行 → **409 `SESSION_BUSY`**（`details.session_id` 是忙的那一侧；`both` 时两侧都不会启动）。
 - 非 live 模式 → 409 `INVALID_STATE`。一侧执行出错不影响另一侧（看各自 turn 的 `status`）。
 
 ### GET /compare/{id}/alignment
@@ -633,22 +655,27 @@ HTTP 状态恒为 200（版本不存在 404），agent 的任何问题都体现�
   "final_text": {"left": "…", "right": "…"},
   "status": {"left": "ok", "right": "error"},
   "input": {"left": "用户输入", "right": "用户输入"}
-}]}
+}],
+ "forks": [{"side": "left", "turn_id": "trn_…", "idx": 2, "after_pair": 0, "input": "…", "final_text": "…" | null,
+            "status": "ok", "metrics": {…} | null}]}
 ```
 - **轮次对齐**：live 按 `pair_index`；history 按 `idx`；replay 时左侧（原会话）按 `idx`、右侧（新会话）按 `pair_index`（等于原轮次 idx）。`pair_index` 为空的轮次（单侧消息）不参与。只有一侧有的轮次，另一侧的 `*_turn_id`、`metrics`、`final_text`、`status` 为 null，`steps` 全为 delete 或 insert。
 - **步骤对齐**：对两侧步骤签名序列（`llm` / `tool:{name}` / `span:{name}` / `final`）做 LCS（`difflib.SequenceMatcher`，取最长连续匹配，所以多出来的步骤不一定出现在开头），只有 `equal / insert / delete` 三种 op；签名不同的步骤是一个 delete 加一个 insert（delete 在前）。
 - **step_id**：每轮从 `s1` 开始，必须与 turn id 组合才唯一；`message.assistant`（`final`）通常没有 step_id，这里固定记为 `"final"`；没有 step_id 的其他步骤记为 `"e{seq}"`。
 - **tool_args_diff**：只列出参数有差异的、已对齐的工具调用；`changes[].path` 形如 `a.b`、`items[0]`，`op` 为 `change / add / remove`（缺的一侧值为 null）。工具结果的文本 diff 与 llm/final 的字符级 diff 由前端用 `final_text` 和 trace 自行完成。
 - **metrics**：`tokens` = 输入 + 输出 token；轮次尚未结束时 `latency_ms` / `ttft_ms` 为 null，其余为已累计的值（结束前通常为 0）。
-- 每次请求都会重新计算，包含正在执行的轮次的当前进度；前端可在两侧 `turn.end` 后重新拉取。
+- **forks**（仅 live 模式，其余为 `[]`）：单侧消息列表。`after_pair` 是该侧在它之前最近一个成对轮次的 `pair_index`（前面没有则为 null），前端据此把它排在对应行之后；同一位置左侧先、再按 `idx`。
+- 包含正在执行的轮次的当前进度；前端在两侧 `turn.start` / `turn.end` 后重新拉取。
+- **缓存**：两侧会话都没有正在执行的轮次（库里无 `running` 轮次、内存里也没有占用的槽位，重放则要求已结束）时，结果按（对比模式、重放所选轮次、两侧会话的 `last_seq` 及各轮 `id/status/finished_at`）缓存，最多 64 条、LRU 淘汰；任何一侧有新事件或新轮次，`last_seq` 变化，旧条目自然失效。运行中的结果不缓存。缓存只在进程内，重启后重算；响应内容与不缓存时完全一致。
 
 ### POST /sessions/{id}/replay → 201
-请求 `{"target_version_id": "ver_b | agent:v13 | agent:标签", "turns"?: [0, 2], "mode"?: "anchored"}`，响应 `{"session_id": "ses_new", "compare_id": "cmp_…"}`。
-- 只支持锚定模式（`mode` 传 `free` 返回 400）。`turns` 是原会话的轮次 `idx`，缺省为全部（不含仍在执行的轮次）；不存在的 idx 返回 400。
-- 立即返回；新会话（`mode=replay`、`source_session_id`=原会话、`replay_mode=anchored`、变量沿用原会话）和 `CompareGroup(mode=replay, left=原会话, right=新会话)` 在返回时已创建，前端可立刻打开对比页，随后订阅新会话的 SSE / 轮询 alignment 看到逐轮完成。尚未执行的轮次在 alignment 中 `right_turn_id` 为 null。
-- 第 k 轮的上下文 = 原会话前 k 轮的历史（只含 `status=ok` 的轮次）；新轮次的 `anchored_from_turn_id` = 原轮次 id，`pair_index` = 原轮次 `idx`。某一轮失败不影响后面的轮次。
-- 执行方式：后台 asyncio 任务，不经过调度器。同一次重放内按原轮次顺序**逐轮串行**（一个会话同一时间只能执行一轮），不同重放之间最多同时执行 4 个；服务关闭时取消未完成的重放。
-- 没有"重放进度"接口：看新会话的 `turns` 数量与 `GET /sessions/{id}` 的 `status`，或订阅其 SSE。
+请求 `{"target_version_id": "ver_b | agent:v13 | agent:标签", "turns"?: [0, 2], "mode"?: "anchored" | "free"}`，响应 `{"session_id": "ses_new", "compare_id": "cmp_…"}`。
+- `mode` 缺省 `anchored`；其他取值返回 400。`turns` 是原会话的轮次 `idx`，缺省为全部（不含仍在执行的轮次）；不存在的 idx 返回 400。
+- 立即返回；新会话（`mode=replay`、`source_session_id`=原会话、`replay_mode`=所选模式、变量沿用原会话）和 `CompareGroup(mode=replay, left=原会话, right=新会话, replay_status=running, replay_turns=所选轮次)` 在返回时已创建，前端可立刻打开对比页，随后订阅新会话的 SSE（重放期间不发 `idle`）/ 轮询 alignment 或对比组详情看到逐轮完成。尚未执行的轮次在 alignment 中 `right_turn_id` 为 null。新轮次的 `pair_index` = 原轮次 `idx`。
+- **锚定（anchored）**：第 k 轮的上下文 = 原会话前 k 轮的历史（只含 `status=ok` 的轮次）；新轮次的 `anchored_from_turn_id` = 原轮次 id。各轮互不依赖，**轮内并发**执行：全部重放合计最多同时执行 4 个轮次（超出的排队），同一新会话里的并发轮次共用一个事件序列（见 SSE）。`Turn` 行按原轮次顺序创建，所以新会话里的 `idx` 与原轮次顺序一致，只是完成顺序不定。
+- **自由（free）**：不使用原会话的历史，新会话用**自己**已有轮次的回复作为上下文（只含 `status=ok` 的轮次），逐轮串行，前一轮结束才开始下一轮；`anchored_from_turn_id` 为 null。只重放部分轮次（`turns`）时，上下文只含所选的前几轮。某一轮 agent 出错后继续下一轮（出错的轮次不进入后面的历史）。
+- 某一轮失败（agent 报错）不影响后面的轮次。轮次没能启动（如读取原会话历史出错）、被取消，或整个任务出错时，对比组记为 `replay_status=failed` 并写 `replay_error`，其余轮次照常执行。
+- 执行方式：后台 asyncio 任务，不经过调度器；服务关闭时取消未完成的重放（对比组记为 `failed`）。进度看对比组详情的 `replay_status` 和 alignment，或订阅新会话的 SSE。
 
 ## 评测（P3-B）
 

@@ -1,11 +1,12 @@
 import { Link } from 'react-router-dom'
 import { ExternalLink, GitCompareArrows, WifiOff } from 'lucide-react'
-import type { CompareGroup, CompareMode, CompareSide } from '@/api/compareTypes'
-import type { TotalMetrics } from '@/components/session'
+import { COMPARE_TITLE_MAX, type CompareGroup, type CompareMode, type CompareSide, type CompareUpdate, type ReplayMode, type ReplayStatus } from '@/api/compareTypes'
+import { EditableTitle, type TotalMetrics } from '@/components/session'
 import { Badge } from '@/components/ui/Badge'
 import { cn } from '@/lib/cn'
 import { formatCost, formatDuration, formatTokens } from '@/lib/format'
-import { MODE_TAG } from './compareUtils'
+import { EditableNotes } from './EditableNotes'
+import { MODE_TAG, REPLAY_MODE_LABEL } from './compareUtils'
 
 function sideVersion(s: CompareSide): string {
   return s.version_seq !== null && s.version_seq !== undefined ? `v${s.version_seq}` : s.version_id.slice(-6)
@@ -52,15 +53,26 @@ function SidePanel({ label, side, summary, testid }: { label: string; side: Comp
   )
 }
 
+export interface ReplayProgress {
+  done: number
+  total: number
+  /** 服务端的重放状态（对比组的 replay_status） */
+  status: ReplayStatus
+  mode: ReplayMode | null
+  error: string | null
+}
+
 export interface CompareHeaderProps {
   group: CompareGroup
   left: SideSummary
   right: SideSummary
   /** 重放进度 */
-  replay?: { done: number; total: number; active: boolean } | null
+  replay?: ReplayProgress | null
   alignOn: boolean
   onToggleAlign: (v: boolean) => void
   reconnecting: boolean
+  /** 保存标题 / 备注；缺省则不可编辑。失败时应抛出错误（保持编辑状态） */
+  onUpdate?: (patch: CompareUpdate) => Promise<unknown>
 }
 
 const SIDE_LABEL: Record<CompareMode, [string, string]> = {
@@ -70,30 +82,46 @@ const SIDE_LABEL: Record<CompareMode, [string, string]> = {
 }
 
 /** 顶部：模式标签、两侧的 agent 与版本、累计指标、重放进度、对齐视图开关 */
-export function CompareHeader({ group, left, right, replay, alignOn, onToggleAlign, reconnecting }: CompareHeaderProps) {
+export function CompareHeader({ group, left, right, replay, alignOn, onToggleAlign, reconnecting, onUpdate }: CompareHeaderProps) {
   const [ll, rl] = SIDE_LABEL[group.mode]
   return (
     <div className="shrink-0 space-y-2 border-b border-border px-4 py-2">
       <div className="flex flex-wrap items-center gap-2">
         <GitCompareArrows className="h-4 w-4 text-muted-foreground" />
-        <h1 className="truncate text-sm font-semibold" data-testid="compare-title">
-          {group.title?.trim() || '会话对比'}
-        </h1>
+        <EditableTitle
+          value={group.title?.trim() || '会话对比'}
+          testId="compare-title"
+          maxLength={COMPARE_TITLE_MAX}
+          disabled={!onUpdate}
+          onSave={(title) => onUpdate!({ title })}
+        />
         <Badge variant={group.mode === 'live' ? 'info' : group.mode === 'replay' ? 'warning' : 'secondary'} data-testid="compare-mode">
           {MODE_TAG[group.mode]}
         </Badge>
         {replay && (
-          <span className="inline-flex items-center gap-2 text-xs" data-testid="replay-progress">
+          <span className="inline-flex items-center gap-2 text-xs" data-testid="replay-progress" data-status={replay.status}>
+            {replay.mode && <Badge variant="outline">{REPLAY_MODE_LABEL[replay.mode]}</Badge>}
             <span className="font-mono tabular-nums">
               已完成 {replay.done} / {replay.total} 轮
             </span>
             <span className="h-1.5 w-28 overflow-hidden rounded-full bg-muted" aria-hidden="true">
               <span
-                className={cn('block h-full rounded-full transition-all', replay.active ? 'bg-primary' : 'bg-success')}
+                className={cn(
+                  'block h-full rounded-full transition-all',
+                  replay.status === 'running' ? 'bg-primary' : replay.status === 'completed' ? 'bg-success' : 'bg-danger',
+                )}
                 style={{ width: `${replay.total > 0 ? Math.min(100, (replay.done / replay.total) * 100) : 0}%` }}
               />
             </span>
-            {replay.active ? <Badge variant="info">重放中</Badge> : replay.done >= replay.total ? <Badge variant="success">已完成</Badge> : <Badge variant="warning">已停止</Badge>}
+            {replay.status === 'running' ? (
+              <Badge variant="info">重放中</Badge>
+            ) : replay.status === 'completed' ? (
+              <Badge variant="success">已完成</Badge>
+            ) : (
+              <Badge variant="danger" title={replay.error ?? undefined} data-testid="replay-failed">
+                失败{replay.error ? `：${replay.error}` : ''}
+              </Badge>
+            )}
           </span>
         )}
         {reconnecting && (
@@ -114,6 +142,9 @@ export function CompareHeader({ group, left, right, replay, alignOn, onToggleAli
           对齐视图
         </label>
       </div>
+      {(onUpdate || group.notes) && (
+        <EditableNotes value={group.notes} disabled={!onUpdate} onSave={(notes) => onUpdate!({ notes })} />
+      )}
       <div className="grid grid-cols-2 gap-3">
         <SidePanel label={ll} side={group.left} summary={left} testid="side-left" />
         <SidePanel label={rl} side={group.right} summary={right} testid="side-right" />
