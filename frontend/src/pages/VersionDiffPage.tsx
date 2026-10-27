@@ -52,6 +52,12 @@ export function findAssetForPath(assets: VersionAssetRef[], path: string): Versi
   return assets.find((a) => a.spec_path === path)
 }
 
+/** asset_changed 左侧版本里对应的资产；改过名的资产在左侧版本里还是旧名，按类型 + 旧名找 */
+export function findLeftAsset(assets: VersionAssetRef[], c: SpecChange): VersionAssetRef | undefined {
+  const from = c.asset?.renamed_from
+  return from ? assets.find((a) => a.kind === c.asset?.kind && a.name === from) : findAssetForPath(assets, c.path)
+}
+
 
 /** 导航分组的显示名；没有登记的直接显示 Spec 的第一段路径 */
 const GROUP_LABEL: Record<string, string> = { snapshot: '快照资产' }
@@ -59,8 +65,16 @@ const GROUP_LABEL: Record<string, string> = { snapshot: '快照资产' }
 export interface AssetChangeInfo {
   kind: AssetKind
   name: string
+  /** 改名前的资产名（同一个资产改名，修订历史保留） */
+  renamedFrom?: string
   /** 修订变化：修改为 `r3 → r4`，新增 / 删除为单个 `r1` */
   revs: string
+}
+
+/** 资产变更的显示文字：`Skill 旧名 → 新名 · r3 → r4`（没改名时 `Skill 名称 · r3 → r4`） */
+export function assetChangeText(info: AssetChangeInfo): string {
+  const name = info.renamedFrom ? `${info.renamedFrom} → ${info.name}` : info.name
+  return `${ASSET_KIND_LABEL[info.kind]} ${name} · ${info.revs}`
 }
 
 function pinSummary(v: unknown): { kind: AssetKind; name: string; rev: number } | null {
@@ -73,7 +87,7 @@ export function assetChangeInfo(c: SpecChange): AssetChangeInfo | null {
   if (c.op === 'asset_changed' && c.asset) {
     const l = (c.left as { rev?: number } | undefined)?.rev
     const r = (c.right as { rev?: number } | undefined)?.rev
-    return { ...c.asset, revs: `r${l} → r${r}` }
+    return { kind: c.asset.kind, name: c.asset.name, renamedFrom: c.asset.renamed_from, revs: `r${l} → r${r}` }
   }
   if (c.op === 'add' || c.op === 'remove') {
     const p = pinSummary(c.op === 'add' ? c.right : c.left)
@@ -120,7 +134,7 @@ export default function VersionDiffPage() {
   const onSelect = (c: SpecChange) => {
     setSelected(c)
     if (c.op === 'asset_changed' && lv.data && rv.data) {
-      const l = findAssetForPath(lv.data.assets, c.path)
+      const l = findLeftAsset(lv.data.assets, c)
       const r = findAssetForPath(rv.data.assets, c.path)
       if (l && r) {
         setAssetView({ change: c, l, r })
@@ -219,8 +233,10 @@ export default function VersionDiffPage() {
                         >
                           <span className="flex items-center gap-1.5">
                             <Badge variant={OP_VARIANT[c.op]}>{OP_LABEL[c.op]}</Badge>
-                            <span className="min-w-0 truncate font-mono text-xs" title={c.path}>
-                              {asset ? `${ASSET_KIND_LABEL[asset.kind]} ${asset.name}` : c.path}
+                            <span className="min-w-0 truncate font-mono text-xs" title={asset ? assetChangeText(asset) : c.path}>
+                              {asset
+                                ? `${ASSET_KIND_LABEL[asset.kind]} ${asset.renamedFrom ? `${asset.renamedFrom} → ` : ''}${asset.name}`
+                                : c.path}
                             </span>
                           </span>
                           {c.op === 'replace' && c.content_diff === undefined && (
@@ -287,7 +303,8 @@ function AssetContentDiff({
           返回配置视图
         </Button>
         <span className="font-mono">
-          {view.l && ASSET_KIND_LABEL[view.l.kind]} {view.l?.name}
+          {view.l && ASSET_KIND_LABEL[view.l.kind]} {view.change.asset?.renamed_from ? `${view.change.asset.renamed_from} → ` : ''}
+          {view.r?.name ?? view.l?.name}
         </span>
         <span className="text-muted-foreground">
           r{view.l?.rev} → r{view.r?.rev}

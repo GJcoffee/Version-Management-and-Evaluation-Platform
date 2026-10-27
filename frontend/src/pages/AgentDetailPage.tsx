@@ -6,13 +6,14 @@ import { Badge } from '@/components/ui/Badge'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { AssetsTab } from './agent/AssetsTab'
+import { ConventionsTab } from './agent/ConventionsTab'
 import { DraftsTab } from './agent/DraftsTab'
 import { EvalsTab } from './agent/EvalsTab'
 import { SessionsTab } from './agent/SessionsTab'
 import { VersionsTab } from './agent/VersionsTab'
 import { KIND_LABEL } from './AgentsPage'
 
-const TABS = ['assets', 'drafts', 'versions', 'sessions', 'evals'] as const
+const TABS = ['assets', 'drafts', 'versions', 'sessions', 'evals', 'conventions'] as const
 type TabKey = (typeof TABS)[number]
 
 export default function AgentDetailPage() {
@@ -64,6 +65,7 @@ export default function AgentDetailPage() {
           </TabsTrigger>
           <TabsTrigger value="sessions">会话</TabsTrigger>
           <TabsTrigger value="evals">评测</TabsTrigger>
+          <TabsTrigger value="conventions">规范</TabsTrigger>
         </TabsList>
         <TabsContent value="assets" className="pt-4">
           <AssetsTab agent={a} versions={list} onEditDraft={() => setSp({ tab: 'drafts' }, { replace: true })} />
@@ -85,6 +87,9 @@ export default function AgentDetailPage() {
         </TabsContent>
         <TabsContent value="evals" className="pt-4">
           <EvalsTab agentId={a.id} />
+        </TabsContent>
+        <TabsContent value="conventions" className="pt-4">
+          <ConventionsTab key={JSON.stringify(a.conventions)} agent={a} />
         </TabsContent>
       </Tabs>
     </div>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SpecChange, VersionAssetRef } from '@/api/types'
-import { assetChangeInfo, findAssetForPath, groupChanges, groupOfPath } from './VersionDiffPage'
+import { assetChangeInfo, assetChangeText, findAssetForPath, findLeftAsset, groupChanges, groupOfPath } from './VersionDiffPage'
 
 const ch = (path: string, op: SpecChange['op'] = 'replace'): SpecChange => ({ path, op })
 
@@ -51,5 +51,31 @@ describe('资产变更按类型与名称显示', () => {
   it('普通字段的变更不是资产变更', () => {
     expect(assetChangeInfo({ path: 'params.top_k', op: 'replace', left: 1, right: 2 })).toBeNull()
     expect(assetChangeInfo({ path: 'params.x', op: 'add', right: 1 })).toBeNull()
+  })
+})
+
+describe('资产改名', () => {
+  const renamed: SpecChange = {
+    path: 'snapshot.files[skill/new-name]',
+    op: 'asset_changed',
+    asset: { kind: 'skill', name: 'new-name', renamed_from: 'old-name' },
+    left: { rev: 3 },
+    right: { rev: 4 },
+  }
+  it('显示为「Skill 旧名 → 新名 · r3 → r4」', () => {
+    const info = assetChangeInfo(renamed)
+    expect(info).toEqual({ kind: 'skill', name: 'new-name', renamedFrom: 'old-name', revs: 'r3 → r4' })
+    expect(assetChangeText(info!)).toBe('Skill old-name → new-name · r3 → r4')
+  })
+  it('没改名时不带旧名', () => {
+    const info = assetChangeInfo({ ...renamed, asset: { kind: 'skill', name: 'new-name' } })!
+    expect(assetChangeText(info)).toBe('Skill new-name · r3 → r4')
+  })
+  it('左侧版本里按类型 + 旧名找资产（路径上是新名，左侧找不到）', () => {
+    const left: VersionAssetRef[] = [
+      { spec_path: 'snapshot.files[skill/old-name]', kind: 'skill', name: 'old-name', rev: 3, asset_revision_id: 'arv_old' },
+    ]
+    expect(findAssetForPath(left, renamed.path)).toBeUndefined()
+    expect(findLeftAsset(left, renamed)?.asset_revision_id).toBe('arv_old')
   })
 })

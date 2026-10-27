@@ -19,6 +19,8 @@
 | 409 | `DRAFT_CONFLICT` | 草稿 revision 不一致 | `current_revision`（工作区 push 还有 `diff`、`server_spec`） |
 | 409 | `ASSET_IN_USE` | 被版本或评测引用的资产不能硬删除 | `versions`、`evals`（计数） |
 | 409 | `ASSET_DELETED` | 往已软删除的资产追加修订（先 restore） | |
+| 400 / 409 | `CONVENTION_VIOLATION` | 违反了 agent 的发布规范（见 §2「发布规范」）：发布 / 推送缺标签、说明、来源 ID 配置，或写入只读的快照资产 | `agent`、`action`、`violations: [{convention, message, …}]`（快照只读为 `convention`、`asset`、`agents`） |
+| 409 | `ASSET_NAME_CONFLICT` | 快照推送时按来源 ID 找到的资产要改名，但新名字已被另一个资产占用（或新资产的名字被占用） | `asset`、`source_id` |
 | 409 | `AGENT_IN_USE` | 已有版本的 agent 不能删除（请归档） | `versions` |
 | 409 | `CONFLICT` | 名称重复（agent、草稿） | `name` |
 | 422 | `DATASET_PARSE_ERROR` | 数据集解析失败 | `lines`（出错的行号）、`errors: [{line, message}]`、`total_errors` |
@@ -73,7 +75,7 @@
 ```json
 "snapshot": {
   "dir": "exports/current",
-  "map": [{"glob": "skills/*.json", "kind": "skill", "name": "{stem_nover}"}],
+  "map": [{"glob": "skills/*.json", "kind": "skill", "name": "$.name", "id": "$.id"}],
   "files": {"skills/crawl-engine-0.5.3.json": "asset://skill/crawl-engine@latest"}
 }
 ```
@@ -88,8 +90,15 @@
 展开后统一为合法资产名。按顺序取第一条匹配的规则；没有命中的文件存为 `file` 资产（名字 `snap-{agent}-{路径}-{路径哈希}`）。
 快照入库的修订在 `meta.origin` 里标记 `"snapshot"`（见 §5）。
 
+规则的 `name` 与可选的 `id` 的值以 `$.` 开头时，表示从**JSON 文件内容**按点路径取值（对象按键、数组按下标，如 `$.id`、`$.meta.skill_id`、`$.items.0.name`；
+字段名按实际导出的 JSON 调整），取不到值时客户端报错并指出文件与规则；否则是上面的模板。`name` 取到的原文作为资产的**显示名**（`display_name`，可含中文），
+规范化后成为资产名；`id` 是来源平台上的稳定 ID，保存为资产的 `source_id`（`(kind, source_id)` 唯一）。没有配置 `id` 的规则不会出现 `id` 键，旧版本的 `spec_hash` 不变。
+同一个 `(kind, source_id)` 始终是同一个资产：推送时按它找资产，名字变了就**自动改名**（修订历史原样保留，旧名记在资产的 `former_names`），不会存成新资产；
+没有该来源 ID 但有同名且没有来源 ID 的资产（升级前入库的）会被认领。新名字被另一个资产占用时 409 `ASSET_NAME_CONFLICT`。
 版本 diff 里快照里的每个资产一条变更，按资产匹配而不是按文件路径：路径形如 `snapshot.files[skill/crawl-engine]`（`类型/名称`），
 文件改名（如 skill 文件名带的版本号变了）只要资产名不变，就是同一个资产的 `asset_changed`。文本类资产的 `asset_changed` 带 `content_diff`，二进制文件只标记变化。
+资产改过名时，两个版本里的旧名与新名被识别为同一个资产：输出一条 `asset_changed`，`asset` 里带 `renamed_from`（旧名；内容没变也会输出），显示为「Skill 旧名 → 新名 · r3 → r4」
+（识别靠资产的 `former_names`，旧版本里固化的旧名字也仍能解析到该资产，回滚到旧版本不会失败）。
 
 **引用写法**（`prompts.system` 也可以直接写内联文本）：
 
@@ -121,7 +130,8 @@
 ```json
 {
   "agent": {"id": "agt_01…", "name": "customer-support", "kind": "config", "description": "客服机器人", "archived": false,
-            "created_at": "2026-10-25T08:00:00.000Z", "updated_at": "2026-10-25T08:00:00.000Z", "latest_version": null, "tags": []},
+            "created_at": "2026-10-25T08:00:00.000Z", "updated_at": "2026-10-25T08:00:00.000Z", "latest_version": null, "tags": [],
+            "conventions": {"tag_from_param": null, "require_notes": false, "require_source_id": [], "snapshot_readonly": false}},
   "draft": {"id": "drf_01…", "agent_id": "agt_01…", "name": "main", "spec": {"schema": "evalp/v1", "kind": "config", "…": "…"},
             "base_version_id": null, "revision": 1, "created_at": "…", "updated_at": "…"}
 }
@@ -136,8 +146,21 @@
 
 ### GET /agents/{agent_ref} / PATCH /agents/{agent_ref} / DELETE /agents/{agent_ref}
 
-PATCH 请求体（都可选）：`{"name": "新名字", "description": "…", "archived": true}` → 返回 Agent。
+PATCH 请求体（都可选）：`{"name": "新名字", "description": "…", "archived": true, "conventions": {…}}` → 返回 Agent。
 DELETE → 204；已有版本时返回 409 `AGENT_IN_USE`，请改为归档。
+
+**发布规范（`conventions`）**：Agent 响应里的 `conventions` 存在服务端 agent 记录上（不放 `agent.yaml`，发布方无法自己删掉绕过），
+只能通过 PATCH（网页 agent 设置的「规范」标签、CLI `evalp agent conventions set`）修改，PATCH 时**整体替换**；默认值表示没有任何约束。
+服务端对所有入口（CLI、MCP、网页、HTTP API）一致地强制，违反时返回 `CONVENTION_VIOLATION`（`message` 是中文，写明违反哪条以及怎么改，`details.violations` 带结构化信息）。
+
+| 字段 | 含义 | 强制的位置 |
+|---|---|---|
+| `tag_from_param`（字符串或 `null`） | `params` 里的参数名，如 `hiagent_version`。开启后发布**必须**带标签，且标签等于 `v{params.<参数>}`（如 `v0.5.3`）；同一标签已存在于该 agent 时 409（已指向本次返回的同一个版本时不算，即重复发布相同内容） | `POST /drafts/{id}/publish` |
+| `require_notes`（布尔） | 发布说明（`notes`）必填 | `POST /drafts/{id}/publish` |
+| `require_source_id`（资产类型列表，如 `["skill","mcp"]`） | 快照 `map` 中这些类型的规则必须配置 `id` | `POST /workspace/push`（400）、`POST /drafts/{id}/publish` |
+| `snapshot_readonly`（布尔） | 来自快照（最新修订 `origin=snapshot`）、且被开启该规范的 agent 引用（版本或草稿）的资产，拒绝快照推送之外的写入：`POST /assets`（已有资产）、`POST /assets/{id}/revisions`、`PATCH /assets/{id}`、`DELETE /assets/{id}`，以及非快照来源的 `workspace/push` 文件（含 MCP `upsert_asset`）；409 | 资产写入 |
+
+多条同时违反时一次返回全部（400，`details.violations` 按规范列出）；标签重复是 409。
 
 ## 3. 草稿
 
@@ -191,10 +214,12 @@ DELETE → 204；已有版本时返回 409 `AGENT_IN_USE`，请改为归档。
 ### POST /drafts/{id}/publish
 
 ```json
-{"expected_revision": 3, "notes": "调低温度", "via": "ui"}
+{"expected_revision": 3, "notes": "调低温度", "via": "ui", "tag": "prod"}
 ```
 
-`via`：`ui | cli | mcp | api`（默认 `api`）。整个发布在一个事务内完成；同一 agent 下规范化后的 `spec_hash` 相同时返回已有版本。
+`via`：`ui | cli | mcp | api`（默认 `api`）。`tag` 可选：标签与创建版本在同一个事务内完成（已存在的标签移到新版本，除非 agent 开启了 `tag_from_param` 规范，见 §2；
+标签名规则同 `POST /versions/{ref}/tags`）。整个发布在一个事务内完成；同一 agent 下规范化后的 `spec_hash` 相同时返回已有版本（给了 `tag` 时标签也会指到该版本）。
+发布前按 agent 的发布规范校验，违反返回 400 / 409 `CONVENTION_VIOLATION`。
 
 ```json
 {"version": {"id": "ver_01…", "agent_id": "agt_01…", "seq": 13, "spec_hash": "ab12…", "spec": {"…": "固化后的规范化 Spec"},
@@ -204,7 +229,7 @@ DELETE → 204；已有版本时返回 409 `AGENT_IN_USE`，请改为归档。
  "existed": false}
 ```
 
-错误：409 `DRAFT_CONFLICT`、400 `VALIDATION_ERROR`（结构）、400 `SPEC_INVALID`（业务）、400 `GIT_DIRTY`。
+错误：409 `DRAFT_CONFLICT`、400 `VALIDATION_ERROR`（结构）、400 `SPEC_INVALID`（业务）、400 `GIT_DIRTY`、400 / 409 `CONVENTION_VIOLATION`。
 `assets[].spec_path` 是资产引用在 Spec 里的位置，列表元素用**身份键**：`tools[query-order]`、`tools[knowledge_search].with.sources[faq]`、
 `knowledge.inject[faq]`，与 `GET /versions/diff` 的 `changes[].path` 同一套写法（身份键有重复时退回下标，如 `knowledge.inject[1]`）。
 代码型且 `capture_git=true` 时 `source` 为 `{"git_commit", "git_branch", "dirty", "patch_blob"}`（`dirty` 且 `allow_dirty` 时 `patch_blob` 是补丁的 blob 哈希，补丁哈希参与 `spec_hash`）。
@@ -231,11 +256,12 @@ DELETE → 204；已有版本时返回 409 `AGENT_IN_USE`，请改为归档。
 
 ```json
 {"version": {"id": "ver_02…", "agent_id": "agt_01…", "seq": 5, "…": "…", "tags": ["prod"]},
- "items": [{"asset_id": "ast_01…", "kind": "skill", "name": "crawl-engine", "rev": 4, "asset_revision_id": "arv_04…",
-            "spec_paths": ["snapshot.files[skill/crawl-engine]"], "origin": "snapshot",
+ "items": [{"asset_id": "ast_01…", "kind": "skill", "name": "crawl-engine", "display_name": "爬虫引擎", "source_id": "sk_123",
+            "rev": 4, "asset_revision_id": "arv_04…", "spec_paths": ["snapshot.files[skill/crawl-engine]"], "origin": "snapshot",
             "changed_in_seq": 4, "changed_in_version_id": "ver_01…", "previous_rev": 3}]}
 ```
 
+- `display_name` / `source_id`：来源平台上的原始名称（可含中文）与稳定 ID，快照入库的资产才有（见 §2 版本快照），否则为 `null`。
 - `origin`：该修订的来源（`meta.origin`），`"snapshot"` 表示来自 agent 快照（只读），否则为 `null`。
 - `changed_in_seq` / `changed_in_version_id`：这个修订最近一次变化发生在哪个版本——从该版本往前，连续使用同一修订的最早版本。
   `previous_rev` 是变化前的修订号；资产是该版本新加入的（或中间有版本没用到它）则为 `null`。
@@ -281,7 +307,8 @@ UPSERT：同一个标签会从旧版本移到这个版本。标签名：字母�
   版本详情 `assets[].spec_path`、`GET /assets/{id}/references` 的 `versions[].spec_path` 用的是**同一套路径**，
   所以 `asset_changed` 的 `path` 可以直接在 `assets[]` 里按 `spec_path` 相等找到两侧的资产修订。
   （库里 `version_asset_refs.spec_path` 仍存下标路径，如 `tools[0]`，接口输出时换算；`validate` 报告里的 `errors[].path` 指向草稿里的位置，也仍是下标。）
-- 资产引用在 `add`/`remove`/`replace` 里以 `{"kind","name","rev"}` 表示；`asset_changed` 带 `asset: {kind, name}`（两侧的修订在 `left` / `right`）；
+- 资产引用在 `add`/`remove`/`replace` 里以 `{"kind","name","rev"}` 表示；`asset_changed` 带 `asset: {kind, name}`（两侧的修订在 `left` / `right`；
+  资产改过名时还有 `renamed_from`（旧名），`path` 用新名）；
   内容哈希相同视为未变化（即使修订号不同）。代码型的 `snapshot.files` 按 `类型/名称` 匹配资产：`snapshot.files[skill/crawl-engine]`（见 §2 版本快照）。
 - 多行或超过 80 个字符的文本变更附 `content_diff`（unified diff，从 `@@` 开始，不含文件头）；文本类资产（除 dataset 外的各类型）的 `asset_changed` 同样附 `content_diff`。
 - 前端用 Monaco DiffEditor 展示完整文本时，用 `GET /assets/revisions/{revision_id}` 取两侧内容。
@@ -310,7 +337,10 @@ UPSERT：同一个标签会从旧版本移到这个版本。标签名：字母�
 
 后五类（`kb_config`、`skill`、`mcp`、`app_config`、`database`）是 agent 快照（HiAgent 导出的配置等）的入库类型，不参与配置型 agent 的运行；
 `kb_config` 是知识库的 JSON 配置，不是可检索文本，所以没有复用 `knowledge`（`knowledge_search` 只检索 `knowledge`）。
-由快照入库的修订带 `meta.origin = "snapshot"`：表示来源平台维护、在 EvalP 里只读——这是前端的约定，接口不拦截写入。
+由快照入库的修订带 `meta.origin = "snapshot"`：表示来源平台维护、在 EvalP 里只读。默认只是前端的约定（接口不拦截写入）；
+agent 开启 `snapshot_readonly` 规范（见 §2「发布规范」）后，接口也会拒绝快照推送之外的写入（409 `CONVENTION_VIOLATION`）。
+资产还有 `display_name`（来源平台上的原始名称，可含中文）、`source_id`（来源平台上的稳定 ID，快照入库时由规则的 `id` 提供）和 `former_names`（改名前用过的名字）；
+这三个字段都只由快照推送写入，列表 / 详情接口原样返回。
 `content_type` 省略时按 kind 取默认值（prompt/knowledge `text/markdown`，tool `application/x-yaml`（以 `{` 开头为 `application/json`），
 kb_config / skill / mcp / app_config / database 以 `{` 或 `[` 开头为 `application/json`、否则 `text/markdown`，dataset `application/jsonl`，file `application/octet-stream`）。
 
@@ -504,7 +534,11 @@ CSV 需要 `column_map`（`{字段名: 列名}`）；字段名可用 `case_key /
 ```
 
 - `files[].hash` 是文件内容的 sha256（十六进制）；`content` 为空表示客户端认为服务端已有该 hash 的内容（`encoding` 默认 `utf-8`，二进制用 `base64`）。
-  可选字段：`content_type`、`column_map`（数据集 CSV）、`origin`（`"snapshot"`：写入新修订的 `meta.origin`，表示来自 agent 快照、只读）。
+  可选字段：`content_type`、`column_map`（数据集 CSV）、`origin`（`"snapshot"`：写入新修订的 `meta.origin`，表示来自 agent 快照、只读）、
+  `source_id`（来源平台上的稳定 ID：按 `(kind, source_id)` 找资产，名字变了自动改名并保留修订历史，旧名记入资产的 `former_names`；同一次 push 里不能重复）、
+  `display_name`（原始名称，仅用于展示）。改名的文件在 `uploaded` / `skipped` 条目里带 `renamed_from`（`kind/旧名`）。
+- 按 agent 的发布规范校验：`require_source_id` 开启时，`spec.snapshot.map` 里指定类型的规则缺 `id` → 400 `CONVENTION_VIOLATION`；
+  `snapshot_readonly` 开启时，非快照来源的文件不能写入已有的快照资产（409）。
 - agent 不存在时创建（`agent_kind`、`spec.kind`、默认 `config` 依次决定类型）；草稿不存在时创建（新建 agent 且 `draft_name` 不是 `main` 时同时建一个 `main` 草稿）。
 - 对每个文件：与资产当前最新修订的 hash 相同 → `skipped`；否则创建修订 → `uploaded`（hash 在该资产的旧修订里 → 把最新指针指回去，`existed=true`；
   `content` 为空但库里有这个 hash 的内容 → 直接用它创建修订）。

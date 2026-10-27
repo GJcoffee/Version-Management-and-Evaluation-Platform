@@ -18,7 +18,7 @@ TOOLS = {
     "push_draft", "pull_draft", "publish_version", "list_versions", "diff_versions",
     "chat", "run_eval", "get_eval_report", "get_eval_compare",
     "list_agents", "get_draft", "update_draft", "list_assets", "upsert_asset", "import_dataset",
-    "get_eval_status", "get_session", "replay_session", "compare_sessions",
+    "get_eval_status", "get_session", "replay_session", "compare_sessions", "get_conventions",
 }  # fmt: skip
 MOCK_API = "http://test/api/v1"
 
@@ -40,7 +40,7 @@ def mock_server(project_dir):
         yield server, m
 
 
-async def test_registers_exactly_the_nineteen_tools(project_dir):
+async def test_registers_exactly_the_twenty_tools(project_dir):
     server = build_server(project_dir=project_dir)
     async with Client(server) as c:
         tools = (await c.list_tools()).tools

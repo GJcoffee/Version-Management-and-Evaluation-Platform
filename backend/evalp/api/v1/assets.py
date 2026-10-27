@@ -30,7 +30,7 @@ router = APIRouter(prefix="/assets", tags=["assets"])
 @router.get("", response_model=Page[AssetOut])
 async def list_assets(
     kind: AssetKind | None = None,
-    q: str | None = Query(None, description="按名称 / 描述模糊搜索"),
+    q: str | None = Query(None, description="按名称 / 显示名 / 描述模糊搜索"),
     include_deleted: bool = False,
     p: PageParams = Depends(page_params),
     ctx: AppContext = Depends(get_ctx),

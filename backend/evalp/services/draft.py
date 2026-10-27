@@ -13,6 +13,7 @@ from evalp.ids import new_id
 from evalp.logging import get_logger
 from evalp.schemas.agent import DraftCreate, DraftOut, DraftValidateOut, PublishOut
 from evalp.services.agent import AgentService, check_draft_spec, minimal_spec
+from evalp.services.conventions import check_publish, check_tag_unused, conventions_of
 from evalp.services.convert import draft_out
 from evalp.services.version import VersionService
 from evalp.spec.canonical import canonicalize
@@ -126,11 +127,18 @@ class DraftService:
     # ------------------------------------------------------------ 发布
 
     async def publish(
-        self, draft_id: str, expected_revision: int, notes: str | None = None, via: str = "api"
+        self,
+        draft_id: str,
+        expected_revision: int,
+        notes: str | None = None,
+        via: str = "api",
+        tag: str | None = None,
     ) -> PublishOut:
         """发布草稿为版本（详设 4.4）：整个过程在一个写事务内完成。
 
-        同一 agent 下 spec_hash 相同时返回已有版本（existed=True）。
+        同一 agent 下 spec_hash 相同时返回已有版本（existed=True）。``tag`` 非空时标签与版本在同一个事务里创建
+        （已存在的标签移到本版本；agent 开启 ``tag_from_param`` 规范时，标签必须等于 ``v{params.<参数>}``
+        且不能已存在）。发布前按 agent 的规范校验（``services/conventions.py``）。
         """
         versions = self.ctx.svc(VersionService)
         async with self.ctx.db.write() as s:
@@ -144,6 +152,7 @@ class DraftService:
             report.raise_for_errors()
             spec, resolved = report.spec, report.resolved
             assert spec is not None and resolved is not None
+            check_publish(agent, spec, draft.spec, notes, tag)
             # 4：代码型 agent 采集 git 信息
             git_info = None
             if spec.kind == "code":
@@ -161,8 +170,12 @@ class DraftService:
                     select(Version).where(Version.agent_id == agent.id, Version.spec_hash == canon.hash)
                 )
             ).scalar_one_or_none()
+            if tag and conventions_of(agent).tag_from_param:
+                await check_tag_unused(s, agent, tag, existing.id if existing is not None else None)
             if existing is not None:
                 draft.base_version_id = existing.id
+                if tag:
+                    await versions.upsert_tag(s, existing, tag)
                 return PublishOut(version=await versions.out_in_session(s, existing), existed=True)
             version = Version(
                 id=new_id("ver"),
@@ -194,6 +207,8 @@ class DraftService:
             draft.base_version_id = version.id
             agent.updated_at = version.created_at
             await s.flush()
+            if tag:
+                await versions.upsert_tag(s, version, tag)
             out = PublishOut(version=await versions.out_in_session(s, version), existed=False)
         log.info("version.published", agent_id=agent.id, version_id=version.id, seq=version.seq, via=via)
         return out

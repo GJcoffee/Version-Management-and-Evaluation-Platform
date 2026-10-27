@@ -58,7 +58,7 @@ def test_orm_metadata_covers_design_tables():
 def test_idempotent(migrated):
     run_migrations(migrated)  # 再次执行不报错
     con = sqlite3.connect(migrated)
-    assert con.execute("select version_num from alembic_version").fetchall() == [("0004",)]
+    assert con.execute("select version_num from alembic_version").fetchall() == [("0005",)]
     con.close()
 
 
@@ -267,4 +267,44 @@ def test_0004_allows_snapshot_asset_kinds_and_downgrades(tmp_path):
     con = sqlite3.connect(path)
     assert con.execute("select kind from assets where id like 'n%'").fetchall() == [("file",)] * 5
     assert con.execute("select kind from assets where id = 'a1'").fetchone() == ("prompt",)
+    con.close()
+
+
+def test_0005_adds_conventions_and_asset_source_columns(tmp_path):
+    """0004 -> 0005：已有数据保留并取默认值；(kind, source_id) 唯一且允许多个 NULL；降级后列消失。"""
+    from alembic import command
+    from evalp.store.migrate import make_alembic_config
+
+    path = tmp_path / "s.db"
+    run_migrations(path, "0004")
+    con = sqlite3.connect(path)
+    con.execute("insert into agents(id,name,kind,created_at,updated_at) values('a1','x','code','t','t')")
+    con.execute("insert into assets(id,kind,name,created_at) values('s1','skill','crawl','t')")
+    con.commit()
+    con.close()
+
+    run_migrations(path)
+    con = sqlite3.connect(path)
+    assert con.execute("select conventions from agents where id='a1'").fetchone() == ("{}",)
+    assert con.execute("select display_name, source_id, meta from assets where id='s1'").fetchone() == (
+        None,
+        None,
+        "{}",
+    )
+    con.execute(
+        "insert into assets(id,kind,name,created_at) values('s2','skill','other','t')"
+    )  # 多个 NULL 不冲突
+    con.execute("update assets set source_id='k1' where id='s1'")
+    con.execute("insert into assets(id,kind,name,source_id,created_at) values('m1','mcp','a','k1','t')")
+    with pytest.raises(sqlite3.IntegrityError):  # 同类型下 source_id 唯一
+        con.execute("insert into assets(id,kind,name,source_id,created_at) values('s3','skill','b','k1','t')")
+    con.commit()
+    con.close()
+
+    command.downgrade(make_alembic_config(path), "0004")
+    con = sqlite3.connect(path)
+    assert "conventions" not in {r[1] for r in con.execute("pragma table_info(agents)")}
+    assert not (
+        {"display_name", "source_id", "meta"} & {r[1] for r in con.execute("pragma table_info(assets)")}
+    )
     con.close()

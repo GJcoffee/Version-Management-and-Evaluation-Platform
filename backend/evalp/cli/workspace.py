@@ -42,6 +42,9 @@ def print_push(r: PushResult) -> None:
             console.print(f"  上传 {escape(u['path'])} -> {u['asset']} rev {u.get('rev')}{note}")
         if r.skipped:
             console.print(f"  [dim]跳过 {len(r.skipped)} 个未变化的文件[/dim]")
+    for u in [*r.uploaded, *r.skipped]:
+        if u.get("renamed_from"):
+            console.print(f"  [cyan]改名[/cyan] {u['renamed_from']} -> {u['asset']}（修订历史已保留）")
     print_validation(r.validation)
 
 

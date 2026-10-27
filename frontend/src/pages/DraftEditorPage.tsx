@@ -6,7 +6,7 @@ import { useAgent } from '@/api/queries/agents'
 import { publishDraft, useDraft, useInvalidateAfterPublish } from '@/api/queries/drafts'
 import { useSpecSchema } from '@/api/queries/spec'
 import { versionKeys } from '@/api/queries/versions'
-import { useVersion, useAddTag, useDraftDiff } from '@/api/queries/versions'
+import { useVersion, useDraftDiff } from '@/api/queries/versions'
 import type { Agent, Draft } from '@/api/types'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -58,7 +58,6 @@ function DraftEditor({ draft, agent }: { draft: Draft; agent?: Agent }) {
   const schema = useSpecSchema()
   const ed = useDraftEditor(draft)
   const baseVersion = useVersion(ed.baseVersionId)
-  const addTag = useAddTag()
   const invalidateAfterPublish = useInvalidateAfterPublish()
 
   const [publishOpen, setPublishOpen] = useState(false)
@@ -159,14 +158,12 @@ function DraftEditor({ draft, agent }: { draft: Draft; agent?: Agent }) {
     const ok = await ed.saveNow()
     if (!ok) throw new ApiError(0, 'NOT_SAVED', ed.conflict ? '草稿存在冲突，请先处理' : '保存失败，无法发布')
     try {
-      const res = await publishDraft(draft.id, { expected_revision: ed.getRevision(), notes: notes || undefined, via: 'ui' })
-      if (tag) {
-        try {
-          await addTag.mutateAsync({ versionId: res.version.id, tag })
-        } catch (e) {
-          toast.error(`标签 ${tag} 添加失败`, { description: e instanceof ApiError ? e.message : undefined })
-        }
-      }
+      const res = await publishDraft(draft.id, {
+        expected_revision: ed.getRevision(),
+        notes: notes || undefined,
+        tag: tag || undefined,
+        via: 'ui',
+      })
       invalidateAfterPublish()
       qc.invalidateQueries({ queryKey: versionKeys.all })
       if (res.existed) toast.warning(`内容与 v${res.version.seq} 相同，未创建新版本`)
@@ -367,6 +364,8 @@ function DraftEditor({ draft, agent }: { draft: Draft; agent?: Agent }) {
         open={publishOpen}
         onOpenChange={setPublishOpen}
         onPublish={doPublish}
+        conventions={agent?.conventions}
+        paramValues={(ed.formSpec as { params?: Record<string, unknown> }).params}
         warnings={warnings}
         changeSummary={
           changeCount === null || changeCount === undefined

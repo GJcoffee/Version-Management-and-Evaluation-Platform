@@ -16,6 +16,7 @@ import typer
 
 from evalp import __version__
 from evalp.cli import adapter as adapter_cmd
+from evalp.cli import agent as agent_cmd
 from evalp.cli import asset as asset_cmd
 from evalp.cli import chat as chat_cmd
 from evalp.cli import dataset as dataset_cmd
@@ -59,6 +60,7 @@ def register_commands() -> None:
     app.command("versions")(versions_cmd.versions)
     app.command("diff")(versions_cmd.diff)
     app.command("chat")(chat_cmd.chat)
+    app.add_typer(agent_cmd.app, name="agent")
     app.add_typer(asset_cmd.app, name="asset")
     app.add_typer(dataset_cmd.app, name="dataset")
     app.add_typer(eval_cmd.app, name="eval")
@@ -66,8 +68,7 @@ def register_commands() -> None:
     app.add_typer(adapter_cmd.app, name="adapter")
     app.command("mcp")(mcp_cmd.mcp)
     app.command("gc")(gc_cmd.gc)
-    # --- 后续阶段在此处追加，例如：
-    # app.add_typer(agent_cmd.app, name="agent")
+    # --- 后续阶段在此处追加
 
 
 register_commands()

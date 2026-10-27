@@ -181,3 +181,12 @@ def test_snapshot_map_is_omitted_when_empty_and_hashed_when_declared():
     rule = {"glob": "skills/*.json", "kind": "skill", "name": "{stem_nover}"}
     mapped = canonicalize({**base, "snapshot": {"dir": "d", "map": [rule]}})
     assert mapped.data["snapshot"]["map"] == [rule] and mapped.hash != plain.hash
+
+
+def test_snapshot_rule_id_is_omitted_when_not_configured_and_hashed_when_declared():
+    base = {"kind": "code", "transport": "http", "http": {"base_url": "http://x"}}
+    rule = {"glob": "skills/*.json", "kind": "skill", "name": "$.name"}
+    plain = canonicalize({**base, "snapshot": {"dir": "d", "map": [rule]}})
+    assert plain.data["snapshot"]["map"] == [rule]  # 没配置 id 的规则不出现 id: null，旧快照版本的哈希不变
+    with_id = canonicalize({**base, "snapshot": {"dir": "d", "map": [{**rule, "id": "$.id"}]}})
+    assert with_id.data["snapshot"]["map"] == [{**rule, "id": "$.id"}] and with_id.hash != plain.hash

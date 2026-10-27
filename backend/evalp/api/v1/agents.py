@@ -47,7 +47,7 @@ async def get_agent(agent_ref: str, ctx: AppContext = Depends(get_ctx)):
 
 @router.patch("/{agent_ref}", response_model=AgentOut)
 async def update_agent(agent_ref: str, body: AgentUpdate, ctx: AppContext = Depends(get_ctx)):
-    """修改名称、描述，或归档 / 取消归档。"""
+    """修改名称、描述、发布规范（conventions，整体替换），或归档 / 取消归档。"""
     return await ctx.svc(AgentService).update(agent_ref, body)
 
 

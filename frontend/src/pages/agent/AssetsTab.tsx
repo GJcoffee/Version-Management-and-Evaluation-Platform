@@ -4,13 +4,14 @@ import { FilePen, GitCompare, Library } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import { useVersionAssets } from '@/api/queries/versions'
 import type { Agent, VersionSummary } from '@/api/types'
+import { AssetIdentity } from '@/components/AssetIdentity'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
-import { ASSET_KIND_LABEL, SNAPSHOT_READONLY_NOTE } from '@/lib/assetRef'
+import { ASSET_KIND_LABEL, SNAPSHOT_READONLY_NOTE, assetTitle } from '@/lib/assetRef'
 import { changeText, groupVersionAssets } from './assetGroups'
 
 /**
@@ -113,8 +114,9 @@ export function AssetsTab({
                   <TableRow key={i.asset_id}>
                     <TableCell>
                       <Link to={`/assets/${i.asset_id}?rev=${i.rev}`} className="font-mono text-sm font-medium hover:underline">
-                        {i.name}
+                        {assetTitle(i)}
                       </Link>
+                      <AssetIdentity asset={i} />
                       {group.kinds.length > 1 && (
                         <Badge variant="outline" className="ml-2">
                           {ASSET_KIND_LABEL[i.kind]}

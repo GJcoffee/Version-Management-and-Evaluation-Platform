@@ -8,7 +8,8 @@
 4. 浮点数规范化（``1.0`` 与 ``1`` 等价，其余用 ``repr``）；
 5. 内联文本（``prompts`` 下的全部字符串）统一换行符为 ``\\n``，并去掉每行行尾空白；
 6. ``notes`` / ``name`` / ``description`` 不参与哈希；
-7. 代码型的 ``snapshot`` 为空时从结果中去掉，``snapshot.map`` 为空时同样去掉（保持旧版本哈希稳定）。
+7. 代码型的 ``snapshot`` 为空时从结果中去掉，``snapshot.map`` 为空时同样去掉，规则里没配置 ``id`` 时去掉该键
+   （保持旧版本哈希稳定）。
 
 ``spec_hash = sha256("evalp/v1\\n" + canonical_json)``。
 """
@@ -65,6 +66,12 @@ def canonicalize(spec: ConfigSpec | CodeSpec | dict[str, Any]) -> CanonicalSpec:
         data.pop("snapshot", None)  # 未声明快照时不出现，保持没有该字段的旧版本哈希不变
     elif not data["snapshot"]["map"]:
         del data["snapshot"]["map"]  # 没写入库规则时不出现，保持旧快照版本的哈希不变
+    else:
+        for rule in data["snapshot"]["map"]:
+            if rule["id"] is None:
+                del rule["id"]  # 没配置来源 ID 的规则保持原样，旧快照版本的哈希不变
+            if rule["display"] is None:
+                del rule["display"]
     if "prompts" in data:
         data["prompts"] = _normalize_strings(data["prompts"])
     text = canonical_json(data)

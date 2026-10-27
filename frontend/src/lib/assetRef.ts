@@ -65,3 +65,8 @@ export function isSnapshotAsset(a: { latest: { meta: { origin?: string } } | nul
 
 /** 只读资产的说明文案 */
 export const SNAPSHOT_READONLY_NOTE = '来自 agent 快照（只读），请在源平台修改后重新发布'
+
+/** 资产的展示名：来源平台上的原始名称（可含中文）优先，没有就用资产名 */
+export function assetTitle(a: { name: string; display_name?: string | null }): string {
+  return a.display_name || a.name
+}

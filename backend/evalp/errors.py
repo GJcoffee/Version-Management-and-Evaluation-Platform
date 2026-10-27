@@ -66,6 +66,17 @@ class GitDirty(EvalpError):
     default_message = "工作区有未提交的改动"
 
 
+class ConventionViolation(EvalpError):
+    """CONVENTION_VIOLATION：违反了 agent 的发布 / 推送规范（400；与现有状态冲突时为 409）。
+
+    message 用中文写明违反了哪条、怎么改；details 带结构化信息（``convention``、``agent`` 等）。
+    """
+
+    default_code = "CONVENTION_VIOLATION"
+    default_status = 400
+    default_message = "违反了 agent 的发布规范"
+
+
 class Unauthorized(EvalpError):
     """401 UNAUTHORIZED：token 缺失或错误。"""
 

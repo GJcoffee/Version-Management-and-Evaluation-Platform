@@ -241,7 +241,7 @@ class AgentService:
             return agent_out(a, latest.get(a.id), tags.get(a.id))
 
     async def update(self, ref: str, body: AgentUpdate) -> AgentOut:
-        """修改名称 / 描述 / 归档状态。"""
+        """修改名称 / 描述 / 归档状态 / 发布规范（conventions 整体替换）。"""
         fields = body.model_fields_set
         if "name" in fields:
             self._check_reserved(body.name)
@@ -253,6 +253,8 @@ class AgentService:
                 a.description = body.description
             if "archived" in fields and body.archived is not None:
                 a.archived = 1 if body.archived else 0
+            if "conventions" in fields and body.conventions is not None:
+                a.conventions = body.conventions.model_dump()
             a.updated_at = now_iso()
             try:
                 await s.flush()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from evalp.schemas.agent import AgentOut, DraftOut, VersionBrief, VersionSummary
+from evalp.schemas.agent import AgentOut, Conventions, DraftOut, VersionBrief, VersionSummary
 from evalp.store.models import Agent, Draft, Version
 
 
@@ -21,6 +21,7 @@ def agent_out(a: Agent, latest: Version | None = None, tags: list[str] | None = 
         updated_at=a.updated_at,
         latest_version=version_brief(latest) if latest is not None else None,
         tags=tags or [],
+        conventions=Conventions.model_validate(a.conventions),
     )
 
 

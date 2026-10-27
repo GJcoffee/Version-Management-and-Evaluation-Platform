@@ -244,11 +244,24 @@ class SnapshotRule(_Model):
     ``name`` 是资产名模板，变量：``{stem}``（文件名去扩展名）、``{stem_nover}``（再去掉末尾的版本号，
     如 ``-0.5.3`` / ``-v1.2``）、``{agent}``（agent 名）、``{path}``（目录内相对路径去扩展名）。
     变量展开后统一为合法的资产名（小写字母、数字、连字符）。
+
+    ``name`` 与 ``id`` 的值以 ``$.`` 开头时，表示从 JSON 文件内容按点路径取值
+    （如 ``$.name``、``$.meta.skill_id``），否则按上述模板展开。``display`` 是显示名（可含中文），
+    省略时取 ``name`` 的展开原文；``id`` 是来源平台上的稳定 ID，相同的 ``(kind, id)`` 始终是同一个资产，
+    文件改名 / 资产名变了会自动改名而不是新建资产。
     """
 
     glob: str = Field(min_length=1, description="匹配目录内相对路径；* 不跨目录，** 跨目录")
     kind: AssetKindName
-    name: str = Field(min_length=1, description="资产名模板")
+    name: str = Field(min_length=1, description="资产名模板，或 $.点路径（取 JSON 文件内容）")
+    id: str | None = Field(
+        None, min_length=1, description="来源 ID：$.点路径（取 JSON 文件内容）或模板；省略时按资产名识别"
+    )
+    display: str | None = Field(
+        None,
+        min_length=1,
+        description="显示名：$.点路径或模板；省略时取 name 的展开结果（原名是中文时用它，name 改用文件名）",
+    )
 
 
 class SnapshotSpec(_Model):

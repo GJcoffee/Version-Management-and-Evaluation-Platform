@@ -63,4 +63,6 @@ async def validate_draft(
 @router.post("/drafts/{draft_id}/publish", response_model=PublishOut)
 async def publish_draft(draft_id: str, body: PublishIn, ctx: AppContext = Depends(get_ctx)):
     """发布为版本；同一 agent 下内容相同（spec_hash 相同）时返回已有版本（existed=true）。"""
-    return await ctx.svc(DraftService).publish(draft_id, body.expected_revision, body.notes, body.via)
+    return await ctx.svc(DraftService).publish(
+        draft_id, body.expected_revision, body.notes, body.via, body.tag
+    )

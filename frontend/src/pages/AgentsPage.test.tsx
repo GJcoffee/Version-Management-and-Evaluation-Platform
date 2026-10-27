@@ -13,6 +13,7 @@ const agent = (tags: string[]): Agent => ({
   updated_at: '2026-10-25T08:00:00.000Z',
   latest_version: null,
   tags,
+  conventions: { tag_from_param: null, require_notes: false, require_source_id: [], snapshot_readonly: false },
 })
 
 describe('TagsCell', () => {

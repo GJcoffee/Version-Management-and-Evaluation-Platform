@@ -98,7 +98,7 @@ evalp chat --version v2
 ```
 
 其他常用命令：`evalp eval status|report|compare <run_id>`、`evalp asset ls|show|add|diff`、`evalp dataset import <文件> --name <名称>`、
-`evalp replay <会话> --to v2 --wait`、`evalp adapter check`、`evalp gc`；`evalp <命令> --help` 查看参数。
+`evalp replay <会话> --to v2 --wait`、`evalp adapter check`、`evalp agent conventions show|set`（agent 的发布规范）、`evalp gc`；`evalp <命令> --help` 查看参数。
 
 ## 接入 Claude Code / Cursor（MCP）
 
@@ -109,7 +109,7 @@ evalp chat --version v2
 ```
 
 `evalp mcp` 发现服务没有运行时会自动在后台启动 `evalp serve`（`--no-autostart` 关闭），之后就可以让 agent 调用
-`push_draft`、`publish_version`、`run_eval`、`get_eval_compare`、`update_draft`、`replay_session` 等 19 个工具。详见 [docs/mcp-接入指南.md](docs/mcp-接入指南.md)。
+`push_draft`、`publish_version`、`run_eval`、`get_eval_compare`、`update_draft`、`replay_session` 等 20 个工具（发布、推送前先调用 `get_conventions` 了解 agent 的发布规范）。详见 [docs/mcp-接入指南.md](docs/mcp-接入指南.md)。
 
 ## 开发
 

@@ -204,6 +204,9 @@ class EvalpClient:
     async def put(self, path: str, body: Any = None, **kw: Any) -> Any:
         return await self.request("PUT", path, json_body=body, **kw)
 
+    async def patch(self, path: str, body: Any = None, **kw: Any) -> Any:
+        return await self.request("PATCH", path, json_body=body, **kw)
+
     async def delete(self, path: str, **kw: Any) -> Any:
         return await self.request("DELETE", path, **kw)
 

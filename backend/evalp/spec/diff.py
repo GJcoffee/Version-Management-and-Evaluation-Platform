@@ -6,7 +6,9 @@
 - 列表：元素有身份键时按身份键匹配（tools 按工具名；knowledge / sources 按资产名；内置工具按 builtin 名），
   否则按下标；
 - 文本：多行或超过 80 个字符的字符串，额外附 unified diff（``content_diff``）；
-- 资产：内容哈希相同视为未变化；不同时为 ``asset_changed``，文本类资产同时附 ``content_diff``。
+- 资产：内容哈希相同视为未变化；不同时为 ``asset_changed``，文本类资产同时附 ``content_diff``；
+- 资产改名：调用方传入 ``renames``（旧名 -> 新名，同一个资产），左侧的旧名先换成新名并标上 ``renamed_from``，
+  这样按身份匹配时是同一个资产，输出 ``asset_changed``（``asset.renamed_from`` 是旧名，哪怕内容没变）。
 """
 
 from __future__ import annotations
@@ -50,6 +52,19 @@ def _pin_summary(node: Any) -> Any:
         p = node[ASSET_KEY]
         return {"kind": p["kind"], "name": p["name"], "rev": p["rev"]}
     return node
+
+
+def rename_pins(spec: Any, renames: dict[tuple[str, str], str]) -> Any:
+    """把 Spec 里固化引用的旧资产名换成新名（``renames``: ``(kind, 旧名) -> 新名``），并记下旧名。"""
+    if is_pin(spec):
+        p = spec[ASSET_KEY]
+        new = renames.get((p["kind"], p["name"]))
+        return {ASSET_KEY: {**p, "name": new, "renamed_from": p["name"]}} if new else spec
+    if isinstance(spec, dict):
+        return {k: rename_pins(v, renames) for k, v in spec.items()}
+    if isinstance(spec, list):
+        return [rename_pins(v, renames) for v in spec]
+    return spec
 
 
 def _identity(elem: Any) -> str | None:
@@ -130,7 +145,7 @@ class _Differ:
     def _label(self, node: Any, fallback: str) -> str:
         if is_pin(node):
             p = node[ASSET_KEY]
-            return f"{p['name']}@{p['rev']}"
+            return f"{p.get('renamed_from') or p['name']}@{p['rev']}"
         return fallback
 
     def _add(self, path: str, op: str, **kw: Any) -> None:
@@ -168,20 +183,23 @@ class _Differ:
         if is_pin(left) and is_pin(right):
             pl, pr = left[ASSET_KEY], right[ASSET_KEY]
             if pl["kind"] == pr["kind"] and pl["name"] == pr["name"]:
-                if pl["hash"] == pr["hash"]:
+                renamed_from = pl.get("renamed_from")
+                if pl["hash"] == pr["hash"] and not renamed_from:
                     return
+                asset = {"kind": pl["kind"], "name": pl["name"]}
                 change: dict[str, Any] = {
                     "path": path,
                     "op": "asset_changed",
-                    "asset": {"kind": pl["kind"], "name": pl["name"]},
+                    "asset": {**asset, "renamed_from": renamed_from} if renamed_from else asset,
                     "left": {"rev": pl["rev"]},
                     "right": {"rev": pr["rev"]},
                 }
-                lt, rt = await self._text_of(left), await self._text_of(right)
-                if lt is not None and rt is not None:
-                    change["content_diff"] = unified_content_diff(
-                        lt, rt, self._label(left, "left"), self._label(right, "right")
-                    )
+                if pl["hash"] != pr["hash"]:
+                    lt, rt = await self._text_of(left), await self._text_of(right)
+                    if lt is not None and rt is not None:
+                        change["content_diff"] = unified_content_diff(
+                            lt, rt, self._label(left, "left"), self._label(right, "right")
+                        )
                 self.changes.append(change)
                 return
         await self._replace(path, left, right)
@@ -228,12 +246,18 @@ class _Differ:
 
 
 async def diff_specs(
-    left: dict[str, Any], right: dict[str, Any], load_text: LoadText | None = None
+    left: dict[str, Any],
+    right: dict[str, Any],
+    load_text: LoadText | None = None,
+    renames: dict[tuple[str, str], str] | None = None,
 ) -> dict[str, Any]:
     """比较两个固化后的 Spec，返回 ``{"changes": [...], "summary": {...}}``。
 
     load_text(pin) 用于读取文本类资产内容（给出 ``{kind,name,rev,hash}``），返回 None 表示不可读 / 非文本。
+    renames 是左侧 Spec 里改过名的资产：``(kind, 旧名) -> 新名``。
     """
+    if renames:
+        left = rename_pins(left, renames)
     differ = _Differ(load_text)
     await differ.walk(left, right, "")
     summary = {"add": 0, "remove": 0, "replace": 0, "asset_changed": 0}

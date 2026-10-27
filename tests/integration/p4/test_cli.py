@@ -166,14 +166,13 @@ def test_publish_reports_version_and_existed(cli_env, api):
     pub = api.post("/drafts/drf_1/publish").mock(
         return_value=httpx.Response(200, json={"version": version, "existed": False})
     )
-    tag = api.post("/versions/ver_2/tags").mock(return_value=httpx.Response(200, json={"tag": "baseline"}))
     api.get("/versions/diff").mock(return_value=httpx.Response(200, json=mocks.VERSION_DIFF))
     r = invoke("publish", "-m", "调温度", "--tag", "baseline")
     assert r.exit_code == 0, r.output
     assert "已发布版本 v2" in r.output and "baseline" in r.output and "3 项" in r.output
     sent = json.loads(pub.calls[0].request.content)
     assert sent["notes"] == "调温度" and sent["expected_revision"] == 1 and sent["via"] == "cli"
-    assert json.loads(tag.calls[0].request.content) == {"tag": "baseline"}
+    assert sent["tag"] == "baseline"  # 标签随发布请求一并提交（服务端原子完成），不再单独调用打标签接口
 
     pub.mock(return_value=httpx.Response(200, json={"version": version, "existed": True}))
     api.get("/drafts/drf_1").mock(return_value=httpx.Response(200, json=draft_json(1)))

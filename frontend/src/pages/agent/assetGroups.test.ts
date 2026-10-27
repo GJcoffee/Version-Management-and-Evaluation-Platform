@@ -6,6 +6,8 @@ const item = (kind: VersionAssetItem['kind'], name: string, over: Partial<Versio
   asset_id: `ast_${name}`,
   kind,
   name,
+  display_name: null,
+  source_id: null,
   rev: 1,
   asset_revision_id: `arv_${name}`,
   spec_paths: [],

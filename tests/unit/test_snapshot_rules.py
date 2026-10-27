@@ -75,3 +75,64 @@ def test_invalid_template_or_result_is_reported():
         snapshot_rule_asset("a", rule("{stem}"), "画图.json")  # 展开后为空
     with pytest.raises(WorkspaceError, match="资产名不合法"):
         snapshot_rule_asset("a", rule("{stem}-" + "x" * 70), "a.json")  # 超长
+
+
+SKILL_JSON = (
+    b'{"id": "sk_9", "name": "\xe7\x88\xac\xe8\x99\xab Engine v2", "meta": {"skill_id": 42, "tags": ["a"]}}'
+)
+
+
+def rule_with(**kw):
+    return SnapshotRule(glob="*", kind=kw.pop("kind", "skill"), **kw)
+
+
+def test_json_path_name_and_id_come_from_file_content():
+    from evalp.workspace_client import SnapshotEntry, snapshot_rule_entry
+
+    r = rule_with(name="$.name", id="$.meta.skill_id")
+    # 资产名由 name 的原文规范化得到，原文（含中文）作为显示名；id 取原值（数字转字符串）
+    assert snapshot_rule_entry("a", r, "skills/x.json", SKILL_JSON) == SnapshotEntry(
+        "skill/engine-v2", "42", "爬虫 Engine v2"
+    )
+    assert snapshot_rule_entry(
+        "a", rule_with(name="{stem_nover}", id="$.id"), "s/crawl-0.5.3.json", SKILL_JSON
+    ) == (SnapshotEntry("skill/crawl", "sk_9", "crawl"))
+    # 没有配置 id 的规则：只有名字
+    assert snapshot_rule_entry("a", rule_with(name="{stem}"), "s/crawl.json", SKILL_JSON).source_id is None
+
+
+def test_json_path_supports_list_index_and_reports_missing_fields():
+    from evalp.workspace_client import snapshot_rule_entry
+
+    data = b'{"items": [{"id": "first"}], "n": null, "b": true, "e": " "}'
+    assert (
+        snapshot_rule_entry("a", rule_with(name="{stem}", id="$.items.0.id"), "x.json", data).source_id
+        == "first"
+    )
+    with pytest.raises(WorkspaceError, match=r"取值失败: 找不到 'nope'.*按实际导出的 JSON 调整"):
+        snapshot_rule_entry("a", rule_with(name="{stem}", id="$.nope"), "x.json", data)
+    with pytest.raises(WorkspaceError, match="取到的不是非空"):
+        snapshot_rule_entry("a", rule_with(name="{stem}", id="$.n"), "x.json", data)
+    with pytest.raises(WorkspaceError, match="取到的不是非空"):
+        snapshot_rule_entry("a", rule_with(name="{stem}", id="$.b"), "x.json", data)
+    with pytest.raises(WorkspaceError, match="取到的不是非空"):
+        snapshot_rule_entry("a", rule_with(name="{stem}", id="$.e"), "x.json", data)
+    with pytest.raises(WorkspaceError, match="文件不是合法的 JSON"):
+        snapshot_rule_entry("a", rule_with(name="$.name"), "x.md", b"# not json")
+
+
+def test_json_path_name_that_cannot_make_a_valid_asset_name_is_reported():
+    from evalp.workspace_client import snapshot_rule_entry
+
+    with pytest.raises(WorkspaceError, match=r"资产名不合法.*展开结果 '画图'"):
+        snapshot_rule_entry("a", rule_with(name="$.name"), "x.json", '{"name": "画图"}'.encode())
+
+
+def test_display_from_json_keeps_chinese_name_while_asset_name_uses_file_name():
+    from evalp.workspace_client import SnapshotEntry, snapshot_rule_entry
+
+    rule = rule_with(name="{stem_nover}", id="$.id", display="$.name")
+    data = '{"id": "sk-1", "name": "画图"}'.encode()
+    assert snapshot_rule_entry("a", rule, "skills/image-gen-0.5.3.json", data) == SnapshotEntry(
+        "skill/image-gen", "sk-1", "画图"
+    )

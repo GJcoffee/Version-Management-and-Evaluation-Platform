@@ -1,4 +1,4 @@
-"""EvalP MCP Server（详设 12，19 个工具）。
+"""EvalP MCP Server（详设 12，20 个工具）。
 
 - 传输：stdio；工作目录就是 agent 项目目录（读取 ``.evalp.toml``）；
 - 服务没有运行时可自动拉起 ``evalp serve``（``launcher``，见 :mod:`evalp.mcp.autostart`）；
@@ -45,6 +45,8 @@ CHAT_TIMEOUT_S = 600.0
 
 INSTRUCTIONS = """\
 EvalP：agent 的版本管理与评测平台。工作目录是 agent 项目目录（含 .evalp.toml）。
+**发布、推送前先调用 get_conventions**：agent 的发布规范（标签怎么取、说明是否必填、快照 map 要不要配 id、
+快照资产是否只读）由服务端对所有入口强制，违反时请求会被拒绝；被拒绝时把返回的中文说明照着改，不要绕过。
 典型流程：修改本地 agent.yaml / prompts -> push_draft -> publish_version(tag) -> chat 试聊 ->
 run_eval（baseline 对比）-> get_eval_report / get_eval_compare 查看失败与退化用例 -> 修改后重复。
 其他：list_agents / get_draft / update_draft（直接改服务端草稿）、
@@ -188,6 +190,11 @@ def _push_md(r: PushResult, web: str) -> list[str]:
             lines.append("- 没有需要上传的文件")
         if r.skipped:
             lines.append(f"- 跳过 {len(r.skipped)} 个未变化的文件")
+        lines += [
+            f"- 资产改名: `{u['renamed_from']}` -> `{u['asset']}`（按来源 ID 识别，修订历史已保留）"
+            for u in [*r.uploaded, *r.skipped]
+            if u.get("renamed_from")
+        ]
     lines += _validation_md(r.validation)
     if r.agent_id:
         lines.append(f"- Web UI: {web}/agents/{r.agent_id}")
@@ -202,7 +209,7 @@ def build_server(
     wait_timeout: float = WAIT_TIMEOUT_S,
     launcher: ServerLauncher | None = None,
 ) -> Any:
-    """构造 MCP Server 并注册 19 个工具。``launcher`` 非空时，服务没有运行就先拉起（注入客户端时不用）。"""
+    """构造 MCP Server 并注册 20 个工具。``launcher`` 非空时，服务没有运行就先拉起（注入客户端时不用）。"""
     env = Env(data_dir, project_dir, client_factory, poll_interval, wait_timeout, launcher)
     mcp = _FastMCP("evalp", instructions=INSTRUCTIONS)
 
@@ -244,8 +251,9 @@ def build_server(
         notes: Annotated[str | None, Field(description="版本备注，说明这次改了什么")] = None,
         tag: Annotated[str | None, Field(description="发布后指向该版本的标签，如 baseline、prod")] = None,
     ) -> str:
-        """先 push 再把草稿发布为不可变版本。
+        """先 push 再把草稿发布为不可变版本。发布前先调用 get_conventions 了解 agent 的发布规范。
 
+        标签与创建版本原子完成；违反规范（如缺少必填的 notes / tag）时返回服务端的中文说明。
         返回版本号、spec_hash、是否已存在（内容相同则不会新建）和相对父版本的变更摘要。
         """
         project = env.require_project()
@@ -530,6 +538,25 @@ def build_server(
                 text += f"\n\n（只显示前 {limit} 个，可调大 limit 或在 Web UI 查看。）"
             return text + f"\n\nWeb UI: {c.base_url}/agents"
 
+    @mcp.tool()
+    @_guard
+    async def get_conventions(agent: Agent = None) -> str:
+        """agent 生效的发布规范（服务端强制）与快照 map 规则说明。发布、推送前先调用。"""
+        project = env.project()
+        name = env.agent_name(agent)
+        async with env.client(project) as c:
+            try:
+                conv = (await c.get(f"/agents/{name}"))["conventions"]
+            except EvalpClientError as e:
+                if e.code != "NOT_FOUND":
+                    raise
+                conv = None  # 还没有 push 过：agent 尚未创建
+            spec = Workspace(project).load_spec() if project and name == project.agent_name else None
+            return (
+                render.render_conventions(name, conv, spec)
+                + f"\n\nWeb UI（agent 设置）: {c.base_url}/agents/{name}"
+            )
+
     def draft_name_for(project: ProjectConfig | None, agent: str | None) -> str:
         """项目的 agent 用 .evalp.toml 里的草稿名；其他 agent 用 main。"""
         if project and (agent is None or agent == project.agent_name):
@@ -643,7 +670,10 @@ def build_server(
         ] = None,
         message: Annotated[str | None, Field(description="修订说明")] = None,
     ) -> str:
-        """创建资产，或给同名资产新增修订（内容与已有修订相同则不新增）。返回修订号和是否已存在。"""
+        """创建资产，或给同名资产新增修订（内容与已有修订相同则不新增）。返回修订号和是否已存在。
+
+        agent 开启 snapshot_readonly 规范时，来自 agent 快照的资产会被拒绝（返回服务端的中文说明）。
+        """
         file_path = env.resolve_path(path) if path is not None else None
         async with env.client(env.project()) as c:
             out = await actions.upsert_asset(c, kind, name, content=content, path=file_path, message=message)

@@ -7,7 +7,10 @@
   如果相同的是更早的修订（例如改回旧内容），把"最新"指针 ``latest_rev`` 移回该修订（修订号只增不减，
   下一个新修订取 ``max(rev)+1``）；
 - 新修订会对 blob ``incref``；
-- 被版本（``version_asset_refs``）或评测（``eval_runs.dataset_rev_id``）引用的资产不能硬删除（ASSET_IN_USE）。
+- 被版本（``version_asset_refs``）或评测（``eval_runs.dataset_rev_id``）引用的资产不能硬删除（ASSET_IN_USE）；
+- 快照入库的资产带来源 ID（``source_id``）：按 ``(kind, source_id)`` 识别同一个资产，
+  名字变了自动改名并保留修订历史（旧名记在 ``meta.former_names``）；
+- agent 开启 ``snapshot_readonly`` 规范后，来自快照的资产拒绝快照推送之外的写入（``ensure_writable``）。
 
 供其他模块使用的辅助方法：``resolve_ref`` / ``get_revision`` / ``read_bytes`` / ``read_text``。
 """
@@ -27,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from evalp.api.pagination import Page, paginate
 from evalp.context import AppContext
-from evalp.errors import AssetInUse, Conflict, NotFound, ValidationFailed
+from evalp.errors import AssetInUse, Conflict, ConventionViolation, NotFound, ValidationFailed
 from evalp.ids import new_id
 from evalp.logging import get_logger
 from evalp.schemas.asset import (
@@ -46,6 +49,7 @@ from evalp.services.asset_content import (
     normalize_content_type,
     validate_content,
 )
+from evalp.services.conventions import conventions_of
 from evalp.spec.diff import identity_paths, unified_content_diff
 from evalp.spec.refs import AssetRef, parse_asset_ref, validate_asset_name
 from evalp.spec.resolve import ResolvedAsset, lookup_revision
@@ -90,6 +94,9 @@ def asset_out(a: Asset, latest: AssetRevision | None = None) -> AssetOut:
         id=a.id,
         kind=a.kind,
         name=a.name,
+        display_name=a.display_name,
+        source_id=a.source_id,
+        former_names=list(a.meta.get("former_names", [])),
         description=a.description,
         latest_rev=a.latest_rev,
         deleted_at=a.deleted_at,
@@ -145,7 +152,9 @@ class AssetService:
             stmt = stmt.where(Asset.deleted_at.is_(None))
         if q:
             like = f"%{q}%"
-            stmt = stmt.where(or_(Asset.name.like(like), Asset.description.like(like)))
+            stmt = stmt.where(
+                or_(Asset.name.like(like), Asset.display_name.like(like), Asset.description.like(like))
+            )
         async with self.ctx.db.read() as s:
             page = await paginate(s, stmt, Asset.id, limit=limit, cursor=cursor)
             assets: list[Asset] = page.items
@@ -315,6 +324,8 @@ class AssetService:
         validated = await self.validate(body.kind, data, body.content_type, body.column_map)
         async with self.ctx.db.write() as s:
             asset, created = await self.get_or_create_asset(s, body.kind, body.name, body.description)
+            if not created:
+                await self.ensure_writable(s, asset)
             revision, existed = await self.add_revision(s, asset, payload, validated, body.message)
             return AssetWriteOut(
                 asset=asset_out(asset, await self._latest_of(s, asset)),
@@ -333,6 +344,7 @@ class AssetService:
             asset = await self._get_asset(s, asset_id)
             if asset.deleted_at is not None:
                 raise Conflict("资产已被删除，请先恢复", code="ASSET_DELETED")
+            await self.ensure_writable(s, asset)
             revision, existed = await self.add_revision(s, asset, payload, validated, body.message)
             return AssetWriteOut(
                 asset=asset_out(asset, await self._latest_of(s, asset)),
@@ -366,6 +378,57 @@ class AssetService:
         s.add(asset)
         await s.flush()
         return asset, True
+
+    async def get_or_create_by_source(
+        self, s: AsyncSession, kind: str, name: str, source_id: str, display_name: str | None
+    ) -> tuple[Asset, bool, str | None]:
+        """快照入库：按 ``(kind, source_id)`` 取得（或创建 / 恢复）资产，返回 ``(asset, 是否新建, 旧名)``。
+
+        找到资产但名字不同：自动改名，修订历史原样保留，旧名追加到 ``meta.former_names``（旧名返回给调用方）。
+        没有该 source_id 的资产时，认领同名且还没有来源 ID 的资产（升级前入库的），否则新建。
+        新名字被别的资产占用时抛 Conflict（不会合并两个资产）。
+        """
+        validate_asset_name(name)
+        asset = (
+            await s.execute(select(Asset).where(Asset.kind == kind, Asset.source_id == source_id))
+        ).scalar_one_or_none()
+        same_name = (
+            await s.execute(select(Asset).where(Asset.kind == kind, Asset.name == name))
+        ).scalar_one_or_none()
+        renamed_from: str | None = None
+        created = False
+        if asset is None:
+            if same_name is not None and same_name.source_id is not None:
+                raise Conflict(
+                    f"资产名 {kind}/{name} 已被来源 ID 为 {same_name.source_id!r} 的另一个资产占用"
+                    f"（本文件的来源 ID 是 {source_id!r}）：请调整 snapshot.map 的 name，"
+                    "让两个资产的名字不同。",
+                    {
+                        "asset": f"{kind}/{name}",
+                        "source_id": source_id,
+                        "other_source_id": same_name.source_id,
+                    },
+                    code="ASSET_NAME_CONFLICT",
+                )
+            asset, created = await self.get_or_create_asset(s, kind, name)
+            asset.source_id = source_id
+        else:
+            asset.deleted_at = None
+            if asset.name != name:
+                if same_name is not None:
+                    raise Conflict(
+                        f"资产 {kind}/{asset.name}（来源 ID {source_id!r}）改名为 {name} 时，"
+                        "该名字已被另一个资产占用：请调整 snapshot.map 的 name，让两个资产的名字不同。",
+                        {"asset": f"{kind}/{name}", "source_id": source_id},
+                        code="ASSET_NAME_CONFLICT",
+                    )
+                renamed_from = asset.name
+                former = [n for n in asset.meta.get("former_names", []) if n != name]
+                asset.meta = {**asset.meta, "former_names": [*former, renamed_from]}
+                asset.name = name
+        asset.display_name = display_name
+        await s.flush()
+        return asset, created, renamed_from
 
     async def add_revision(
         self,
@@ -461,8 +524,54 @@ class AssetService:
         """修改资产描述。"""
         async with self.ctx.db.write() as s:
             a = await self._get_asset(s, asset_id)
+            await self.ensure_writable(s, a)
             a.description = description
             return asset_out(a, await self._latest_of(s, a))
+
+    async def ensure_writable(self, s: AsyncSession, asset: Asset) -> None:
+        """``snapshot_readonly`` 规范：来自快照（最新修订 ``origin=snapshot``）的资产，被开启了该规范的
+        agent 引用（版本或草稿）时，快照推送之外的写入（新修订 / upsert / 改描述 / 删除）一律拒绝。
+        快照推送本身不调用它。"""
+        latest = await self._latest_of(s, asset)
+        if latest is None or latest.meta.get("origin") != "snapshot":
+            return
+        agents = [a for a in await self._referencing_agents(s, asset) if conventions_of(a).snapshot_readonly]
+        if not agents:
+            return
+        key = f"{asset.kind}/{asset.name}"
+        names = "、".join(f"「{a.name}」" for a in agents)
+        raise ConventionViolation(
+            f"资产 {key} 来自 agent 快照（origin=snapshot），agent {names}开启了规范 snapshot_readonly，"
+            "只能通过快照推送（evalp push / publish）更新：请在来源平台修改后重新导出并推送；"
+            "确需手工修改时，先在 agent 设置的「规范」里关闭 snapshot_readonly。",
+            {
+                "convention": "snapshot_readonly",
+                "asset": key,
+                "agents": [a.name for a in agents],
+            },
+            status=409,
+        )
+
+    @staticmethod
+    async def _referencing_agents(s: AsyncSession, a: Asset) -> list[Agent]:
+        """版本或草稿引用了该资产的 agent。"""
+        rev_ids = select(AssetRevision.id).where(AssetRevision.asset_id == a.id)
+        by_version = (
+            select(Agent)
+            .join(Version, Version.agent_id == Agent.id)
+            .join(VersionAssetRef, VersionAssetRef.version_id == Version.id)
+            .where(VersionAssetRef.asset_revision_id.in_(rev_ids))
+        )
+        by_draft = (
+            select(Agent)
+            .join(Draft, Draft.agent_id == Agent.id)
+            .where(cast(Draft.spec, Text).like(f"%asset://{a.kind}/{a.name}@%"))
+        )
+        found: dict[str, Agent] = {}
+        for stmt in (by_version, by_draft):
+            for agent in (await s.execute(stmt)).scalars():
+                found[agent.id] = agent
+        return list(found.values())
 
     # ------------------------------------------------------------ 上传
 
@@ -588,6 +697,7 @@ class AssetService:
         """
         async with self.ctx.db.write() as s:
             a = await self._get_asset(s, asset_id)
+            await self.ensure_writable(s, a)
             rev_ids = select(AssetRevision.id).where(AssetRevision.asset_id == a.id)
             n_versions = (
                 await s.execute(

@@ -102,9 +102,35 @@ def _ref_text(v: Any) -> str:
     return truncate(v, 80)
 
 
+ASSET_KIND_LABEL = {
+    "prompt": "提示词",
+    "tool": "工具",
+    "knowledge": "知识库",
+    "kb_config": "知识库配置",
+    "skill": "Skill",
+    "mcp": "MCP 插件",
+    "database": "数据库",
+    "app_config": "应用配置",
+    "dataset": "数据集",
+    "file": "文件",
+}
+
+
+def rename_text(ch: dict[str, Any]) -> str | None:
+    """资产改名的变更描述 ``Skill 旧名 → 新名 · r3 → r4``；不是改名返回 None。"""
+    asset = ch.get("asset") or {}
+    if ch.get("op") != "asset_changed" or not asset.get("renamed_from"):
+        return None
+    label = ASSET_KIND_LABEL.get(asset["kind"], asset["kind"])
+    revs = f"r{(ch.get('left') or {}).get('rev')} → r{(ch.get('right') or {}).get('rev')}"
+    return f"{label} {asset['renamed_from']} → {asset['name']} · {revs}"
+
+
 def diff_change_lines(ch: dict[str, Any]) -> str:
     """一条变更的单行描述。"""
     op, path = ch.get("op", "?"), ch.get("path", "?")
+    if renamed := rename_text(ch):
+        return f"~ {path}: {renamed}"
     if op == "add":
         return f"+ {path}: {_ref_text(ch.get('right'))}"
     if op == "remove":
@@ -576,6 +602,98 @@ def render_assets(items: list[dict[str, Any]]) -> str:
             f"| `{a.get('kind')}/{a.get('name')}` | rev {a.get('latest_rev')} | {size} "
             f"| {fmt_local(a.get('created_at'))} | {truncate(a.get('description') or '-', 40)} |"
         )
+    return "\n".join(lines)
+
+
+def conventions_lines(conv: dict[str, Any]) -> list[str]:
+    """agent 发布规范（``AgentOut.conventions``）的逐条说明，CLI 与 MCP 共用。"""
+    param = conv.get("tag_from_param")
+    kinds = conv.get("require_source_id") or []
+    return [
+        "- tag_from_param（标签取自参数）: "
+        + (
+            f"开启，params.{param}。发布必须带标签，标签必须等于 v{{params.{param}}}，且不能已存在于该 agent"
+            if param
+            else "未开启"
+        ),
+        "- require_notes（发布说明必填）: " + ("开启" if conv.get("require_notes") else "未开启"),
+        "- require_source_id（必须配置来源 ID 的类型）: "
+        + (
+            f"{', '.join(kinds)}。快照 map 中这些类型的规则必须配置 id，否则拒绝推送 / 发布"
+            if kinds
+            else "未开启"
+        ),
+        "- snapshot_readonly（快照资产只读）: "
+        + (
+            "开启。来自快照的资产只能通过快照推送更新，MCP upsert_asset / 资产 HTTP 接口的写入一律拒绝"
+            if conv.get("snapshot_readonly")
+            else "未开启"
+        ),
+    ]
+
+
+def render_conventions(name: str, conv: dict[str, Any] | None, spec: dict[str, Any] | None) -> str:
+    """MCP ``get_conventions``：agent 生效的发布规范、对应的做法，以及快照 map 规则说明。
+
+    conv 为 None 表示 agent 还没有在服务端创建；spec 是本地 agent.yaml（用来给出该用的标签、检查 map 规则）。
+    """
+    lines = [f"## agent `{name}` 的发布规范", ""]
+    lines.append(
+        "规范由服务端对所有入口（CLI / MCP / 网页 / HTTP API）一致地强制，违反时请求会被拒绝并返回具体原因。"
+    )
+    lines.append("")
+    if conv is None:
+        lines.append("agent 还没有在服务端创建（第一次 push_draft 时创建），目前没有任何规范。")
+    else:
+        lines += conventions_lines(conv)
+        lines += ["", "### 怎么做", ""]
+        param = conv.get("tag_from_param")
+        value = ((spec or {}).get("params") or {}).get(param) if param else None
+        if param:
+            tag_hint = (
+                f"（agent.yaml 里 params.{param} 当前是 {value!r}，标签应为 `v{value}`）"
+                if value not in (None, "")
+                else (f"（agent.yaml 的 params 里还没有 {param}，先设置它）")
+            )
+            lines.append(f'- 发布: `publish_version(tag="v<params.{param}>", notes=…)`{tag_hint}。')
+        else:
+            lines.append("- 发布: `publish_version(notes=…, tag=…)`。")
+        if conv.get("require_notes"):
+            lines.append("- 必须填写 notes（发布说明），写明这次改了什么。")
+        lines.append(
+            "- 规范只能在 Web UI 的 agent 设置，或用 `evalp agent conventions set` 修改，"
+            "不要改 agent.yaml 绕过。"
+        )
+    kinds = (conv or {}).get("require_source_id") or []
+    lines += [
+        "",
+        "### 快照 map 规则（agent.yaml 的 snapshot.map）",
+        "",
+        "- 每条规则 `{glob, kind, name, id}`：`glob` 匹配快照目录内的相对路径，"
+        "命中的文件按 `kind` 入库为资产，按顺序取第一条匹配的。",
+        "- `name`、`id` 的值以 `$.` 开头时，从 JSON 文件内容按点路径取值"
+        "（如 `$.id`、`$.meta.skill_id`、`$.name`）；"
+        "否则是模板，变量 `{stem}` `{stem_nover}` `{agent}` `{path}`。字段名按实际导出的 JSON 调整。",
+        "- `name` 的值规范化后成为资产名（小写字母、数字、连字符），原文作为显示名保留（可以是中文）。",
+        "- `id` 是来源平台上的稳定 ID：相同的 `(kind, id)` 始终是同一个资产，文件改名或名字变了会自动改名"
+        "并保留修订历史，不会存成新资产。skill / mcp 等有稳定 ID 的类型都应配置 `id`。",
+    ]
+    snap = (spec or {}).get("snapshot")
+    rules = snap.get("map") if isinstance(snap, dict) else None
+    if rules:
+        lines += ["", "当前项目的规则:"]
+        for i, r in enumerate(rules):
+            miss = r.get("kind") in kinds and not r.get("id")
+            lines.append(
+                f"- [{i}] glob `{r.get('glob')}` kind `{r.get('kind')}` name `{r.get('name')}` id "
+                + (f"`{r['id']}`" if r.get("id") else "（未配置）")
+                + ("  **违反 require_source_id：必须配置 id，否则推送 / 发布会被拒绝**" if miss else "")
+            )
+    elif snap:
+        lines += [
+            "",
+            "当前项目的 agent.yaml 没有配置 snapshot.map（快照里的文件都会存成不易辨认的 file 资产）。",
+        ]
     return "\n".join(lines)
 
 

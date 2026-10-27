@@ -7,7 +7,7 @@ from typing import Any
 from rich.console import Console
 from rich.markup import escape
 
-from evalp.render import _ref_text, diff_side_label
+from evalp.render import _ref_text, diff_side_label, rename_text
 
 OP_STYLE = {
     "add": ("+", "green"),
@@ -37,6 +37,8 @@ def print_diff(console: Console, data: dict[str, Any], *, max_lines: int | None 
             desc = f"[green]{escape(_ref_text(ch.get('right')))}[/green]"
         elif op == "remove":
             desc = f"[red]{escape(_ref_text(ch.get('left')))}[/red]"
+        elif renamed := rename_text(ch):
+            desc = f"[cyan]{escape(renamed)}[/cyan]"
         else:
             old, new = escape(_ref_text(ch.get("left"))), escape(_ref_text(ch.get("right")))
             desc = f"[red]{old}[/red] -> [green]{new}[/green]"

@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from evalp.api.pagination import Page, paginate
@@ -34,7 +34,7 @@ from evalp.services.convert import draft_out, version_summary
 from evalp.spec.canonical import canonicalize
 from evalp.spec.diff import diff_specs, identity_paths
 from evalp.spec.models import CodeSpec, ConfigSpec, parse_spec
-from evalp.spec.resolve import unresolve
+from evalp.spec.resolve import iter_pins, unresolve
 from evalp.spec.validate import validate_spec
 from evalp.store.models import Agent, Asset, AssetRevision, Draft, Version, VersionAssetRef, VersionTag
 from evalp.utils.time import now_iso
@@ -225,6 +225,8 @@ class VersionService:
                     asset_id=asset_id,
                     kind=asset.kind,
                     name=asset.name,
+                    display_name=asset.display_name,
+                    source_id=asset.source_id,
                     rev=rev.rev,
                     asset_revision_id=rev.id,
                     spec_paths=paths,
@@ -271,18 +273,24 @@ class VersionService:
         """把标签指向这个版本（UPSERT：同一标签会从旧版本移过来）。"""
         async with self.ctx.db.write() as s:
             v = await self.resolve_ref_orm(s, version_ref)
-            row = await s.get(VersionTag, (v.agent_id, tag))
-            now = now_iso()
-            if row is None:
-                row = VersionTag(agent_id=v.agent_id, tag=tag, version_id=v.id, updated_at=now)
-                s.add(row)
-            else:
-                row.version_id = v.id
-                row.updated_at = now
-            await s.flush()
+            row = await self.upsert_tag(s, v, tag)
             return TagOut(
                 agent_id=row.agent_id, tag=row.tag, version_id=row.version_id, updated_at=row.updated_at
             )
+
+    @staticmethod
+    async def upsert_tag(s: AsyncSession, v: Version, tag: str) -> VersionTag:
+        """事务内：把标签指向版本（已存在则移过来）。发布时带标签也走这里，与创建版本在同一个事务里。"""
+        row = await s.get(VersionTag, (v.agent_id, tag))
+        now = now_iso()
+        if row is None:
+            row = VersionTag(agent_id=v.agent_id, tag=tag, version_id=v.id, updated_at=now)
+            s.add(row)
+        else:
+            row.version_id = v.id
+            row.updated_at = now
+        await s.flush()
+        return row
 
     async def delete_tag(self, version_ref: str, tag: str) -> None:
         """删除指向该版本的标签；标签不存在或指向其他版本时抛 NotFound。"""
@@ -378,8 +386,29 @@ class VersionService:
             except (NotFound, UnicodeDecodeError):
                 return None
 
-        result = await diff_specs(lspec, rspec, load_text)
+        async with self.ctx.db.read() as s:
+            renames = await self._renames(s, lspec, rspec)
+        result = await diff_specs(lspec, rspec, load_text, renames)
         return {"left": left, "right": right, **result}
+
+    @staticmethod
+    async def _renames(
+        s: AsyncSession, lspec: dict[str, Any], rspec: dict[str, Any]
+    ) -> dict[tuple[str, str], str]:
+        """左侧 Spec 用的旧资产名 -> 右侧 Spec 里的新名：右侧新出现的资产，
+        其 ``former_names`` 里有左侧消失的名字。"""
+        left = {(p["kind"], p["name"]) for _, p in iter_pins(lspec)}
+        right = {(p["kind"], p["name"]) for _, p in iter_pins(rspec)}
+        gone, new = left - right, right - left
+        if not gone or not new:
+            return {}
+        assets = (await s.execute(select(Asset).where(tuple_(Asset.kind, Asset.name).in_(new)))).scalars()
+        return {
+            (a.kind, old): a.name
+            for a in assets
+            for old in a.meta.get("former_names", [])
+            if (a.kind, old) in gone
+        }
 
     async def next_seq(self, s: AsyncSession, agent_id: str) -> int:
         """下一个版本序号。"""
@@ -398,6 +427,4 @@ def _without_git(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def _pin_names(spec: dict[str, Any]) -> dict[str, tuple[str, str]]:
-    from evalp.spec.resolve import iter_pins
-
     return {path: (pin["kind"], pin["name"]) for path, pin in iter_pins(spec)}

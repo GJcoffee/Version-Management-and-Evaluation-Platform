@@ -306,10 +306,40 @@ def strip_version(stem: str) -> str:
     return _VERSION_SUFFIX.sub("", stem)
 
 
-def snapshot_rule_asset(agent_name: str, rule: SnapshotRule, rel: str) -> str:
-    """按规则展开快照文件 ``rel`` 的资产 ``kind/name``。
+@dataclass(frozen=True)
+class SnapshotEntry:
+    """快照目录内一个文件对应的资产：``kind/name``，以及可选的来源 ID 与原始显示名。"""
 
-    变量展开后统一为合法的资产名（小写，非字母数字替换为连字符）；展开结果不合法时抛 WorkspaceError。
+    asset: str
+    source_id: str | None = None
+    display_name: str | None = None
+
+
+def _json_value(data: bytes, path: str, rel: str, rule: SnapshotRule, field: str) -> str:
+    """按 ``$.a.b.0`` 点路径从 JSON 文件内容取值（对象按键、数组按下标），要求取到非空的字符串或数字。"""
+    where = f"文件 {rel} 按规则 {{glob: {rule.glob}, {field}: {path}}}"
+    try:
+        node: Any = json.loads(data)
+    except ValueError:
+        raise WorkspaceError(f"{where} 取值失败: 文件不是合法的 JSON") from None
+    for seg in path[2:].split("."):
+        if isinstance(node, dict) and seg in node:
+            node = node[seg]
+        elif isinstance(node, list) and seg.isdigit() and int(seg) < len(node):
+            node = node[int(seg)]
+        else:
+            raise WorkspaceError(f"{where} 取值失败: 找不到 {seg!r}。请按实际导出的 JSON 调整字段路径。")
+    if isinstance(node, bool) or not isinstance(node, str | int | float) or not str(node).strip():
+        raise WorkspaceError(f"{where} 取值失败: 取到的不是非空的字符串或数字（{node!r}）")
+    return str(node).strip()
+
+
+def snapshot_rule_entry(agent_name: str, rule: SnapshotRule, rel: str, data: bytes) -> SnapshotEntry:
+    """按规则展开快照文件 ``rel``（内容 ``data``）的资产 ``kind/name``、来源 ID 与显示名。
+
+    ``name`` / ``id`` / ``display`` 以 ``$.`` 开头时从 JSON 内容取值，否则按模板展开。
+    资产名由 ``name`` 的值规范化得到（小写，非字母数字替换为连字符）；显示名取 ``display``，
+    省略时取 ``name`` 的原值；``id`` 保持原样。展开结果不合法时抛 WorkspaceError。
     """
     p = Path(rel)
     values = {
@@ -322,19 +352,34 @@ def snapshot_rule_asset(agent_name: str, rule: SnapshotRule, rel: str) -> str:
     def expand(m: re.Match[str]) -> str:
         if m.group(1) not in values:
             raise WorkspaceError(
-                f"snapshot.map 的 name 模板 {rule.name!r} 里有未知变量 {m.group(0)}"
+                f"snapshot.map 的模板 {rule.name!r} 里有未知变量 {m.group(0)}"
                 f"（可用: {', '.join('{' + v + '}' for v in _TEMPLATE_VARS)}）"
             )
         return values[m.group(1)]
 
-    name = normalize_stem(_TEMPLATE_VAR.sub(expand, rule.name))
+    def evaluate(value: str, field: str) -> str:
+        if value.startswith("$."):
+            return _json_value(data, value, rel, rule, field)
+        return _TEMPLATE_VAR.sub(expand, value)
+
+    display = evaluate(rule.name, "name")
+    name = normalize_stem(display)
     try:
         validate_asset_name(name)
     except RefError as e:
         raise WorkspaceError(
-            f"文件 {rel} 按规则 {{glob: {rule.glob}, name: {rule.name}}} 得到的资产名不合法: {e}"
+            f"文件 {rel} 按规则 {{glob: {rule.glob}, name: {rule.name}}} 得到的资产名不合法"
+            f"（展开结果 {display!r}）: {e}"
         ) from None
-    return f"{rule.kind}/{name}"
+    source_id = evaluate(rule.id, "id") if rule.id else None
+    if rule.display:
+        display = evaluate(rule.display, "display")
+    return SnapshotEntry(f"{rule.kind}/{name}", source_id, display)
+
+
+def snapshot_rule_asset(agent_name: str, rule: SnapshotRule, rel: str, data: bytes = b"") -> str:
+    """同 :func:`snapshot_rule_entry`，只返回 ``kind/name``（``$.`` 取值的规则需要传文件内容）。"""
+    return snapshot_rule_entry(agent_name, rule, rel, data).asset
 
 
 _CONTENT_TYPES = {
@@ -360,9 +405,15 @@ class LocalFile:
     data: bytes
     hash: str
     origin: str | None = None  # 快照目录里的文件为 "snapshot"：资产在 EvalP 里只读
+    source_id: str | None = None  # 来源平台上的稳定 ID（规则配置了 id 时）
+    display_name: str | None = None  # 来源平台上的原始名称
 
     def payload(self, with_content: bool) -> dict[str, Any]:
         item: dict[str, Any] = {"path": self.path, "asset": self.asset, "hash": self.hash}
+        if self.source_id is not None:
+            item["source_id"] = self.source_id
+        if self.display_name is not None:
+            item["display_name"] = self.display_name
         if self.path.endswith(".csv") and self.asset.startswith("dataset/"):
             item["content_type"] = "text/csv"
         if self.origin:
@@ -470,8 +521,8 @@ class Workspace:
             if p.is_file()
         }
 
-    def snapshot_assets(self, spec: dict[str, Any]) -> dict[str, str]:
-        """快照目录内每个文件对应的资产：目录内相对路径 -> ``kind/name``。
+    def snapshot_entries(self, spec: dict[str, Any]) -> dict[str, SnapshotEntry]:
+        """快照目录内每个文件对应的资产：目录内相对路径 -> :class:`SnapshotEntry`。
 
         按 ``snapshot.map`` 的顺序取第一条匹配的规则；没有命中的文件存为 file 资产。
         """
@@ -486,24 +537,28 @@ class Workspace:
                 raise WorkspaceError(
                     f"{self.project.spec_path} 的 snapshot.map[{i}] 不合法: {problems}"
                 ) from None
-        out: dict[str, str] = {}
-        for rel in self.snapshot_files(spec):
+        out: dict[str, SnapshotEntry] = {}
+        for rel, path in self.snapshot_files(spec).items():
             rule = next((r for r in rules if glob_match(r.glob, rel)), None)
             out[rel] = (
-                snapshot_rule_asset(self.project.agent_name, rule, rel)
+                snapshot_rule_entry(self.project.agent_name, rule, rel, (self.root / path).read_bytes())
                 if rule
-                else snapshot_asset(self.project.agent_name, rel)
+                else SnapshotEntry(snapshot_asset(self.project.agent_name, rel))
             )
         return out
+
+    def snapshot_assets(self, spec: dict[str, Any]) -> dict[str, str]:
+        """快照目录内每个文件对应的资产：目录内相对路径 -> ``kind/name``。"""
+        return {rel: e.asset for rel, e in self.snapshot_entries(spec).items()}
 
     def collect_files(self, spec: dict[str, Any]) -> list[LocalFile]:
         """要同步的文件：``[assets]`` 映射到的文件，加上 spec 中 ``file:`` 引用的文件和快照目录下的文件。"""
         mapping = self.mapped_files()
-        snap_paths: set[str] = set()
+        snap_entries: dict[str, SnapshotEntry] = {}
         snap_files = self.snapshot_files(spec)
-        for rel, asset in self.snapshot_assets(spec).items():
-            mapping[snap_files[rel]] = asset
-            snap_paths.add(snap_files[rel])
+        for rel, entry in self.snapshot_entries(spec).items():
+            mapping[snap_files[rel]] = entry.asset
+            snap_entries[snap_files[rel]] = entry
         for ref in iter_file_refs(spec):
             if ref in mapping:
                 continue
@@ -527,8 +582,17 @@ class Workspace:
         files = []
         for path, asset in sorted(mapping.items()):
             data = (self.root / path).read_bytes()
+            entry = snap_entries.get(path)
             files.append(
-                LocalFile(path, asset, data, sha256_bytes(data), "snapshot" if path in snap_paths else None)
+                LocalFile(
+                    path,
+                    asset,
+                    data,
+                    sha256_bytes(data),
+                    "snapshot" if entry else None,
+                    entry.source_id if entry else None,
+                    entry.display_name if entry else None,
+                )
             )
         return files
 

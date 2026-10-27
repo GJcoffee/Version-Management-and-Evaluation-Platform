@@ -80,6 +80,9 @@ class AssetOut(BaseModel):
     id: str
     kind: str
     name: str
+    display_name: str | None = Field(None, description="来源平台上的原始名称（可含中文），仅用于展示")
+    source_id: str | None = Field(None, description="来源平台上的稳定 ID（快照入库的资产才有）")
+    former_names: list[str] = Field(default_factory=list, description="改名前用过的资产名（最近的在后）")
     description: str | None
     latest_rev: int
     deleted_at: str | None

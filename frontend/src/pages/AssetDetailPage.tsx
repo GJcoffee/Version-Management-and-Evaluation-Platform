@@ -4,6 +4,7 @@ import { Download, FilePlus2, GitCompare, RotateCcw, Trash2 } from 'lucide-react
 import { ApiError } from '@/api/client'
 import { useAsset, useAssetRevisions, useDeleteAsset, useRestoreAsset, useRevision } from '@/api/queries/assets'
 import type { Asset, AssetRevision } from '@/api/types'
+import { AssetIdentity } from '@/components/AssetIdentity'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { CodeEditor } from '@/components/ui/CodeEditor'
@@ -15,7 +16,7 @@ import { RelativeTime } from '@/components/ui/RelativeTime'
 import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
-import { ASSET_KIND_LABEL, SNAPSHOT_READONLY_NOTE, isSnapshotAsset } from '@/lib/assetRef'
+import { ASSET_KIND_LABEL, SNAPSHOT_READONLY_NOTE, assetTitle, isSnapshotAsset } from '@/lib/assetRef'
 import { cn } from '@/lib/cn'
 import { formatBytes } from '@/lib/format'
 import { toast } from '@/stores/toast'
@@ -91,7 +92,7 @@ function AssetDetail({ asset }: { asset: Asset }) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="font-mono text-lg font-semibold">{asset.name}</h1>
+            <h1 className="font-mono text-lg font-semibold">{assetTitle(asset)}</h1>
             <Badge variant="info">{ASSET_KIND_LABEL[asset.kind]}</Badge>
             <Badge variant="outline" className="font-mono">
               当前 r{asset.latest_rev}
@@ -99,6 +100,14 @@ function AssetDetail({ asset }: { asset: Asset }) {
             {deleted && <Badge variant="danger">已删除</Badge>}
             {readonly && <Badge variant="secondary">只读</Badge>}
           </div>
+          <p className="mt-0.5">
+            <AssetIdentity asset={asset} className="" />
+          </p>
+          {asset.former_names.length > 0 && (
+            <p className="mt-1 text-xs text-muted-foreground" data-testid="former-names">
+              曾用名：<span className="font-mono">{asset.former_names.join('、')}</span>（改名后修订历史保留）
+            </p>
+          )}
           {asset.description && <p className="mt-1 text-sm text-muted-foreground">{asset.description}</p>}
           {readonly && (
             <p className="mt-1 text-sm text-muted-foreground" data-testid="readonly-note">

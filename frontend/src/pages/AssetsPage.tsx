@@ -4,6 +4,7 @@ import { Library, Plus, Search } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import { useAssets } from '@/api/queries/assets'
 import type { Asset, AssetKind } from '@/api/types'
+import { AssetIdentity } from '@/components/AssetIdentity'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -12,7 +13,7 @@ import { RelativeTime } from '@/components/ui/RelativeTime'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/Tabs'
-import { ASSET_KINDS, ASSET_KIND_LABEL, isSnapshotAsset } from '@/lib/assetRef'
+import { ASSET_KINDS, ASSET_KIND_LABEL, assetTitle, isSnapshotAsset } from '@/lib/assetRef'
 import { formatBytes } from '@/lib/format'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { CreateAssetDialog } from './assets/CreateAssetDialog'
@@ -115,8 +116,9 @@ export default function AssetsPage() {
                 <TableRow key={a.id} className={a.deleted_at ? 'opacity-60' : undefined}>
                   <TableCell>
                     <Link to={`/assets/${a.id}`} className="font-mono text-sm font-medium hover:underline">
-                      {a.name}
+                      {assetTitle(a)}
                     </Link>
+                    <AssetIdentity asset={a} />
                     {a.deleted_at && (
                       <Badge variant="danger" className="ml-2">
                         已删除

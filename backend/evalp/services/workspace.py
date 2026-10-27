@@ -23,6 +23,7 @@ from evalp.logging import get_logger
 from evalp.schemas.agent import PullIn, PullOut, PushIn, PushOut, WorkspaceFile
 from evalp.services.agent import AgentService, check_draft_spec, minimal_spec
 from evalp.services.asset import AssetService
+from evalp.services.conventions import check_push
 from evalp.services.convert import draft_out
 from evalp.services.draft import DraftService, conflict_error
 from evalp.spec.diff import diff_specs
@@ -163,6 +164,7 @@ class WorkspaceService:
         keys: dict[str, WorkspaceFile] = {}
         mapping: dict[str, str] = {}
         seen_assets: set[str] = set()
+        seen_sources: set[tuple[str, str]] = set()
         for f in body.files:
             try:
                 parse_asset_key(f.asset)
@@ -176,6 +178,14 @@ class WorkspaceService:
                     f"files 中存在重复的路径或资产: {f.path} / {f.asset}",
                     {"errors": [{"path": f.path, "message": "路径或资产重复"}]},
                 )
+            if f.source_id is not None:
+                source = (parse_asset_key(f.asset)[0], f.source_id)
+                if source in seen_sources:
+                    raise ValidationFailed(
+                        f"files 中有两个文件的来源 ID 相同（{source[0]} 类型，id={f.source_id}）: {f.path}",
+                        {"errors": [{"path": f.path, "message": "来源 ID 重复"}]},
+                    )
+                seen_sources.add(source)
             keys[p] = f
             seen_assets.add(f.asset)
             mapping[p] = f.asset
@@ -211,6 +221,7 @@ class WorkspaceService:
                     {"errors": [{"path": "agent_kind", "message": f"应为 {agent.kind}"}]},
                 )
             new_spec = check_draft_spec(new_spec, agent.kind)
+            check_push(agent, new_spec)
             draft = None if agent_created else await DraftService.find_by_name(s, agent.id, body.draft_name)
             if draft is not None and not body.force and body.expected_revision != draft.revision:
                 local_diff = await diff_specs(draft.spec, new_spec)
@@ -219,7 +230,17 @@ class WorkspaceService:
             # --- 3. 资产修订
             for path, f in keys.items():
                 kind, name = parse_asset_key(f.asset)
-                asset, created = await assets.get_or_create_asset(s, kind, name)
+                renamed_from = None
+                if f.source_id is not None:
+                    asset, created, renamed_from = await assets.get_or_create_by_source(
+                        s, kind, name, f.source_id, f.display_name
+                    )
+                else:
+                    asset, created = await assets.get_or_create_asset(s, kind, name)
+                    if f.display_name is not None:
+                        asset.display_name = f.display_name
+                if f.origin != "snapshot" and not created:
+                    await assets.ensure_writable(s, asset)  # 非快照的写入不能改 snapshot_readonly 的快照资产
                 head = (
                     await s.execute(
                         select(AssetRevision).where(
@@ -228,6 +249,8 @@ class WorkspaceService:
                     )
                 ).scalar_one_or_none()
                 info = {"path": f.path, "asset": f.asset, "hash": f.hash}
+                if renamed_from is not None:
+                    info["renamed_from"] = f"{kind}/{renamed_from}"
                 try:
                     if f.content is not None:
                         data = decode_file(f)

@@ -151,16 +151,13 @@ async def publish(
     tag: str | None = None,
     via: str = "cli",
 ) -> PublishResult:
-    """先 push 再发布；``tag`` 非空时把标签指向该版本。"""
+    """先 push 再发布；``tag`` 非空时随发布请求一并给出，由服务端与创建版本原子完成。"""
     pushed = await ws.push(client)
     out = await client.post(
         f"/drafts/{pushed.draft_id}/publish",
-        {"expected_revision": pushed.revision, "notes": notes, "via": via},
+        {"expected_revision": pushed.revision, "notes": notes, "via": via, "tag": tag},
     )
     version, existed = out["version"], bool(out.get("existed"))
-    if tag:
-        await client.post(f"/versions/{version['id']}/tags", {"tag": tag})
-        version["tags"] = sorted({*(version.get("tags") or []), tag})
     diff = None
     parent = version.get("parent_version_id")
     if parent and not existed:

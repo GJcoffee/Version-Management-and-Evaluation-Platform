@@ -292,6 +292,18 @@ export interface AgentLatestVersion {
   created_at: ISODateTime
 }
 
+/** agent 的发布 / 推送规范：由服务端对所有入口（CLI、MCP、网页、HTTP API）一致地强制 */
+export interface Conventions {
+  /** params 里的参数名（如 hiagent_version）：发布必须带标签 v{params.<参数>}，且标签不能已存在 */
+  tag_from_param: string | null
+  /** 发布说明必填 */
+  require_notes: boolean
+  /** 快照 map 中这些类型的规则必须配置 id */
+  require_source_id: AssetKind[]
+  /** 来自快照的资产只允许快照推送写入 */
+  snapshot_readonly: boolean
+}
+
 export interface Agent {
   id: string
   name: string
@@ -303,6 +315,7 @@ export interface Agent {
   latest_version: AgentLatestVersion | null
   /** 该 agent 全部版本标签的名称（按字典序） */
   tags: string[]
+  conventions: Conventions
 }
 
 export interface AgentCreate {
@@ -316,6 +329,8 @@ export interface AgentUpdate {
   name?: string
   description?: string
   archived?: boolean
+  /** 整体替换 */
+  conventions?: Conventions
 }
 
 export interface Draft {
@@ -366,6 +381,10 @@ export interface VersionAssetItem {
   asset_id: string
   kind: AssetKind
   name: string
+  /** 来源平台上的原始名称（可含中文） */
+  display_name: string | null
+  /** 来源平台上的稳定 ID */
+  source_id: string | null
   rev: number
   asset_revision_id: string
   /** Spec 中引用它的位置（身份键路径） */
@@ -408,6 +427,8 @@ export interface PublishResult {
 export interface PublishRequest {
   expected_revision: number
   notes?: string
+  /** 与创建版本原子完成；agent 开启 tag_from_param 规范时必填且必须等于 v{params.<参数>} */
+  tag?: string
   via?: CreatedVia
 }
 
@@ -426,8 +447,8 @@ export interface SpecChange {
    */
   path: string
   op: DiffOp
-  /** asset_changed 时给出资产的类型与名称（add / remove 的 left / right 里有 kind、name、rev） */
-  asset?: { kind: AssetKind; name: string }
+  /** asset_changed 时给出资产的类型与名称（add / remove 的 left / right 里有 kind、name、rev）；改过名的有 renamed_from（旧名） */
+  asset?: { kind: AssetKind; name: string; renamed_from?: string }
   left?: unknown
   right?: unknown
   content_diff?: ContentDiff
@@ -495,6 +516,12 @@ export interface Asset {
   kind: AssetKind
   /** 小写字母、数字、连字符 */
   name: string
+  /** 来源平台上的原始名称（可含中文），仅用于展示 */
+  display_name: string | null
+  /** 来源平台上的稳定 ID（快照入库的资产才有） */
+  source_id: string | null
+  /** 改名前用过的资产名 */
+  former_names: string[]
   description: string | null
   /** 当前生效的修订号（不一定等于最大修订号） */
   latest_rev: number

@@ -62,7 +62,7 @@ MCP Server 是 `evalp mcp`，用 stdio 传输。**工作目录就是 agent 项�
 claude mcp add evalp -- evalp mcp
 ```
 
-首次使用时 Claude Code 会询问是否信任该项目的 MCP Server，选择允许。在会话里用 `/mcp` 可以看到 `evalp` 及其 19 个工具。
+首次使用时 Claude Code 会询问是否信任该项目的 MCP Server，选择允许。在会话里用 `/mcp` 可以看到 `evalp` 及其 20 个工具。
 
 如果 `evalp` 不在 PATH 中，写绝对路径（例如 `"/home/me/evalp/.venv/bin/evalp"`）。
 如果服务使用了非默认数据目录，加上环境变量：
@@ -105,7 +105,8 @@ Cursor 不一定在项目目录启动 MCP 进程，所以用 `--project-dir` 显
 |---|---|---|
 | `push_draft` | `force?` | 把本地 `agent.yaml` 和有变化的 prompt / 工具 / 数据集推送到草稿；返回上传的文件、草稿 revision、校验结果。服务端草稿被改过时报冲突（附差异），`force=true` 覆盖 |
 | `pull_draft` | `force?` | 拉取服务端草稿（比如有人在 Web UI 里改过），写回本地文件。本地有未推送的修改时拒绝覆盖，除非 `force` |
-| `publish_version` | `notes?`、`tag?` | 先 push 再发布；返回版本号、是否已存在（内容相同不会新建）、相对父版本的变更摘要 |
+| `get_conventions` | `agent?` | agent 生效的**发布规范**（服务端强制）和快照 `map` 规则说明；当前项目的规则里缺 `id` 的会被标出。**发布、推送前先调用**（MCP 服务说明里也写了这一点） |
+| `publish_version` | `notes?`、`tag?` | 先 push 再发布（标签与版本在服务端原子创建）；返回版本号、是否已存在（内容相同不会新建）、相对父版本的变更摘要。违反规范时返回服务端的中文说明 |
 | `list_versions` | `agent?`、`limit?` | 版本列表：版本号、标签、时间、来源、备注 |
 | `diff_versions` | `left`、`right`、`agent?`、`max_lines?` | 两个版本的变更列表 + 文本 diff（默认截断到 200 行）。版本可写 `v3`、标签或版本 id |
 | `chat` | `message`、`version?`、`session_id?`、`agent?` | 和某个已发布版本对话一轮；返回回复、工具调用摘要、`session_id`（继续对话时传回） |
@@ -117,7 +118,7 @@ Cursor 不一定在项目目录启动 MCP 进程，所以用 `--project-dir` 显
 | `get_draft` | `agent?` | 服务端草稿的 YAML、revision 和相对基础版本的变更摘要 |
 | `update_draft` | `patch`、`expected_revision`、`agent?` | 对**服务端草稿**应用 JSON Merge Patch（`null` 删除键，数组整体替换）；返回新 revision 和校验结果。不改本地文件，之后用 `pull_draft` 同步，否则下次 `push_draft` 会报冲突 |
 | `list_assets` | `kind?`、`q?`、`limit?` | 资产列表：最新修订、大小、说明 |
-| `upsert_asset` | `kind`、`name`、`content` 或 `path`、`message?` | 创建资产或新增修订（内容相同则不新增）；`path` 是项目目录内的文件，大文件 / 二进制自动走上传 |
+| `upsert_asset` | `kind`、`name`、`content` 或 `path`、`message?` | 创建资产或新增修订（内容相同则不新增）；`path` 是项目目录内的文件，大文件 / 二进制自动走上传。agent 开启 `snapshot_readonly` 时，来自快照的资产会被拒绝 |
 | `import_dataset` | `name`、`path`、`format?`、`column_map?` | 把项目目录内的 JSONL / CSV 导入为数据集（同名则新增修订）；返回用例数、引用和解析警告 |
 | `get_session` | `session_id`、`turn?`、`detail?` | 会话记录：每轮的输入、回复、工具调用、耗时与 tokens（摘要最多 30 轮）；指定 `turn` 展开该轮，`detail="full"` 再列出 trace 步骤 |
 | `replay_session` | `session_id`、`target_version`、`mode?`、`turns?`、`wait?` | 用另一个版本重放历史会话；`mode` 为 `anchored`（锚定，默认：每轮的上下文用原会话的历史，各轮并发）或 `free`（自由：新版本用自己的回复续写上下文，逐轮串行，更慢）；`wait` 默认 true，等重放结束后给出逐轮对比摘要 |
@@ -125,6 +126,9 @@ Cursor 不一定在项目目录启动 MCP 进程，所以用 `--project-dir` 显
 
 约定：
 
+- **发布规范**：按 agent 配置，存在服务端（不在 `agent.yaml`，只能在 Web UI 的 agent 设置或 `evalp agent conventions set` 里改），服务端对 MCP / CLI / 网页 / HTTP 一致地强制。
+  `get_conventions` 告诉助手有哪些规范：标签必须取自 `params`（如 `hiagent_version` -> `v0.5.3`）、发布说明必填、快照 `map` 的 skill / mcp 规则必须配 `id`、快照资产只读。
+  被拒绝（`CONVENTION_VIOLATION`）时工具返回服务端的中文说明（违反了哪条、怎么改），助手照着改后重试，不要绕过。详见 [hiagent-接入指南](hiagent-接入指南.md)「发布规范」；
 - `dataset` 可以写数据集名称（`support-regression`）、`dataset/support-regression@3` 或修订 id；
 - `evaluators` 省略时读取 `[eval].evaluators`，再省略则读项目根目录的 `evals.yaml`，也可以传评估器对象列表；
 - `versions` 省略时评测最新版本；给了 `baseline` 时每个版本都与基线对比，基线在对比的左侧；
@@ -205,6 +209,7 @@ versions = ["latest"]                    # 默认评测哪些版本
 | 工具返回"自动启动 EvalP 服务失败" | 按提示查看数据目录下的 `mcp-autostart.log`（常见原因：端口被其他程序占用），或手动运行 `evalp serve` 排查 |
 | "找不到 API token" | MCP 进程读不到服务的数据目录：在 `env` 里设置 `EVALP_DATA_DIR`，或给 `evalp mcp` 加 `--data-dir` |
 | "当前工作目录不是 agent 项目" | 在项目根目录启动，或加 `--project-dir`（Cursor 用 `${workspaceFolder}`） |
+| 发布 / 推送被拒绝，提示“agent「…」的发布规范不允许这次发布” | 违反了 agent 的发布规范：按提示补上标签 / 说明 / 快照规则的 `id`，先调用 `get_conventions` 查看规范；需要调整规范时在 Web UI 的 agent 设置里改 |
 | 草稿校验未通过（Provider 不存在等） | 按提示在 Web UI「设置」登记 Provider，或修改 `agent.yaml`；校验失败时 `publish_version` 会被拒绝 |
 | 客户端里看不到工具 | 在终端运行 `evalp mcp --help` 确认命令可用；Claude Code 用 `/mcp` 查看连接状态和错误 |
 

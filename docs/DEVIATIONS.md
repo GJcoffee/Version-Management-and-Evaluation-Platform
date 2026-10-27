@@ -470,3 +470,22 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 `asset_changed` 增加 `asset: {kind, name}`；diff 的 `TEXT_KINDS` 改为 `NON_TEXT_KINDS = (dataset,)`（除数据集外都按文本比较）。
 只读标记：快照入库的修订在 `asset_revisions.meta.origin = "snapshot"`（`workspace/push` 的 `files[].origin` 写入），只有前端据此隐藏编辑入口，后端不拦截。
 新增接口 `GET /versions/{ref}/assets`（版本绑定的资产及其最近一次变化所在版本）；Agent 详情页新增「资产」标签并成为默认标签。
+
+## 发布规范与资产来源身份 — agents.conventions、assets.source_id 等（迁移 0005）
+
+背景：发布和存资产的入口有 CLI、MCP、网页、HTTP API，常由 AI 编码助手操作，会出现资产名难看且与 HiAgent 原 skill 对不上、同一 skill 改名又存成新资产、版本标签随意。详设 3.3 / 5 / 10 没有对应机制，新增（迁移 0005，只加列和约束，降级删除）：
+
+- **`agents.conventions`**（JSON，默认 `{}`）：`tag_from_param` / `require_notes` / `require_source_id` / `snapshot_readonly`，含义见 docs/api.md §2「发布规范」与 docs/hiagent-接入指南.md。
+  规范**按 agent 配置存在服务端**（不放 `agent.yaml`，发布方无法自己删掉绕过），只能经 `PATCH /agents/{ref}`（整体替换）、网页 agent 设置的「规范」标签或 `evalp agent conventions show|set` 修改；
+  由服务端在发布（`DraftService.publish`）、工作区推送（`WorkspaceService.push`）和资产写入（`AssetService.ensure_writable`）处统一校验（`services/conventions.py`），所以对所有入口一致。
+  新增错误码 `CONVENTION_VIOLATION`（400；标签重复、写入只读快照资产为 409），`message` 为中文说明，`details.violations` 为结构化列表；不进入详设 11.2 的 `ERROR_CLASSES`（同 `CONFLICT` 等通用码）。
+  取舍：`snapshot_readonly` 是 agent 级配置而资产是全局的，所以“资产属于哪个 agent”按引用判断——最新修订 `origin=snapshot` 且被开启该规范的 agent 引用（版本或草稿）；
+  `tag_from_param` 只约束发布，事后手动 `POST /versions/{ref}/tags` 补充别名标签不受限；内容相同的重复发布（返回已有版本）且标签已指向该版本不算重复。
+- **发布请求支持 `tag`**（`PublishIn.tag`）：标签与创建版本在同一事务内完成。`evalp publish --tag` 与 MCP `publish_version` 改为走这个参数，不再发布后另调打标签接口；网页发布对话框同理。
+- **`assets.source_id`**（可空，`(kind, source_id)` 唯一）、**`assets.display_name`**（来源平台上的原始名称，可含中文）、**`assets.meta`**（JSON，目前只有改名后保留的旧名 `former_names`）。
+  `SnapshotRule` 新增可选 `id`，`name` / `id` 以 `$.` 开头时从 JSON 文件内容按点路径取值；`id` 为空时不出现在规范化结果里，旧快照版本的 `spec_hash` 不变。
+  推送带 `source_id` 时按 `(kind, source_id)` 找资产，名字不同则**原地改名**（`assets.name` 更新，资产 id 与全部修订不变，旧名追加到 `meta.former_names`），不是新建后迁移；
+  旧名在 `lookup_revision` 里仍可解析（现用名优先），所以回滚到旧版本不会因改名失败。新名字被另一个资产占用时 409 `ASSET_NAME_CONFLICT`，不合并。
+  版本 diff 的改名识别：固化引用里只有资产名，所以 `VersionService.diff` 用右侧新出现的资产的 `former_names` 对照左侧消失的名字，得到 `renames` 传给 `diff_specs`；
+  左侧的旧名先换成新名（带 `renamed_from`）再按身份匹配，输出 `asset_changed`，`asset.renamed_from` 为旧名（内容没变也输出）。
+- MCP 新增 `get_conventions`（共 20 个工具），MCP 服务说明写明“发布、推送前先调用 get_conventions”。

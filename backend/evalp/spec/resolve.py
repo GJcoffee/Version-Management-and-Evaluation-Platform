@@ -24,7 +24,7 @@ from evalp.spec.refs import (
     pin_to_ref,
 )
 from evalp.store.models import Asset, AssetRevision
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -67,11 +67,26 @@ def astuple_of(r: ResolvedAsset) -> tuple[Any, ...]:
     return (r.kind, r.name, r.rev, r.hash, r.revision_id, r.asset_id)
 
 
+def has_former_name(name: str) -> ColumnElement[bool]:
+    """资产改名前用过这个名字（``assets.meta.former_names`` 里有）的查询条件。"""
+    names = func.json_each(Asset.meta, "$.former_names").table_valued("value")
+    return exists().where(names.c.value == name).correlate(Asset)
+
+
 async def lookup_revision(s: AsyncSession, ref: AssetRef) -> tuple[Asset, AssetRevision]:
-    """按引用查找资产与修订；资产不存在、已软删除或修订不存在时抛 SpecInvalid。"""
+    """按引用查找资产与修订；资产不存在、已软删除或修订不存在时抛 SpecInvalid。
+
+    资产改过名时，旧版本里固化的旧名字仍能找到它（现用名优先）。
+    """
     asset = (
         await s.execute(select(Asset).where(Asset.kind == ref.kind, Asset.name == ref.name))
     ).scalar_one_or_none()
+    if asset is None:
+        asset = (
+            (await s.execute(select(Asset).where(Asset.kind == ref.kind, has_former_name(ref.name))))
+            .scalars()
+            .first()
+        )
     if asset is None:
         raise SpecInvalid(f"资产不存在: {ref.kind}/{ref.name}", {"ref": str(ref)})
     if asset.deleted_at is not None:

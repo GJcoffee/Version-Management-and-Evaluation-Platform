@@ -19,6 +19,7 @@ const agent = (kind: Agent['kind']): Agent => ({
   updated_at: '',
   latest_version: null,
   tags: [],
+  conventions: { tag_from_param: null, require_notes: false, require_source_id: [], snapshot_readonly: false },
 })
 const ver = (seq: number, tags: string[] = []): VersionSummary => ({
   id: `ver_${seq}`,
@@ -37,6 +38,8 @@ const asset = (kind: VersionAssetItem['kind'], name: string, over: Partial<Versi
   asset_id: `ast_${name}`,
   kind,
   name,
+  display_name: null,
+  source_id: null,
   rev: 1,
   asset_revision_id: `arv_${name}`,
   spec_paths: [],
@@ -94,6 +97,29 @@ describe('AssetsTab', () => {
     expect(screen.getByText(/来自 agent 快照（只读），请在源平台修改后重新发布/)).toBeInTheDocument()
     // 代码型 agent 没有草稿编辑入口
     expect(screen.queryByRole('button', { name: /在草稿中编辑/ })).not.toBeInTheDocument()
+  })
+
+  it('有来源信息的资产显示原始名称（可含中文）、资产名与来源 ID', async () => {
+    const versions = [ver(1)]
+    mockApi({
+      'GET /api/v1/versions/ver_1/assets': {
+        version: versions[0],
+        items: [asset('skill', 'crawl-engine', { display_name: '爬虫引擎', source_id: 'sk_123' })],
+      },
+    })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <AssetsTab agent={agent('code')} versions={versions} onEditDraft={vi.fn()} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    const link = await screen.findByRole('link', { name: '爬虫引擎' })
+    expect(link).toHaveAttribute('href', '/assets/ast_crawl-engine?rev=1')
+    const identity = screen.getByTestId('asset-identity')
+    expect(identity).toHaveTextContent('crawl-engine')
+    expect(identity).toHaveTextContent('ID sk_123')
   })
 
   it('切换版本后显示该版本绑定的资产', async () => {

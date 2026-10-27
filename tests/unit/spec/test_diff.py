@@ -277,3 +277,30 @@ async def test_identity_paths_equal_diff_paths():
 def test_identity_paths_fall_back_to_index_when_keys_duplicate():
     s = spec(knowledge={"inject": [pin("knowledge", "faq", 1, "c"), pin("knowledge", "faq", 2, "d")]})
     assert identity_paths(s)["knowledge.inject[1]"] == "knowledge.inject[1]"
+
+
+async def test_renamed_asset_is_matched_by_identity_and_reported_even_if_content_is_unchanged():
+    def snap(name, rev, h):
+        return spec(snapshot={"dir": "d", "files": {"skills/a.json": pin("skill", name, rev, h)}})
+
+    renames = {("skill", "old-name"): "new-name"}
+    # 内容变了：asset_changed，asset 里带旧名，并附文本 diff
+    texts = {"a" * 64: '{"v": 1}', "b" * 64: '{"v": 2}'}
+
+    async def load_text(p):
+        return texts[p["hash"]]
+
+    r = await diff_specs(snap("old-name", 3, "a"), snap("new-name", 4, "b"), load_text, renames)
+    (c,) = r["changes"]
+    assert c["op"] == "asset_changed" and c["path"] == "snapshot.files[skill/new-name]"
+    assert c["asset"] == {"kind": "skill", "name": "new-name", "renamed_from": "old-name"}
+    assert c["left"] == {"rev": 3} and c["right"] == {"rev": 4}
+    assert '-{"v": 1}' in c["content_diff"]["text"] and '+{"v": 2}' in c["content_diff"]["text"]
+    # 只改名、内容没变：仍然报告（没有文本 diff）
+    r = await diff_specs(snap("old-name", 1, "a"), snap("new-name", 1, "a"), load_text, renames)
+    (c,) = r["changes"]
+    assert c["op"] == "asset_changed" and c["asset"]["renamed_from"] == "old-name"
+    assert c["left"] == c["right"] == {"rev": 1} and "content_diff" not in c
+    # 不传 renames：按名字匹配，旧名删除 + 新名新增
+    r = await diff_specs(snap("old-name", 1, "a"), snap("new-name", 1, "a"))
+    assert {c["op"] for c in r["changes"]} == {"add", "remove"}

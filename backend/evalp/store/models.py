@@ -79,6 +79,8 @@ class Agent(Base):
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     archived: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"), default=0)
+    # 发布 / 推送规范（services/conventions.py 的 Conventions）；只能通过 agent 设置修改，不放 agent.yaml
+    conventions: Mapped[dict[str, Any]] = _json_col("{}")
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -159,11 +161,17 @@ class Asset(Base):
             name="kind",
         ),
         UniqueConstraint("kind", "name", name="uq_assets_kind_name"),
+        UniqueConstraint("kind", "source_id", name="uq_assets_kind_source_id"),
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)  # 小写字母、数字、连字符
+    display_name: Mapped[str | None] = mapped_column(Text)  # 来源平台上的原始名称（可含中文），仅用于展示
+    source_id: Mapped[str | None] = mapped_column(
+        Text
+    )  # 来源平台上的稳定 ID；(kind, source_id) 唯一，用于识别改名
+    meta: Mapped[dict[str, Any]] = _json_col("{}")  # {former_names: [旧资产名…]}（改名后保留）
     description: Mapped[str | None] = mapped_column(Text)
     latest_rev: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"), default=0)
     deleted_at: Mapped[str | None] = mapped_column(Text)  # 软删除

@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from evalp.spec.refs import AssetKindName
+
 NAME_RE = re.compile(r"^[\w][\w.-]{0,63}$")
 TAG_RE = re.compile(r"^[A-Za-z0-9][\w.-]{0,63}$")
 ViaType = Literal["ui", "cli", "mcp", "api"]
@@ -42,12 +44,43 @@ class AgentCreate(BaseModel):
     _v_name = field_validator("name")(check_agent_name)
 
 
+class Conventions(BaseModel):
+    """agent 的发布 / 推送规范：由服务端对所有入口（CLI、MCP、网页、HTTP API）一致地强制。
+
+    存在服务端 agent 记录上（不放 agent.yaml，避免发布方自己删掉绕过），只能通过 agent 设置修改。
+    默认值即"没有任何约束"。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tag_from_param: str | None = Field(
+        None,
+        min_length=1,
+        description="params 里的参数名（如 hiagent_version）：开启后发布必须带标签，"
+        "且标签必须等于 v{params.<参数>}，同一标签已存在于该 agent 时拒绝",
+    )
+    require_notes: bool = Field(False, description="发布说明必填")
+    require_source_id: list[AssetKindName] = Field(
+        default_factory=list,
+        description="资产类型列表：快照 map 中这些类型的规则必须配置 id（来源 ID），否则拒绝推送 / 发布",
+    )
+    snapshot_readonly: bool = Field(
+        False, description="来自快照（origin=snapshot）的资产只允许快照推送写入，其他写入一律拒绝"
+    )
+
+    @field_validator("require_source_id")
+    @classmethod
+    def _dedupe(cls, v: list[str]) -> list[str]:
+        return list(dict.fromkeys(v))
+
+
 class AgentUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
     description: str | None = None
     archived: bool | None = None
+    conventions: Conventions | None = Field(None, description="发布 / 推送规范（整体替换）")
 
     @field_validator("name")
     @classmethod
@@ -72,6 +105,7 @@ class AgentOut(BaseModel):
     updated_at: str
     latest_version: VersionBrief | None = None
     tags: list[str] = Field(default_factory=list, description="该 agent 全部版本标签的名称（按字典序）")
+    conventions: Conventions = Field(default_factory=Conventions, description="发布 / 推送规范")
 
 
 # ---------------------------------------------------------------- 草稿
@@ -123,6 +157,12 @@ class PublishIn(BaseModel):
     expected_revision: int = Field(ge=1)
     notes: str | None = None
     via: ViaType = "api"
+    tag: str | None = Field(None, description="发布时一并给出标签（与创建版本原子完成）")
+
+    @field_validator("tag")
+    @classmethod
+    def _tag(cls, v: str | None) -> str | None:
+        return None if v is None else check_tag(v)
 
 
 # ---------------------------------------------------------------- 版本
@@ -159,6 +199,8 @@ class VersionAssetItem(BaseModel):
     rev: int
     asset_revision_id: str
     spec_paths: list[str] = Field(description="Spec 中引用它的位置（身份键路径）")
+    display_name: str | None = Field(None, description="来源平台上的原始名称（可含中文）")
+    source_id: str | None = Field(None, description="来源平台上的稳定 ID")
     origin: str | None = Field(None, description="修订的来源；snapshot 表示来自 agent 快照（只读）")
     changed_in_seq: int = Field(description="该修订最近一次变化发生在哪个版本（连续使用同一修订的最早版本）")
     changed_in_version_id: str
@@ -225,6 +267,10 @@ class WorkspaceFile(BaseModel):
     origin: Literal["snapshot"] | None = Field(
         None, description="来源：snapshot 表示来自 agent 快照（只读），写入修订的 meta.origin"
     )
+    source_id: str | None = Field(
+        None, min_length=1, description="来源平台上的稳定 ID：按它识别同一个资产，名字变了就自动改名"
+    )
+    display_name: str | None = Field(None, description="来源平台上的原始名称（可含中文），仅用于展示")
 
 
 class PushIn(BaseModel):
