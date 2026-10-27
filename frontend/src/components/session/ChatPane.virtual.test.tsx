@@ -1,17 +1,26 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { ChatPane, VIRTUALIZE_THRESHOLD } from './ChatPane'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { createRef } from 'react'
+import { ChatPane, VIRTUALIZE_THRESHOLD, type ChatPaneHandle } from './ChatPane'
 import { buildSessionState } from './sessionState'
 import { mk, toolTurnEvents } from './testEvents'
 
 const VIEWPORT = 600
 const TURN_H = 200
 
-// jsdom 没有布局：用 clientHeight 模拟滚动容器（600px），offsetHeight 模拟每个轮次（200px）
+const FOLDED_H = 40
+
+// jsdom 没有布局：用 clientHeight 模拟滚动容器（600px），offsetHeight 模拟每个轮次（200px，折叠后只剩标题行 40px）
 beforeAll(() => {
-  Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: true, get: () => TURN_H })
+  Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+    configurable: true,
+    get(this: HTMLElement) {
+      const folded = this.querySelector('[data-testid="turn-header"]') && !this.querySelector('[data-testid="user-message"]')
+      return folded ? FOLDED_H : TURN_H
+    },
+  })
   Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => VIEWPORT })
   Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 800 })
 })
@@ -92,7 +101,7 @@ describe('ChatPane 虚拟滚动', () => {
     rerender(wrap(<ChatPane turns={manyTurns(301)} />))
     expect(pane.scrollTop).toBe(total())
     fireScroll()
-    expect(await screen.findByText('问题 301')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByTestId('user-message').at(-1)).toHaveTextContent('问题 301'))
     // 滚动到底后没有「回到底部」按钮
     expect(screen.queryByRole('button', { name: '回到底部' })).toBeNull()
     rerender(wrap(<ChatPane turns={manyTurns(302)} />))
@@ -142,5 +151,45 @@ describe('ChatPane 虚拟滚动', () => {
     expect(within(card).getByText('参数')).toBeInTheDocument()
     await userEvent.click(screen.getAllByTestId('select-turn').at(-1)!)
     expect(picked.at(-1)).toBe('trn_t')
+  })
+
+  it('折叠后高度变化会重新测量：相邻轮次的间距从 200 变为 40', async () => {
+    render(wrap(<ChatPane turns={manyTurns(300)} />))
+    await screen.findAllByTestId('turn-header')
+    /** 当前挂载的前两个轮次包装层的起点之差 = 第一个轮次的高度 */
+    const lastGap = () => {
+      const tops = Array.from(screen.getByTestId('chat-virtual').querySelectorAll<HTMLElement>('[data-index]')).map((el) =>
+        parseInt(/translateY\((-?\d+)px\)/.exec(el.style.transform)![1], 10),
+      )
+      return tops[1] - tops[0]
+    }
+    expect(lastGap()).toBe(TURN_H)
+    await userEvent.click(screen.getByRole('button', { name: '全部折叠' }))
+    await waitFor(() => expect(lastGap()).toBe(FOLDED_H))
+    expect(screen.queryByTestId('user-message')).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: '全部展开' }))
+    await waitFor(() => expect(lastGap()).toBe(TURN_H))
+  })
+
+  it('scrollToTurn 用 virtualizer 滚到目标轮次，已折叠的先展开', async () => {
+    const ref = createRef<ChatPaneHandle>()
+    render(wrap(<ChatPane ref={ref} turns={manyTurns(400)} />))
+    const { pane, fireScroll } = setupPane()
+    const scrollTo = vi.fn()
+    pane.scrollTo = scrollTo as unknown as typeof pane.scrollTo
+    await userEvent.click(screen.getByRole('button', { name: '全部折叠' }))
+    act(() => ref.current!.scrollToTurn('trn_100'))
+    expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: expect.any(Number) }))
+    const top = (scrollTo.mock.calls.at(-1)![0] as { top: number }).top
+    // 目标是第 100 轮：位置落在前 99 轮（每轮至少 FOLDED_H + 间隙）之后、不会超过按估算高度算的上界
+    expect(top).toBeGreaterThan(0)
+    expect(top).toBeLessThanOrEqual(99 * 284)
+    // 模拟浏览器完成滚动：目标轮次进入视野，且只有它被展开，其余仍折叠
+    pane.scrollTop = top
+    fireScroll()
+    await screen.findAllByText('问题 100')
+    const expanded = screen.getAllByTestId('user-message')
+    expect(expanded).toHaveLength(1)
+    expect(expanded[0].closest('[data-testid="turn"]')).toHaveAttribute('data-turn-id', 'trn_100')
   })
 })

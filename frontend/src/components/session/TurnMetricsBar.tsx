@@ -22,14 +22,17 @@ export function turnElapsedMs(turn: Pick<TurnState, 'metrics' | 'startedAt' | 'e
   return Number.isNaN(t) ? null : Math.max(0, now - t)
 }
 
-/** 每一轮底部的指标条：tokens、耗时、TTFT、成本、LLM 调用次数、工具调用次数 */
+/** 每一轮底部的指标条（折叠标题行上也复用同一组指标）：tokens、耗时、TTFT、成本、LLM 调用次数、工具调用次数 */
 export function TurnMetricsBar({
   turn,
   className,
+  testId = 'turn-metrics',
   children,
 }: {
   turn: Pick<TurnState, 'metrics' | 'startedAt' | 'ended'>
   className?: string
+  /** 同一轮里出现两次（标题行 + 底部指标条）时，用不同的 testid 区分 */
+  testId?: string
   /** 右侧附加内容（例如“查看 Trace”按钮） */
   children?: ReactNode
 }) {
@@ -39,7 +42,7 @@ export function TurnMetricsBar({
   const elapsed = turnElapsedMs(turn, now)
   return (
     <div
-      data-testid="turn-metrics"
+      data-testid={testId}
       className={cn('flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground', className)}
     >
       <Item

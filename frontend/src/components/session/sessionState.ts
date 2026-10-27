@@ -239,6 +239,12 @@ export function messageText(m: Message | null | undefined): string {
   return c.map((p) => (typeof p.text === 'string' ? p.text : '')).join('')
 }
 
+/** 用户输入的单行摘要（轮次标题行、Trace 轮次下拉用）；输入被转存为 blob 且未加载时给出提示 */
+export function turnInputSummary(turn: Pick<TurnState, 'input' | 'inputBlob'>): string {
+  if (turn.input) return messageText(turn.input).replace(/\s+/g, ' ').trim() || '（空消息）'
+  return turn.inputBlob ? '（输入内容较大，已转存）' : ''
+}
+
 function blobOf(payload: object): string | null {
   const h = (payload as { $blob?: unknown }).$blob
   return typeof h === 'string' ? h : null
@@ -713,6 +719,14 @@ export function totalMetrics(turns: readonly TurnState[]): TotalMetrics {
     acc.latencyMs += t.metrics.latencyMs ?? 0
   }
   return acc
+}
+
+/** 首轮开始到末轮结束的时间跨度（毫秒）；末轮还在运行时为 null */
+export function sessionSpanMs(turns: readonly TurnState[]): number | null {
+  const start = turns[0]?.startedAt
+  const end = turns[turns.length - 1]?.endedAt
+  if (!start || !end) return null
+  return Math.max(0, Date.parse(end) - Date.parse(start))
 }
 
 /**

@@ -1,16 +1,27 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { PanelRightClose, PanelRightOpen, Variable, WifiOff } from 'lucide-react'
+import { ChevronLeft, ChevronRight, PanelRightClose, PanelRightOpen, Variable, WifiOff } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import { sessionKeys, useCancelTurn, useRenameSession, useSendTurn, useSession } from '@/api/queries/sessions'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
+import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { SessionCompareActions } from '@/components/compare/SessionCompareActions'
-import { ChatPane, EditableTitle, MessageInput, TraceViewer, totalMetrics, useSessionStream } from '@/components/session'
+import {
+  ChatPane,
+  EditableTitle,
+  MessageInput,
+  TraceViewer,
+  sessionSpanMs,
+  totalMetrics,
+  turnInputSummary,
+  useSessionStream,
+  type ChatPaneHandle,
+} from '@/components/session'
 import { cn } from '@/lib/cn'
-import { formatCost, formatTokens } from '@/lib/format'
+import { formatCost, formatDuration, formatTokens } from '@/lib/format'
 import { safeGet, safeSet } from '@/lib/safeStorage'
 import { useIsNarrow } from '@/lib/useMediaQuery'
 import { toast } from '@/stores/toast'
@@ -113,6 +124,13 @@ function SessionView({ sessionId }: { sessionId: string }) {
     setSelectedStep(null)
   }, [])
 
+  // 从 Trace 面板切换轮次：对话区跟着滚到那一轮（已折叠则先展开）；在对话区点「查看 Trace」不滚动
+  const chatRef = useRef<ChatPaneHandle>(null)
+  const switchTraceTurn = (turnId: string) => {
+    selectTurn(turnId)
+    chatRef.current!.scrollToTurn(turnId)
+  }
+
   const onSend = async (text: string, opts: { variables?: Record<string, string> }) => {
     try {
       const r = await sendTurn.mutateAsync({ input: text, variables: opts.variables })
@@ -146,7 +164,10 @@ function SessionView({ sessionId }: { sessionId: string }) {
     cost: hasTurns ? totals.cost : (stats.cost ?? 0),
     llm: hasTurns ? totals.llmCalls : (stats.llm_calls ?? 0),
     tools: hasTurns ? totals.toolCalls : (stats.tool_calls ?? 0),
+    // 会话统计里没有用时：回放期间不显示
+    latencyMs: hasTurns ? totals.latencyMs : null,
   }
+  const spanMs = sessionSpanMs(stream.turns)
   const varCount = Object.keys(session.variables ?? {}).length
 
   return (
@@ -190,6 +211,12 @@ function SessionView({ sessionId }: { sessionId: string }) {
         <div className="ml-auto flex flex-wrap items-center justify-end gap-x-3 gap-y-1 font-mono text-xs text-muted-foreground" data-testid="session-metrics">
           <span title="轮数">{metrics.turns} 轮</span>
           <span title="累计 tokens">{formatTokens(metrics.tokens)} tokens</span>
+          <span
+            title={`各轮用时之和${spanMs === null ? '（进行中的轮次不计）' : `；首轮开始到末轮结束共 ${formatDuration(spanMs)}`}`}
+            data-testid="session-latency"
+          >
+            总用时 {formatDuration(metrics.latencyMs)}
+          </span>
           <span title="累计成本">{formatCost(metrics.cost)}</span>
           <span title="LLM 调用 / 工具调用">
             LLM ×{metrics.llm} · 工具 ×{metrics.tools}
@@ -219,6 +246,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
         {/* 左：对话 */}
         <div className="flex min-w-0 flex-1 flex-col">
           <ChatPane
+            ref={chatRef}
             className="flex-1"
             turns={stream.turns}
             sessionId={sessionId}
@@ -260,12 +288,46 @@ function SessionView({ sessionId }: { sessionId: string }) {
             data-testid="trace-panel"
             data-layout={narrow ? 'drawer' : 'side'}
           >
-            <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
+            <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-1.5">
               <span className="text-xs font-semibold">Trace</span>
               {traceTurn ? (
-                <span className="text-xs text-muted-foreground" data-testid="trace-turn">
-                  第 {traceTurnIndex} / {stream.turns.length} 轮
-                </span>
+                <>
+                  <span className="text-xs text-muted-foreground" data-testid="trace-turn">
+                    第 {traceTurnIndex} / {stream.turns.length} 轮
+                  </span>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7"
+                    aria-label="上一轮"
+                    disabled={traceTurnIndex === 1}
+                    onClick={() => switchTraceTurn(stream.turns[traceTurnIndex - 2].id)}
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7"
+                    aria-label="下一轮"
+                    disabled={traceTurnIndex === stream.turns.length}
+                    onClick={() => switchTraceTurn(stream.turns[traceTurnIndex].id)}
+                  >
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </Button>
+                  <Select
+                    aria-label="跳到指定轮次"
+                    className="w-44"
+                    value={traceTurn.id}
+                    onChange={(e) => switchTraceTurn(e.target.value)}
+                  >
+                    {stream.turns.map((t, i) => (
+                      <option key={t.id} value={t.id}>
+                        {`第 ${i + 1} 轮 · ${turnInputSummary(t).slice(0, 16)}`}
+                      </option>
+                    ))}
+                  </Select>
+                </>
               ) : (
                 <span className="text-xs text-muted-foreground">暂无轮次</span>
               )}

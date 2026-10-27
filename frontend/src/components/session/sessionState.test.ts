@@ -7,7 +7,9 @@ import {
   isRunning,
   normalizeTurnStatus,
   sessionReducer,
+  sessionSpanMs,
   totalMetrics,
+  turnInputSummary,
 } from './sessionState'
 import { mk, toolTurnEvents } from './testEvents'
 
@@ -342,5 +344,23 @@ describe('实时指标与选择器', () => {
     expect(isHighlighted(set, 'trn_1', 's5')).toBe(false)
     expect(isHighlighted(set, 'trn_1', null)).toBe(false)
     expect(isHighlighted(undefined, 'trn_1', 's2')).toBe(false)
+  })
+})
+
+describe('轮次标题行与会话总计的辅助函数', () => {
+  it('turnInputSummary：多行输入压成单行；空输入与转存输入有提示', () => {
+    const multi = buildSessionState([mk('turn.start', { input: { role: 'user', content: '第一行\n\n  第二行' }, history_len: 0 }, { seq: 1 })]).turns[0]
+    expect(turnInputSummary(multi)).toBe('第一行 第二行')
+    expect(turnInputSummary({ input: { role: 'user', content: '  ' }, inputBlob: null })).toBe('（空消息）')
+    expect(turnInputSummary({ input: null, inputBlob: 'abc' })).toBe('（输入内容较大，已转存）')
+  })
+
+  it('sessionSpanMs：首轮开始到末轮结束；末轮还在运行时为 null', () => {
+    const later = toolTurnEvents('trn_2', 20).map((e) => ({ ...e, ts: new Date(Date.parse(e.ts) + 5000).toISOString() }))
+    const done = buildSessionState([...toolTurnEvents('trn_1', 1), ...later]).turns
+    expect(sessionSpanMs(done)).toBe(5575)
+    expect(totalMetrics(done).latencyMs).toBe(1150) // 各轮用时之和，与跨度不同
+    const running = buildSessionState([...toolTurnEvents('trn_1', 1), mk('turn.start', { input: { role: 'user', content: 'x' }, history_len: 1 }, { seq: 20, turn: 'trn_2' })]).turns
+    expect(sessionSpanMs(running)).toBeNull()
   })
 })

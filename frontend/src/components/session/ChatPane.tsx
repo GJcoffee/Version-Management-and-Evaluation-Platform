@@ -1,14 +1,14 @@
-import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { forwardRef, useCallback, useImperativeHandle, useLayoutEffect, useReducer, useRef, useState, type ReactNode } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { AlertTriangle, ArrowDownToLine, Ban, Bot, ListTree, MessageSquareText, Timer, User } from 'lucide-react'
-import { Badge } from '@/components/ui/Badge'
+import { AlertTriangle, ArrowDownToLine, Ban, Bot, ChevronRight, ChevronsDownUp, ChevronsUpDown, ListTree, MessageSquareText, Timer, User } from 'lucide-react'
+import { Badge, type BadgeVariant } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { cn } from '@/lib/cn'
 import { BlobLoadBar, useLazyBlobs } from './BlobView'
 import { Markdown } from './Markdown'
-import type { Message } from '@/api/types'
-import { isHighlighted, messageText, type AssistantMessageView, type TurnState } from './sessionState'
+import type { Message, TurnStatus } from '@/api/types'
+import { isHighlighted, messageText, turnInputSummary, type AssistantMessageView, type TurnState } from './sessionState'
 import { ToolCallCard } from './ToolCallCard'
 import { TurnMetricsBar } from './TurnMetricsBar'
 
@@ -45,8 +45,16 @@ export interface ChatPaneProps {
   className?: string
 }
 
-/** 消息流：用户消息、assistant 消息（Markdown + 流式光标）、工具调用卡片、每轮指标条 */
-export function ChatPane({
+export interface ChatPaneHandle {
+  /** 滚动到某一轮（顶部对齐）；该轮已折叠时先展开。不改变 Trace 选中的轮次。 */
+  scrollToTurn: (turnId: string) => void
+}
+
+/**
+ * 消息流：每轮一个可折叠的标题行（第 N 轮 + 输入摘要 + 状态 + 统计），其下是用户消息、
+ * assistant 消息（Markdown + 流式光标）、工具调用卡片、每轮指标条。折叠状态只保存在内存里。
+ */
+export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatPane({
   turns,
   sessionId,
   loading,
@@ -58,7 +66,7 @@ export function ChatPane({
   emptyState,
   autoScroll = true,
   className,
-}: ChatPaneProps) {
+}, ref) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const stuckRef = useRef(true)
   const [showJump, setShowJump] = useState(false)
@@ -73,6 +81,63 @@ export function ChatPane({
     overscan: 4,
   })
   const totalSize = virtual ? virt.getTotalSize() : 0
+
+  // 折叠的轮次（默认全部展开，所以新到达的流式轮次天然是展开的）
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
+  const toggleTurn = useCallback((turnId: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (!next.delete(turnId)) next.add(turnId)
+      return next
+    })
+  }, [])
+  const collapseAll = () => setCollapsed(new Set(turns.map((t) => t.id)))
+  const expandAll = () => setCollapsed(new Set())
+
+  // 折叠 / 展开会改变轮次高度：虚拟滚动下清掉测量缓存，并重新测量当前已挂载的轮次
+  const measuredFor = useRef(collapsed)
+  useLayoutEffect(() => {
+    if (!virtual || measuredFor.current === collapsed) return
+    measuredFor.current = collapsed
+    virt.measure()
+    scrollRef.current!.querySelectorAll<HTMLElement>('[data-index]').forEach((el) => virt.measureElement(el))
+  }, [collapsed, virtual, virt])
+
+  // 滚动到指定轮次：先展开（状态更新），在提交后的布局阶段再滚动，这样量到的是展开后的高度
+  const pendingScroll = useRef<string | null>(null)
+  const [, requestRender] = useReducer((n: number) => n + 1, 0)
+  useImperativeHandle(
+    ref,
+    () => ({
+      scrollToTurn: (turnId) => {
+        pendingScroll.current = turnId
+        setCollapsed((prev) => {
+          if (!prev.has(turnId)) return prev
+          const next = new Set(prev)
+          next.delete(turnId)
+          return next
+        })
+        requestRender()
+      },
+    }),
+    [],
+  )
+  useLayoutEffect(() => {
+    const turnId = pendingScroll.current
+    if (turnId === null) return
+    pendingScroll.current = null
+    stuckRef.current = false
+    if (virtual) {
+      virt.scrollToIndex(
+        turns.findIndex((t) => t.id === turnId),
+        { align: 'start' },
+      )
+      return
+    }
+    const pane = scrollRef.current!
+    const target = Array.from(pane.querySelectorAll<HTMLElement>('[data-turn-id]')).find((e) => e.dataset.turnId === turnId)!
+    pane.scrollTop = target.getBoundingClientRect().top - pane.getBoundingClientRect().top + pane.scrollTop
+  })
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current
@@ -126,13 +191,25 @@ export function ChatPane({
   }
 
   return (
-    <div className={cn('relative min-h-0', className)}>
+    <div className={cn('relative flex min-h-0 flex-col', className)}>
+      {turns.length > 0 && (
+        <div className="flex shrink-0 items-center justify-end gap-1 border-b border-border px-4 py-1" data-testid="fold-toolbar">
+          <Button size="sm" variant="ghost" onClick={collapseAll}>
+            <ChevronsDownUp className="h-3.5 w-3.5" />
+            全部折叠
+          </Button>
+          <Button size="sm" variant="ghost" onClick={expandAll}>
+            <ChevronsUpDown className="h-3.5 w-3.5" />
+            全部展开
+          </Button>
+        </div>
+      )}
       <div
         ref={scrollRef}
         onScroll={onScroll}
         onLoadCapture={onMediaLoad}
         onLoadedMetadataCapture={onMediaLoad}
-        className="h-full overflow-y-auto px-4 py-4"
+        className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
         data-testid="chat-pane"
       >
         {turns.length === 0 ? (
@@ -164,6 +241,7 @@ export function ChatPane({
                 >
                   <TurnView
                     turn={t}
+                    fold={{ ordinal: v.index + 1, collapsed: collapsed.has(t.id), onToggle: () => toggleTurn(t.id) }}
                     sessionId={sessionId}
                     selected={selectedTurnId === t.id}
                     onSelectTurn={onSelectTurn}
@@ -177,10 +255,11 @@ export function ChatPane({
           </div>
         ) : (
           <div className="mx-auto flex max-w-3xl flex-col gap-6">
-            {turns.map((t) => (
+            {turns.map((t, i) => (
               <TurnView
                 key={t.id}
                 turn={t}
+                fold={{ ordinal: i + 1, collapsed: collapsed.has(t.id), onToggle: () => toggleTurn(t.id) }}
                 sessionId={sessionId}
                 selected={selectedTurnId === t.id}
                 onSelectTurn={onSelectTurn}
@@ -206,10 +285,12 @@ export function ChatPane({
       )}
     </div>
   )
-}
+})
 
 export interface TurnViewProps {
   turn: TurnState
+  /** 传入后在顶部显示可折叠的标题行；不传（例如双栏对比里）则不显示标题行、也不可折叠 */
+  fold?: TurnFold
   sessionId?: string
   selected?: boolean
   onSelectTurn?: (turnId: string) => void
@@ -219,13 +300,59 @@ export interface TurnViewProps {
   className?: string
 }
 
-/** 一轮对话：用户消息 -> assistant 消息（含工具调用卡片） -> 状态提示 -> 指标条。可单独使用（双栏对比按行对齐时）。 */
-export function TurnView({ turn, sessionId, selected, onSelectTurn, onOpenTrace, highlightSteps, onSelectStep, className }: TurnViewProps) {
+export interface TurnFold {
+  /** 第几轮（从 1 开始） */
+  ordinal: number
+  collapsed: boolean
+  onToggle: () => void
+}
+
+const TURN_STATUS: Record<TurnStatus, { label: string; variant: BadgeVariant }> = {
+  running: { label: '运行中', variant: 'info' },
+  ok: { label: '已完成', variant: 'success' },
+  error: { label: '出错', variant: 'danger' },
+  cancelled: { label: '已取消', variant: 'outline' },
+  timeout: { label: '超时', variant: 'warning' },
+}
+
+/** 轮次标题行：点击折叠 / 展开。统计复用指标条（tokens、用时、TTFT、成本、LLM / 工具调用次数）。 */
+function TurnHeader({ turn, fold, selected }: { turn: TurnState; fold: TurnFold; selected?: boolean }) {
+  const status = TURN_STATUS[turn.status]
+  return (
+    <div
+      data-testid="turn-header"
+      onClick={(e) => {
+        e.stopPropagation() // 折叠不改变 Trace 选中的轮次
+        fold.onToggle()
+      }}
+      className={cn(
+        'flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 rounded-md px-2 py-1 hover:bg-accent/60',
+        selected && 'bg-primary/10',
+      )}
+    >
+      <button type="button" aria-expanded={!fold.collapsed} className="flex min-w-0 flex-1 basis-56 items-center gap-2 text-left text-sm">
+        <ChevronRight className={cn('h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform', !fold.collapsed && 'rotate-90')} />
+        <span className="shrink-0 font-medium">第 {fold.ordinal} 轮</span>
+        <span className="min-w-0 flex-1 truncate text-muted-foreground" data-testid="turn-summary">
+          {turnInputSummary(turn).slice(0, 200)}
+        </span>
+        <Badge variant={status.variant} data-testid="turn-status">
+          {status.label}
+        </Badge>
+      </button>
+      <TurnMetricsBar turn={turn} testId="turn-header-metrics" />
+    </div>
+  )
+}
+
+/** 一轮对话：标题行 -> 用户消息 -> assistant 消息（含工具调用卡片） -> 状态提示 -> 指标条。可单独使用（双栏对比按行对齐时）。 */
+export function TurnView({ turn, fold, sessionId, selected, onSelectTurn, onOpenTrace, highlightSteps, onSelectStep, className }: TurnViewProps) {
   return (
     <section
       data-testid="turn"
       data-turn-id={turn.id}
       data-status={turn.status}
+      data-collapsed={fold?.collapsed || undefined}
       aria-current={selected || undefined}
       onClick={() => onSelectTurn?.(turn.id)}
       className={cn(
@@ -235,50 +362,56 @@ export function TurnView({ turn, sessionId, selected, onSelectTurn, onOpenTrace,
         className,
       )}
     >
-      <UserMessage turn={turn} sessionId={sessionId} />
+      {fold && <TurnHeader turn={turn} fold={fold} selected={selected} />}
 
-      {turn.messages.map((m) => (
-        <AssistantMessage
-          key={m.key}
-          message={m}
-          turn={turn}
-          sessionId={sessionId}
-          highlightSteps={highlightSteps}
-          onSelectStep={onSelectStep}
-        />
-      ))}
+      {!fold?.collapsed && (
+        <>
+          <UserMessage turn={turn} sessionId={sessionId} />
 
-      {turn.status === 'running' && turn.messages.length === 0 && (
-        <div className="flex gap-2">
-          <Avatar icon={<Bot className="h-3.5 w-3.5" />} />
-          <div className="rounded-2xl rounded-tl-sm bg-muted px-3 py-2 text-sm text-muted-foreground" data-testid="thinking">
-            <span className="stream-cursor" aria-label="等待模型响应" />
-          </div>
-        </div>
-      )}
+          {turn.messages.map((m) => (
+            <AssistantMessage
+              key={m.key}
+              message={m}
+              turn={turn}
+              sessionId={sessionId}
+              highlightSteps={highlightSteps}
+              onSelectStep={onSelectStep}
+            />
+          ))}
 
-      <TurnStatusBanner turn={turn} />
+          {turn.status === 'running' && turn.messages.length === 0 && (
+            <div className="flex gap-2">
+              <Avatar icon={<Bot className="h-3.5 w-3.5" />} />
+              <div className="rounded-2xl rounded-tl-sm bg-muted px-3 py-2 text-sm text-muted-foreground" data-testid="thinking">
+                <span className="stream-cursor" aria-label="等待模型响应" />
+              </div>
+            </div>
+          )}
 
-      <TurnMetricsBar turn={turn} className="pl-9">
-        {onSelectTurn && (
-          <button
-            type="button"
-            className={cn(
-              'inline-flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-accent hover:text-foreground',
-              selected && 'text-primary',
+          <TurnStatusBanner turn={turn} />
+
+          <TurnMetricsBar turn={turn} className="pl-9">
+            {onSelectTurn && (
+              <button
+                type="button"
+                className={cn(
+                  'inline-flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-accent hover:text-foreground',
+                  selected && 'text-primary',
+                )}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  if (onOpenTrace) onOpenTrace(turn.id)
+                  else onSelectTurn(turn.id)
+                }}
+                data-testid="select-turn"
+              >
+                <ListTree className="h-3 w-3" />
+                {selected ? '正在查看 Trace' : '查看 Trace'}
+              </button>
             )}
-            onClick={(e) => {
-              e.stopPropagation()
-              if (onOpenTrace) onOpenTrace(turn.id)
-              else onSelectTurn(turn.id)
-            }}
-            data-testid="select-turn"
-          >
-            <ListTree className="h-3 w-3" />
-            {selected ? '正在查看 Trace' : '查看 Trace'}
-          </button>
-        )}
-      </TurnMetricsBar>
+          </TurnMetricsBar>
+        </>
+      )}
     </section>
   )
 }
