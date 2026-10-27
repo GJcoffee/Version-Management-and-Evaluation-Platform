@@ -304,3 +304,70 @@ async def test_renamed_asset_is_matched_by_identity_and_reported_even_if_content
     # 不传 renames：按名字匹配，旧名删除 + 新名新增
     r = await diff_specs(snap("old-name", 1, "a"), snap("new-name", 1, "a"))
     assert {c["op"] for c in r["changes"]} == {"add", "remove"}
+
+
+# ---- Skill 文件包的逐文件 diff（手写虚构数据） ----
+
+
+def _package(version, files):
+    from evalp.utils.skill_package import SkillPackage, package_entries
+
+    root = f"image-gen-{version}"
+    return SkillPackage(package_entries([(f"{root}/{p}", d) for p, d in files.items()]))
+
+
+def _package_loader(packages):
+    async def load(p):
+        return packages.get(p["hash"])
+
+    return load
+
+
+async def test_package_diff_lists_files_and_text_diffs_ignoring_versioned_root():
+    left = _package("0.0.1", {
+        "SKILL.md": "---\nname: image-gen\n---\n画一只猫\n".encode(),
+        "scripts/run.py": b"print('a')\n",
+        "assets/logo.bin": bytes(range(8)),
+        "assets/keep.txt": b"same",
+        "old.txt": b"gone",
+    })
+    right = _package("0.0.2", {
+        "SKILL.md": "---\nname: image-gen\n---\n画一只狗\n".encode(),
+        "scripts/run.py": b"print('a')\n",
+        "assets/logo.bin": bytes(range(9)),
+        "assets/keep.txt": b"same",
+        "new.txt": b"added",
+    })
+    load = _package_loader({"1" * 64: left, "2" * 64: right})
+    r = await diff_specs(
+        spec(snapshot={"files": {"skills/image-gen": pin("skill", "image-gen", 1, "1")}}),
+        spec(snapshot={"files": {"skills/image-gen": pin("skill", "image-gen", 2, "2")}}),
+        load_package=load,
+    )
+    change = by_path(r)["snapshot.files[skill/image-gen]"]
+    assert change["op"] == "asset_changed" and "content_diff" not in change
+    pd = change["package_diff"]
+    assert pd["added"] == ["new.txt"] and pd["removed"] == ["old.txt"]
+    assert pd["unchanged_count"] == 2
+    assert (pd["left_root"], pd["right_root"]) == ("image-gen-0.0.1", "image-gen-0.0.2")
+    skill_md, binary = pd["modified"]
+    assert skill_md["path"] == "SKILL.md" and "-画一只猫" in skill_md["content_diff"]["text"]
+    assert "+画一只狗" in skill_md["content_diff"]["text"]
+    assert binary == {"path": "assets/logo.bin"}  # 二进制只列出
+
+
+async def test_package_against_legacy_metadata_keeps_plain_asset_changed():
+    package = _package("0.0.1", {"SKILL.md": b"# x"})
+
+    async def load_text(p):  # 整包不是 UTF-8 文本，旧 JSON 一侧是文本
+        return None if p["hash"] == "1" * 64 else '{"Name": "image-gen"}'
+
+    r = await diff_specs(
+        spec(snapshot={"files": {"s": pin("skill", "image-gen", 1, "1")}}),
+        spec(snapshot={"files": {"s": pin("skill", "image-gen", 2, "2")}}),
+        load_text,
+        load_package=_package_loader({"1" * 64: package, "2" * 64: None}),
+    )
+    change = by_path(r)["snapshot.files[skill/image-gen]"]
+    assert change["op"] == "asset_changed"
+    assert "package_diff" not in change and "content_diff" not in change

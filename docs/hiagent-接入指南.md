@@ -90,6 +90,8 @@ snapshot:                      # hiagentctl 导出目录；文件随版本存档
   map:                         # 按顺序取第一条匹配的规则；glob 与 $. 字段名按实际导出目录 / 导出 JSON 调整
     - {glob: "system-prompt.md", kind: prompt, name: "{agent}-system"}
     - {glob: "skills/*.json", kind: skill, id: "$.id", name: "{stem_nover}", display: "$.name"}   # 来源 ID、显示名取自 JSON
+    # 导出的是 skill 目录（含 SKILL.md）时改用下一行：来源 ID、显示名取自 SKILL.md 的 YAML frontmatter
+    # - {glob: "skills/*", kind: skill, id: "$.id", name: "{stem_nover}", display: "$.name"}
     - {glob: "plugins/*.json", kind: mcp, id: "$.plugin_id", name: "{stem}", display: "$.name"}
     - {glob: "resources/database*.json", kind: database, name: "{agent}-{stem}"}
     - {glob: "resources/tables/*.json", kind: database, name: "{agent}-table-{stem}"}
@@ -112,6 +114,8 @@ snapshot:                      # hiagentctl 导出目录；文件随版本存档
 - **`$.` 取值与来源 ID（推荐给 skill、MCP 插件）**：`name` 或 `id` 的值以 `$.` 开头时，从导出的 JSON 文件内容按点路径取值
   （对象按键、数组按下标，如 `$.id`、`$.meta.skill_id`、`$.items.0.name`），否则仍是上面的模板。**字段名按实际导出的 JSON 调整**，
   取不到值（文件不是 JSON、路径不存在、不是字符串或数字）时 push 会报错并指出文件和规则。
+  **目录（或 ZIP）形式的 skill 没有 JSON 文件**，`$.` 改为从包内默认文档 `SKILL.md` 的 YAML frontmatter 取值（点路径规则相同，如 `$.id`、`$.name`、`$.meta.skill_id`）；
+  SKILL.md 没有 frontmatter 或没有该字段时 push 报错，并说明是从 SKILL.md 的 YAML frontmatter 取值。
   - `name` 取到的原文（可以是中文）保存为资产的**显示名**，资产库、资产详情、Agent「资产」标签里优先显示它；规范化后（小写字母、数字、连字符）成为资产名。
     原文里没有字母或数字（纯中文）时无法生成资产名，push 会报错。**推荐写法**：`name` 用文件名模板（如 `{stem_nover}`），
     另写 `display: "$.name"` 把 JSON 里的原名（可以是中文）作为显示名——资产名稳定、好认，页面上仍显示 HiAgent 里的原名。
@@ -122,9 +126,23 @@ snapshot:                      # hiagentctl 导出目录；文件随版本存档
   - 没有配置 `id` 的规则仍按资产名识别同一个资产（改名就会变成新资产）。
 - **文件名带版本号**（如 `skills/crawl-engine-0.5.3.json`）且没有稳定 ID 时：用 `{stem_nover}` 命名，skill 升级到 0.5.4 后仍是同一个资产
   `skill/crawl-engine` 的新修订，而不是新资产；版本 diff 里显示为 “Skill crawl-engine r3 → r4”。
+- **Skill 保留原始文件包**：导出为 `skills/<原始目录名>/`（含 `SKILL.md` 及所有子目录），或原始 ZIP。
+  添加 `{glob: "skills/*.zip", kind: skill, name: "{stem_nover}"}` 和
+  `{glob: "skills/*", kind: skill, name: "{stem_nover}"}`，目录整体成为一个 Skill 修订，不拆成零散资产。
+  目录快照保留根目录、空目录、各层路径和文件字节；原始 ZIP 不重写。
+  网页显示 `SKILL.md` 中的原始 `name`（缺省为其所在目录名），默认打开 `SKILL.md`，并提供文件树、逐文件只读预览和下载。
+  引用标识仍由 `{stem_nover}` 生成；去版本号仅用于标识，不改变展示名或包内路径。
+  **目录 skill 的推荐写法**：`{glob: "skills/*", kind: skill, name: "{stem_nover}", id: "$.<frontmatter 字段>", display: "$.name"}`，
+  `id` 的字段名按实际 SKILL.md 的 frontmatter 调整（例如 frontmatter 里写了 `skill_id: sk-img-1` 就用 `id: "$.skill_id"`；只有 `name` 时没有稳定 ID 可取，不要硬配）。
+  这样开启了 `require_source_id: [skill]` 规范的 agent 也能使用目录 skill，改目录名 / 版本号后仍是同一个资产。
+  Skill 升级后版本 diff 与资产修订对比会列出包内文件的变化（新增 / 删除 / 修改及数量），文本文件的修改可点开看逐行 diff，二进制文件只列出；
+  目录名带版本号（`image-gen-0.5.3/` → `image-gen-0.5.4/`）时按顶层目录内的相对路径匹配，不会显示成全部删除再全部新增。
+  资产库也支持导入 ZIP / 文件夹；浏览器选择文件夹只提供文件路径，如需保留空目录请使用 ZIP 或目录快照。
+  旧版仅有 JSON 元数据的导出不会被伪造成目录，页面明确提示缺少原始文件，需重新导出原始包。
 - 建议导出时把 `platform/harness-agent.json` 里的 `SystemPrompt` 另存为 `system-prompt.md`（上例第一条规则）：它成为独立的 `prompt` 资产，
   版本 diff 里能逐行看提示词的变化（JSON 里的长字符串只能整段对比）。
-- 展开后的资产名不合法（比如文件名全是中文，`{stem}` 展开为空），或两个文件得到同一个资产名，push 会报错并指出文件与规则。
+- Skill 名称包含中文时，引用标识附加稳定哈希以避免重名，展示名保持原样。
+  其他类型展开后的资产名不合法，或两个文件得到同一个资产名时，push 会报错并指出文件与规则。
 
 通过快照入库的资产在修订元数据里带 `origin: snapshot`，在 EvalP 里**只读**：Web UI 隐藏编辑 / 新建修订 / 删除入口，并提示
 “来自 agent 快照（只读），请在源平台修改后重新发布”。默认只是界面约定，API 不拦截；agent 开启 `snapshot_readonly` 规范（见下一节）后，

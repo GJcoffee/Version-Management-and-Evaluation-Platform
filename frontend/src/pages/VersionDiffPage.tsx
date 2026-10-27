@@ -5,7 +5,7 @@ import { ApiError } from '@/api/client'
 import { useRevision } from '@/api/queries/assets'
 import { useAgent } from '@/api/queries/agents'
 import { useVersion, useVersionDiff, useVersions } from '@/api/queries/versions'
-import type { AssetKind, DiffOp, SpecChange, Version, VersionAssetRef } from '@/api/types'
+import type { AssetKind, DiffOp, PackageDiff, SpecChange, Version, VersionAssetRef } from '@/api/types'
 import { Badge, type BadgeVariant } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { DiffEditor } from '@/components/ui/DiffEditor'
@@ -17,6 +17,7 @@ import { cn } from '@/lib/cn'
 import { unpinSpec } from '@/lib/specDiff'
 import { lineOfPath, specToYaml } from '@/lib/specYaml'
 import { languageFor } from './assets/assetUtils'
+import { PackageDiffView } from './assets/PackageDiffView'
 
 export const OP_LABEL: Record<DiffOp, string> = {
   add: '新增',
@@ -69,6 +70,11 @@ export interface AssetChangeInfo {
   renamedFrom?: string
   /** 修订变化：修改为 `r3 → r4`，新增 / 删除为单个 `r1` */
   revs: string
+}
+
+/** Skill 文件包变化的摘要：`新增 1 · 删除 1 · 修改 2` */
+export function packageChangeText(pd: PackageDiff): string {
+  return `新增 ${pd.added.length} · 删除 ${pd.removed.length} · 修改 ${pd.modified.length}`
 }
 
 /** 资产变更的显示文字：`Skill 旧名 → 新名 · r3 → r4`（没改名时 `Skill 名称 · r3 → r4`） */
@@ -245,6 +251,7 @@ export default function VersionDiffPage() {
                             </span>
                           )}
                           {asset && <span className="pl-1 font-mono text-[11px] text-muted-foreground">{asset.revs}</span>}
+                          {c.package_diff && <span className="pl-1 text-[11px] text-muted-foreground">{packageChangeText(c.package_diff)}</span>}
                         </button>
                       </li>
                     )
@@ -316,7 +323,9 @@ function AssetContentDiff({
         )}
       </div>
       <div className="min-h-0 flex-1">
-        {l.isLoading || r.isLoading ? (
+        {view.change.package_diff && view.l && view.r ? (
+          <PackageDiffView diff={view.change.package_diff} leftRevisionId={view.l.asset_revision_id} rightRevisionId={view.r.asset_revision_id} />
+        ) : l.isLoading || r.isLoading ? (
           <LoadingBlock />
         ) : !l.data?.content_available || !r.data?.content_available ? (
           <EmptyState title="内容不可预览" description="资产内容过大或不是 UTF-8 文本。" />

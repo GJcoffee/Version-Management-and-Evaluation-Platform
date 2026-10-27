@@ -7,22 +7,27 @@
   否则按下标；
 - 文本：多行或超过 80 个字符的字符串，额外附 unified diff（``content_diff``）；
 - 资产：内容哈希相同视为未变化；不同时为 ``asset_changed``，文本类资产同时附 ``content_diff``；
+- Skill 文件包：两侧都是文件包时，``asset_changed`` 附 ``package_diff``（逐文件的新增 / 删除 / 修改，
+  文本文件的修改带 ``content_diff``），不再附整包的 ``content_diff``；
 - 资产改名：调用方传入 ``renames``（旧名 -> 新名，同一个资产），左侧的旧名先换成新名并标上 ``renamed_from``，
   这样按身份匹配时是同一个资产，输出 ``asset_changed``（``asset.renamed_from`` 是旧名，哪怕内容没变）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from evalp.spec.refs import ASSET_KEY, is_pin
+from evalp.utils.skill_package import SkillPackage
 
 TEXT_DIFF_MIN_LEN = 80
 NON_TEXT_KINDS = ("dataset",)  # 其余类型都按文本比较；file 为二进制时 load_text 返回 None
 
 LoadText = Callable[[dict[str, Any]], Awaitable["str | None"]]
+LoadPackage = Callable[[dict[str, Any]], Awaitable["SkillPackage | None"]]
 
 
 def unified_diff_text(left: str, right: str, left_label: str = "left", right_label: str = "right") -> str:
@@ -38,6 +43,49 @@ def unified_diff_text(left: str, right: str, left_label: str = "left", right_lab
 def unified_content_diff(left: str, right: str, left_label: str = "left", right_label: str = "right") -> dict:
     """``{"format": "unified", "text": …}``。"""
     return {"format": "unified", "text": unified_diff_text(left, right, left_label, right_label)}
+
+
+def _package_root(package: SkillPackage) -> str:
+    """文件包只有一个顶层目录时返回它的名字，否则 ""。"""
+    tops = {path.split("/", 1)[0] for path in package.nodes}
+    top = next(iter(tops))
+    return top if len(tops) == 1 and package.nodes[top]["type"] == "directory" else ""
+
+
+def diff_packages(left: SkillPackage, right: SkillPackage) -> dict[str, Any]:
+    """两个 Skill 文件包的逐文件 diff。
+
+    目录 skill 的顶层目录名常带版本号（``image-gen-0.5.3/`` -> ``image-gen-0.5.4/``），
+    两侧都只有一个顶层目录时按相对它的路径匹配；``left_root`` / ``right_root`` 是各自的顶层目录名，
+    读取文件时用 ``root/path``。只比较文件，空目录的增减不计入。
+    """
+    lroot, rroot = _package_root(left), _package_root(right)
+
+    def files(package: SkillPackage, root: str) -> dict[str, str]:
+        cut = len(root) + 1 if root else 0
+        return {path[cut:]: path for path, e in package.entries.items() if not e.is_dir()}
+
+    lfiles, rfiles = files(left, lroot), files(right, rroot)
+    modified: list[dict[str, Any]] = []
+    unchanged = 0
+    for path in sorted(lfiles.keys() & rfiles.keys()):
+        lp, rp = lfiles[path], rfiles[path]
+        if left.read(lp) == right.read(rp):
+            unchanged += 1
+            continue
+        item: dict[str, Any] = {"path": path}
+        lt, rt = left.text(lp), right.text(rp)
+        if lt is not None and rt is not None:
+            item["content_diff"] = unified_content_diff(lt, rt, path, path)
+        modified.append(item)
+    return {
+        "added": sorted(rfiles.keys() - lfiles.keys()),
+        "removed": sorted(lfiles.keys() - rfiles.keys()),
+        "modified": modified,
+        "unchanged_count": unchanged,
+        "left_root": lroot,
+        "right_root": rroot,
+    }
 
 
 def _needs_text_diff(left: Any, right: Any) -> bool:
@@ -124,10 +172,18 @@ def identity_paths(spec: Any) -> dict[str, str]:
 
 
 class _Differ:
-    def __init__(self, load_text: LoadText | None) -> None:
+    def __init__(self, load_text: LoadText | None, load_package: LoadPackage | None = None) -> None:
         self.load_text = load_text
+        self.load_package = load_package
         self.changes: list[dict[str, Any]] = []
         self._cache: dict[str, str | None] = {}
+        self._packages: dict[str, SkillPackage | None] = {}
+
+    async def _package_of(self, node: Any) -> SkillPackage | None:
+        pin = node[ASSET_KEY]
+        if pin["hash"] not in self._packages:
+            self._packages[pin["hash"]] = await self.load_package(pin)
+        return self._packages[pin["hash"]]
 
     async def _text_of(self, node: Any) -> str | None:
         """节点对应的文本：内联字符串本身，或文本类资产的内容。"""
@@ -195,11 +251,17 @@ class _Differ:
                     "right": {"rev": pr["rev"]},
                 }
                 if pl["hash"] != pr["hash"]:
-                    lt, rt = await self._text_of(left), await self._text_of(right)
-                    if lt is not None and rt is not None:
-                        change["content_diff"] = unified_content_diff(
-                            lt, rt, self._label(left, "left"), self._label(right, "right")
-                        )
+                    packages = (None, None)
+                    if pl["kind"] == "skill" and self.load_package is not None:
+                        packages = (await self._package_of(left), await self._package_of(right))
+                    if None not in packages:
+                        change["package_diff"] = await asyncio.to_thread(diff_packages, *packages)
+                    else:
+                        lt, rt = await self._text_of(left), await self._text_of(right)
+                        if lt is not None and rt is not None:
+                            change["content_diff"] = unified_content_diff(
+                                lt, rt, self._label(left, "left"), self._label(right, "right")
+                            )
                 self.changes.append(change)
                 return
         await self._replace(path, left, right)
@@ -250,15 +312,17 @@ async def diff_specs(
     right: dict[str, Any],
     load_text: LoadText | None = None,
     renames: dict[tuple[str, str], str] | None = None,
+    load_package: LoadPackage | None = None,
 ) -> dict[str, Any]:
     """比较两个固化后的 Spec，返回 ``{"changes": [...], "summary": {...}}``。
 
     load_text(pin) 用于读取文本类资产内容（给出 ``{kind,name,rev,hash}``），返回 None 表示不可读 / 非文本。
     renames 是左侧 Spec 里改过名的资产：``(kind, 旧名) -> 新名``。
+    load_package(pin) 读取 skill 资产的文件包，返回 None 表示不是文件包（旧版 JSON 元数据）。
     """
     if renames:
         left = rename_pins(left, renames)
-    differ = _Differ(load_text)
+    differ = _Differ(load_text, load_package)
     await differ.walk(left, right, "")
     summary = {"add": 0, "remove": 0, "replace": 0, "asset_changed": 0}
     for c in differ.changes:

@@ -91,7 +91,8 @@
 快照入库的修订在 `meta.origin` 里标记 `"snapshot"`（见 §5）。
 
 规则的 `name` 与可选的 `id` 的值以 `$.` 开头时，表示从**JSON 文件内容**按点路径取值（对象按键、数组按下标，如 `$.id`、`$.meta.skill_id`、`$.items.0.name`；
-字段名按实际导出的 JSON 调整），取不到值时客户端报错并指出文件与规则；否则是上面的模板。`name` 取到的原文作为资产的**显示名**（`display_name`，可含中文），
+字段名按实际导出的 JSON 调整；`display` 同样支持）。目录 / ZIP 形式的 skill 没有 JSON 文件，`$.` 改为从包内默认文档 `SKILL.md` 的 YAML frontmatter 取值，
+取不到值时客户端报错并指出文件与规则；否则是上面的模板。`name` 取到的原文作为资产的**显示名**（`display_name`，可含中文），
 规范化后成为资产名；`id` 是来源平台上的稳定 ID，保存为资产的 `source_id`（`(kind, source_id)` 唯一）。没有配置 `id` 的规则不会出现 `id` 键，旧版本的 `spec_hash` 不变。
 同一个 `(kind, source_id)` 始终是同一个资产：推送时按它找资产，名字变了就**自动改名**（修订历史原样保留，旧名记在资产的 `former_names`），不会存成新资产；
 没有该来源 ID 但有同名且没有来源 ID 的资产（升级前入库的）会被认领。新名字被另一个资产占用时 409 `ASSET_NAME_CONFLICT`。
@@ -310,7 +311,8 @@ UPSERT：同一个标签会从旧版本移到这个版本。标签名：字母�
 - 资产引用在 `add`/`remove`/`replace` 里以 `{"kind","name","rev"}` 表示；`asset_changed` 带 `asset: {kind, name}`（两侧的修订在 `left` / `right`；
   资产改过名时还有 `renamed_from`（旧名），`path` 用新名）；
   内容哈希相同视为未变化（即使修订号不同）。代码型的 `snapshot.files` 按 `类型/名称` 匹配资产：`snapshot.files[skill/crawl-engine]`（见 §2 版本快照）。
-- 多行或超过 80 个字符的文本变更附 `content_diff`（unified diff，从 `@@` 开始，不含文件头）；文本类资产（除 dataset 外的各类型）的 `asset_changed` 同样附 `content_diff`。
+- 多行或超过 80 个字符的文本变更附 `content_diff`（unified diff，从 `@@` 开始，不含文件头）；文本类资产（除 dataset 外的各类型）的 `asset_changed` 同样附 `content_diff`；
+  两侧都是 Skill 文件包时，`asset_changed` 不带整包的 `content_diff`，而是带 `package_diff`（结构同 `GET /assets/diff`）。
 - 前端用 Monaco DiffEditor 展示完整文本时，用 `GET /assets/revisions/{revision_id}` 取两侧内容。
 - **草稿一侧**：取已保存的草稿内容（编辑器里未保存的修改看不到），按发布时的流程固化引用（`@latest` 取当前最新修订）并规范化（补齐默认值），
   所以和"现在发布会得到的 Spec"比较；校验不通过时和发布一样报错（400 `VALIDATION_ERROR` / `SPEC_INVALID`，`details.errors`）。
@@ -417,7 +419,18 @@ kb_config / skill / mcp / app_config / database 以 `{` 或 `[` 开头为 `appli
  "content_diff": {"format": "unified", "text": "@@ -1,2 +1,3 @@\n …"}}
 ```
 
-二进制：`"type": "binary", "content_diff": null, "sizes": {"left": 3, "right": 4}`。数据集：
+二进制：`"type": "binary", "content_diff": null, "sizes": {"left": 3, "right": 4}`。Skill 文件包（两侧都是原始文件包）：
+
+```json
+{"kind": "skill", "type": "skill_package", "identical": false, "left": {"…": "…"}, "right": {"…": "…"}, "content_diff": null,
+ "package_diff": {"added": ["scripts/new.py"], "removed": ["old.txt"],
+                  "modified": [{"path": "SKILL.md", "content_diff": {"format": "unified", "text": "@@ … @@\n …"}}, {"path": "assets/logo.bin"}],
+                  "unchanged_count": 3, "left_root": "image-gen-0.0.1", "right_root": "image-gen-0.0.2"}}
+```
+
+`package_diff` 的路径是相对包内顶层目录的路径（两侧都只有一个顶层目录时按它匹配，目录名带版本号也不影响）；`left_root` / `right_root` 是各侧顶层目录名（没有则为空串），
+读取某个文件用 `GET /assets/revisions/{id}/skill/file?path={root}/{path}`。只比较文件；文本文件的修改带 `content_diff`，二进制或超过 5MB 的文件只列出。
+一侧是旧版 JSON 元数据时没有 `package_diff`，按 `text` / `binary` 处理。数据集：
 
 ```json
 {"kind": "dataset", "type": "dataset", "identical": false, "left": {"…": "…"}, "right": {"…": "…"},

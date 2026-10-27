@@ -1,3 +1,4 @@
+# Synthetic fixtures authored by hand; no recorded agent data.
 """代码型 agent 的版本快照（snapshot）：push 上传目录、固化到版本、diff 逐文件显示文本差异。"""
 
 from __future__ import annotations
@@ -311,3 +312,98 @@ async def test_invalid_map_rules_are_reported(mapped_project, evalp_client):
     write_export(mapped_project, {"skills/other.json": "{}"})
     with pytest.raises(WorkspaceError, match="映射到同一个资产 skill/same"):
         await snap_ws(mapped_project).push(evalp_client)
+
+
+async def test_skill_directory_snapshot_preserves_structure_and_upgrade_identity(
+    project, evalp_client, client,
+):
+    from evalp.utils.skill_package import SkillPackage
+
+    (project / "agent.yaml").write_text(
+        AGENT_YAML + '  map:\n    - {glob: "skills/*", kind: skill, name: "{stem_nover}"}\n',
+        encoding="utf-8",
+    )
+    # 旧测试元数据继续走 JSON；新的demo-skill整体作为一个修订。
+    (project / "exports/current/skills/画图 skill.json").unlink()
+    root = project / "exports/current/skills/demo-skill-0.0.1"
+    (root / "references/deep/empty").mkdir(parents=True)
+    (root / "SKILL.md").write_text("---\nname: 虚构图片生成\n---\n# 初版", encoding="utf-8")
+    (root / "references/deep/data.bin").write_bytes(PNG)
+    ws = snap_ws(project)
+    before = ws.collect_files(ws.load_spec())
+    package_file = next(f for f in before if f.asset.startswith("skill/"))
+    assert package_file.path == "exports/current/skills/demo-skill-0.0.1"
+    assert package_file.payload(True)["content_type"] == "application/zip"
+    assert len(before) == 3
+    v1 = (await actions.publish(evalp_client, ws, notes=None, tag=None, via="cli")).version
+    skills = await assets_of(client, "skill")
+    assert len(skills) == 1
+    skill = next(iter(skills.values()))
+    assert skill["display_name"] == "虚构图片生成"
+    assert skill["latest"]["meta"]["origin"] == "snapshot"
+    blob = (await client.get(f"{API}/assets/revisions/{skill['latest']['id']}/raw")).content
+    package = SkillPackage(blob)
+    assert package.read("demo-skill-0.0.1/references/deep/data.bin") == PNG
+    assert "demo-skill-0.0.1/references/deep/empty" in package.nodes
+    assert (await ws.push(evalp_client)).unchanged
+    upgraded = root.with_name("demo-skill-0.0.2")
+    root.rename(upgraded)
+    (upgraded / "SKILL.md").write_text("---\nname: 虚构图片生成\n---\n# 新版", encoding="utf-8")
+    v2 = (await actions.publish(evalp_client, ws, notes=None, tag=None, via="cli")).version
+    skills = await assets_of(client, "skill")
+    assert len(skills) == 1
+    current = next(iter(skills.values()))
+    assert current["id"] == skill["id"] and current["latest_rev"] == 2
+    items = (await client.get(f"{API}/versions/{v2['id']}/assets")).json()["items"]
+    used = next(i for i in items if i["kind"] == "skill")
+    assert used["display_name"] == "虚构图片生成" and used["rev"] == 2
+    assert used["origin"] == "snapshot"
+    old_pin = next(
+        p["$asset"] for p in v1["spec"]["snapshot"]["files"].values() if p["$asset"]["kind"] == "skill"
+    )
+    assert old_pin["rev"] == 1
+
+
+async def test_directory_skill_source_id_from_frontmatter_and_per_file_version_diff(
+    project, evalp_client, client,
+):
+    (project / "agent.yaml").write_text(
+        AGENT_YAML
+        + '  map:\n    - {glob: "skills/*", kind: skill, name: "{stem_nover}", '
+        'id: "$.skill_id", display: "$.name"}\n',
+        encoding="utf-8",
+    )
+    (project / "exports/current/skills/画图 skill.json").unlink()
+    root = project / "exports/current/skills/image-gen-0.0.1"
+    (root / "scripts").mkdir(parents=True)
+    (root / "SKILL.md").write_text("---\nskill_id: sk-img-1\nname: 画图\n---\n画一只猫\n", encoding="utf-8")
+    (root / "scripts/run.py").write_text("print('cat')\n", encoding="utf-8")
+    (root / "scripts/old.txt").write_text("旧文件", encoding="utf-8")
+    (root / "logo.bin").write_bytes(PNG)
+    (root / "keep.txt").write_text("不变", encoding="utf-8")
+    ws = snap_ws(project)
+    v1 = (await actions.publish(evalp_client, ws, notes=None, tag=None, via="cli")).version
+    skill = next(iter((await assets_of(client, "skill")).values()))
+    assert skill["source_id"] == "sk-img-1" and skill["display_name"] == "画图"
+
+    upgraded = root.with_name("image-gen-0.0.2")
+    root.rename(upgraded)
+    (upgraded / "SKILL.md").write_text(
+        "---\nskill_id: sk-img-1\nname: 画图\n---\n画一只狗\n", encoding="utf-8"
+    )
+    (upgraded / "scripts/old.txt").unlink()
+    (upgraded / "scripts/new.py").write_text("print('dog')\n", encoding="utf-8")
+    (upgraded / "logo.bin").write_bytes(PNG + b"\x00")
+    v2 = (await actions.publish(evalp_client, ws, notes=None, tag=None, via="cli")).version
+    assert len(await assets_of(client, "skill")) == 1  # 同一个来源 ID，仍是一个资产
+
+    d = (await client.get(f"{API}/versions/diff", params={"left": v1["id"], "right": v2["id"]})).json()
+    (c,) = [c for c in d["changes"] if c["asset"]["kind"] == "skill"]
+    assert c["op"] == "asset_changed" and "content_diff" not in c
+    pd = c["package_diff"]
+    assert pd["added"] == ["scripts/new.py"] and pd["removed"] == ["scripts/old.txt"]
+    assert pd["unchanged_count"] == 2  # keep.txt、scripts/run.py
+    assert (pd["left_root"], pd["right_root"]) == ("image-gen-0.0.1", "image-gen-0.0.2")
+    changed = {m["path"]: m for m in pd["modified"]}
+    assert "+画一只狗" in changed["SKILL.md"]["content_diff"]["text"]
+    assert changed["logo.bin"] == {"path": "logo.bin"}

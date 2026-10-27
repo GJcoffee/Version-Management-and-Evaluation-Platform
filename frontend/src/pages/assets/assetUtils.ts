@@ -33,6 +33,12 @@ export function languageFor(kind: AssetKind, contentType?: string): CodeLanguage
   return 'plaintext'
 }
 
+/** 按文件扩展名选择编辑器语言 */
+export function languageForPath(path: string): CodeLanguage {
+  const ext = path.split('.').pop()?.toLowerCase()
+  return ({ md: 'markdown', markdown: 'markdown', json: 'json', yml: 'yaml', yaml: 'yaml' } as Record<string, CodeLanguage>)[ext ?? ''] ?? 'plaintext'
+}
+
 /** 上传文件时按扩展名推断 content_type */
 export function contentTypeForFile(filename: string): string | undefined {
   const ext = filename.split('.').pop()?.toLowerCase()

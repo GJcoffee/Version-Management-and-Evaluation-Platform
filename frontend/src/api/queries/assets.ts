@@ -12,6 +12,9 @@ import type {
   AssetRevisionDetail,
   AssetWriteResult,
   Page,
+  SkillFile,
+  SkillTree,
+  SkillUpload,
 } from '../types'
 
 export const assetKeys = {
@@ -112,6 +115,31 @@ export function uploadBlob(file: File | Blob, filename?: string): Promise<{ blob
   const fd = new FormData()
   fd.append('file', file, filename ?? (file instanceof File ? file.name : 'upload.bin'))
   return api.post('/assets/upload', { body: fd })
+}
+
+export function uploadSkill(files: File[], folder: boolean): Promise<SkillUpload> {
+  const fd = new FormData()
+  for (const file of files) fd.append('files', file, folder ? file.webkitRelativePath || file.name : file.name)
+  fd.append('folder', String(folder))
+  return api.post('/assets/skill/upload', { body: fd })
+}
+
+export function useSkillTree(revId: string | null) {
+  return useQuery({
+    queryKey: [...assetKeys.revision(revId ?? ''), 'skill-tree'],
+    queryFn: () => api.get<SkillTree>(`/assets/revisions/${revId}/skill/tree`),
+    enabled: !!revId,
+    staleTime: Infinity,
+  })
+}
+
+export function useSkillFile(revId: string, path: string | null) {
+  return useQuery({
+    queryKey: [...assetKeys.revision(revId), 'skill-file', path],
+    queryFn: () => api.get<SkillFile>(`/assets/revisions/${revId}/skill/file`, { query: { path: path! } }),
+    enabled: !!path,
+    staleTime: Infinity,
+  })
 }
 
 export function useCreateAsset() {

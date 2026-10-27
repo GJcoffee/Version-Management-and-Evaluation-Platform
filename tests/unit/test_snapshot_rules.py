@@ -136,3 +136,45 @@ def test_display_from_json_keeps_chinese_name_while_asset_name_uses_file_name():
     assert snapshot_rule_entry("a", rule, "skills/image-gen-0.5.3.json", data) == SnapshotEntry(
         "skill/image-gen", "sk-1", "画图"
     )
+
+
+def _skill_package(frontmatter: str = "id: sk-img-1\nname: 画图\n") -> bytes:
+    from evalp.utils.skill_package import package_entries
+
+    return package_entries([
+        ("image-gen-0.5.3/SKILL.md", f"---\n{frontmatter}---\n# 说明".encode()),
+        ("image-gen-0.5.3/scripts/run.py", b"print('x')"),
+    ])
+
+
+def test_directory_skill_id_and_display_come_from_skill_md_frontmatter():
+    from evalp.workspace_client import SnapshotEntry, snapshot_rule_entry
+
+    r = rule_with(name="{stem_nover}", id="$.id", display="$.name")
+    entry = snapshot_rule_entry("a", r, "skills/image-gen-0.5.3", _skill_package(), directory=True)
+    assert entry == SnapshotEntry("skill/image-gen", "sk-img-1", "画图")
+    # 嵌套字段与数字值；ZIP 文件（非目录）同样从包内 SKILL.md 取值
+    nested = _skill_package("meta:\n  skill_id: 42\nname: image-gen\n")
+    assert snapshot_rule_entry(
+        "a", rule_with(name="$.name", id="$.meta.skill_id"), "skills/image-gen-0.5.3.zip", nested
+    ) == SnapshotEntry("skill/image-gen", "42", "image-gen")
+
+
+def test_directory_skill_missing_frontmatter_field_names_skill_md():
+    from evalp.workspace_client import snapshot_rule_entry
+
+    r = rule_with(name="{stem_nover}", id="$.skill_id")
+    with pytest.raises(WorkspaceError, match=r"找不到 'skill_id'.*SKILL\.md 的 YAML frontmatter"):
+        snapshot_rule_entry("a", r, "skills/image-gen-0.5.3", _skill_package(), directory=True)
+    from evalp.utils.skill_package import package_entries
+
+    no_frontmatter = package_entries([("image-gen/SKILL.md", b"# no frontmatter")])
+    with pytest.raises(WorkspaceError, match=r"找不到 'id'.*SKILL\.md 的 YAML frontmatter"):
+        snapshot_rule_entry(
+            "a", rule_with(name="{stem_nover}", id="$.id"), "skills/x", no_frontmatter, directory=True
+        )
+    with pytest.raises(WorkspaceError, match="取到的不是非空"):
+        snapshot_rule_entry(
+            "a", rule_with(name="{stem_nover}", id="$.id"), "skills/x",
+            _skill_package("id: ' '\n"), directory=True,
+        )

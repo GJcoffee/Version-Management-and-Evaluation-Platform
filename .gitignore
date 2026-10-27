@@ -8,3 +8,47 @@ dist/
 backend/evalp/static/*
 !backend/evalp/static/.gitkeep
 frontend/node_modules/
+
+# Local secrets and machine-specific configuration (never publish)
+.env
+.env.*
+!.env.example
+!.env.sample
+*.local.toml
+*.local.yaml
+*.local.yml
+*.local.json
+cookies.txt
+cookies*.txt
+credentials.json
+credentials*.json
+secrets.enc
+*.pem
+*.key
+.evalp/
+.DS_Store
+
+# HiAgent live configuration exports and private field evidence
+# Keep local files; publish only reviewed synthetic examples and source code.
+/integrations/hiagent/agent/exports/
+/integrations/hiagent/evidence/
+/integrations/hiagent/SETUP.md
+/integrations/hiagent/BASELINE.md
+
+# This active agent configuration contains real application identifiers.
+# Replace with a reviewed placeholder example before sharing configuration.
+/integrations/hiagent/agent/agent.yaml
+
+# Agent projects and working data do not belong in the platform repository.
+/integrations/hiagent/
+exports/
+datasets/
+*.jsonl
+agent.yaml
+.evalp.toml
+release.sh
+BASELINE.md
+evals/
+*.sse
+*.log
+screenshots/

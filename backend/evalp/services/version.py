@@ -9,6 +9,7 @@ diff 的两侧还可以是草稿（取已保存的内容）：草稿 id（``drf_
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -37,6 +38,7 @@ from evalp.spec.models import CodeSpec, ConfigSpec, parse_spec
 from evalp.spec.resolve import iter_pins, unresolve
 from evalp.spec.validate import validate_spec
 from evalp.store.models import Agent, Asset, AssetRevision, Draft, Version, VersionAssetRef, VersionTag
+from evalp.utils.skill_package import SkillPackage, open_package
 from evalp.utils.time import now_iso
 
 _SEQ_RE = re.compile(r"^v(\d+)$")
@@ -212,6 +214,7 @@ class VersionService:
                 paths.append(xpaths.get(spec_path, spec_path))
         items: list[VersionAssetItem] = []
         for asset_id, (asset, rev, paths) in current.items():
+            await self.ctx.svc(AssetService)._fill_skill_meta(asset, rev)
             changed_in, previous = v, None
             for ver, used in history[asset_id][1:]:
                 if ver.seq != changed_in.seq - 1:  # 中间有版本没用这个资产：从头算
@@ -225,7 +228,7 @@ class VersionService:
                     asset_id=asset_id,
                     kind=asset.kind,
                     name=asset.name,
-                    display_name=asset.display_name,
+                    display_name=asset.display_name or (rev.meta or {}).get("display_name"),
                     source_id=asset.source_id,
                     rev=rev.rev,
                     asset_revision_id=rev.id,
@@ -386,9 +389,12 @@ class VersionService:
             except (NotFound, UnicodeDecodeError):
                 return None
 
+        async def load_package(pin: dict[str, Any]) -> SkillPackage | None:
+            return await asyncio.to_thread(open_package, await assets.read_bytes(pin))
+
         async with self.ctx.db.read() as s:
             renames = await self._renames(s, lspec, rspec)
-        result = await diff_specs(lspec, rspec, load_text, renames)
+        result = await diff_specs(lspec, rspec, load_text, renames, load_package)
         return {"left": left, "right": right, **result}
 
     @staticmethod

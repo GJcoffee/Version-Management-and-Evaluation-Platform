@@ -13,6 +13,7 @@ import { formatApiError, type FormattedError } from '@/lib/apiError'
 import { formatBytes } from '@/lib/format'
 import { toast } from '@/stores/toast'
 import { PROMPT_TEMPLATE, TOOL_TEMPLATES, contentTypeForFile, languageFor, validateAssetName } from './assetUtils'
+import { SkillImportDialog } from './SkillImportDialog'
 
 export interface CreateAssetDialogProps {
   open: boolean
@@ -81,6 +82,7 @@ function Inner({ onOpenChange, defaultKind, onDataset }: CreateAssetDialogProps)
     }
   }
 
+  if (kind === 'skill') return <SkillImportDialog onClose={() => onOpenChange(false)} />
   return (
     <Dialog
       open

@@ -5,7 +5,8 @@
 | prompt    | UTF-8 文本；Jinja2 模板语法可解析；meta.variables 列出用到的变量 |
 | tool      | YAML/JSON 解析为 ToolDefinition；parameters 是合法的 JSON Schema |
 | knowledge | Markdown / TXT / JSONL（{id,text,meta}）；大小 <= 20MB          |
-| kb_config / skill / mcp / app_config / database | UTF-8 文本（JSON / Markdown / YAML），按文本存储与 diff |
+| skill     | 原始 ZIP 文件包；兼容旧版 UTF-8 元数据                          |
+| kb_config / mcp / app_config / database | UTF-8 文本（JSON / Markdown / YAML），按文本存储与 diff |
 | dataset   | JSONL / CSV 逐行校验；警告写入 meta.schema_warnings              |
 | file      | 任意；大小 <= 100MB                                            |
 """
@@ -27,6 +28,7 @@ from evalp.errors import ValidationFailed
 from evalp.runtime.tools.definition import ToolDefinition
 from evalp.services.dataset_parse import ParsedCase, parse_dataset
 from evalp.spec.models import format_validation_errors
+from evalp.utils.skill_package import PACKAGE_LIMIT, SkillPackage, legacy_skill_metadata
 
 MB = 1024 * 1024
 MAX_SIZE: dict[str, int] = {
@@ -34,7 +36,7 @@ MAX_SIZE: dict[str, int] = {
     "tool": 5 * MB,
     "knowledge": 20 * MB,
     "kb_config": 5 * MB,
-    "skill": 5 * MB,
+    "skill": PACKAGE_LIMIT,
     "mcp": 5 * MB,
     "app_config": 5 * MB,
     "database": 20 * MB,
@@ -42,7 +44,7 @@ MAX_SIZE: dict[str, int] = {
     "file": 100 * MB,
 }
 
-# 只做文本存储与 diff 的类型（agent 快照里的导出配置，不参与运行）
+# 快照配置类型；skill 额外支持原始文件包，不参与运行
 TEXT_CONFIG_KINDS = ("kb_config", "skill", "mcp", "app_config", "database")
 
 _JINJA = SandboxedEnvironment()
@@ -62,6 +64,8 @@ def default_content_type(kind: str, data: bytes) -> str:
     """未指定 content_type 时的默认值。"""
     if kind == "tool":
         return "application/json" if data.lstrip()[:1] in (b"{", b"[") else "application/x-yaml"
+    if kind == "skill" and data.startswith(b"PK"):
+        return "application/zip"
     if kind in TEXT_CONFIG_KINDS:
         return "application/json" if data.lstrip()[:1] in (b"{", b"[") else "text/markdown"
     return {
@@ -182,7 +186,15 @@ def validate_content(
         )
     if kind == "file":
         return ValidatedContent(ct)
+    if kind == "skill" and (ct == "application/zip" or data.startswith(b"PK")):
+        try:
+            package = SkillPackage(data)
+        except ValueError as exc:
+            raise ValidationFailed(str(exc)) from None
+        return ValidatedContent("application/zip", package.metadata())
     text = decode_text(data)
+    if kind == "skill":
+        return ValidatedContent(ct, legacy_skill_metadata(data))
     if kind in TEXT_CONFIG_KINDS:
         return ValidatedContent(ct)
     if kind == "prompt":

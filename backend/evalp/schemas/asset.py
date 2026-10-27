@@ -102,6 +102,12 @@ class UploadOut(BaseModel):
     size: int
 
 
+class SkillUploadOut(UploadOut):
+    display_name: str
+    suggested_name: str
+    file_count: int
+
+
 class DatasetImport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

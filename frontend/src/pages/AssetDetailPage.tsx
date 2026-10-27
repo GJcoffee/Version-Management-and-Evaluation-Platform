@@ -26,6 +26,7 @@ import { DatasetImportDialog } from './assets/DatasetImportDialog'
 import { NewRevisionDialog } from './assets/NewRevisionDialog'
 import { ReferencesPanel } from './assets/ReferencesPanel'
 import { RevisionDiff } from './assets/RevisionDiff'
+import { SkillContent } from './assets/SkillContent'
 
 export default function AssetDetailPage() {
   const { id } = useParams()
@@ -61,9 +62,10 @@ function AssetDetail({ asset }: { asset: Asset }) {
   // `?rev=N`：从 agent 的资产列表进来时，默认查看该版本用的修订
   const [sp] = useSearchParams()
   const linkedRev = revisions.find((r) => r.rev === Number(sp.get('rev')))
+  const linkedPending = !!sp.get('rev') && revs.isLoading
   const activeId =
-    viewId ?? linkedRev?.id ?? asset.latest?.id ?? revisions.find((r) => r.rev === asset.latest_rev)?.id ?? revisions[0]?.id ?? null
-  const active = revisions.find((r) => r.id === activeId) ?? asset.latest
+    viewId ?? (linkedPending ? null : linkedRev?.id ?? asset.latest?.id ?? revisions.find((r) => r.rev === asset.latest_rev)?.id ?? revisions[0]?.id ?? null)
+  const active = activeId ? revisions.find((r) => r.id === activeId) ?? asset.latest : undefined
   const isDataset = asset.kind === 'dataset'
   const content = useRevision(isDataset ? null : activeId)
   const deleted = !!asset.deleted_at
@@ -92,7 +94,7 @@ function AssetDetail({ asset }: { asset: Asset }) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="font-mono text-lg font-semibold">{assetTitle(asset)}</h1>
+            <h1 className="font-mono text-lg font-semibold">{asset.kind === 'skill' && typeof content.data?.meta.display_name === 'string' ? content.data.meta.display_name : assetTitle(asset)}</h1>
             <Badge variant="info">{ASSET_KIND_LABEL[asset.kind]}</Badge>
             <Badge variant="outline" className="font-mono">
               当前 r{asset.latest_rev}
@@ -218,7 +220,7 @@ function AssetDetail({ asset }: { asset: Asset }) {
 
             <TabsContent value="content" className="pt-4">
               {!active ? (
-                <EmptyState title="没有修订" />
+                revs.isLoading ? <LoadingBlock /> : <EmptyState title="没有修订" />
               ) : (
                 <div className="space-y-3">
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -228,7 +230,7 @@ function AssetDetail({ asset }: { asset: Asset }) {
                       hash <IdText value={active.blob_hash} />
                     </span>
                     {Object.entries(active.meta)
-                      .filter(([k, v]) => k !== 'schema_warnings' && k !== 'column_map' && v !== null && typeof v !== 'object')
+                      .filter(([k, v]) => !['schema_warnings', 'column_map', 'display_name', 'default_path', 'format'].includes(k) && v !== null && typeof v !== 'object')
                       .map(([k, v]) => (
                         <span key={k}>
                           {k}: <span className="font-mono text-foreground">{String(v)}</span>
@@ -253,6 +255,8 @@ function AssetDetail({ asset }: { asset: Asset }) {
                   )}
                   {isDataset ? (
                     <DatasetCases key={active.id} revId={active.id} total={active.meta.case_count} />
+                  ) : asset.kind === 'skill' ? (
+                    <SkillContent key={active.id} revisionId={active.id} packaged={active.meta.format === 'skill_package'} />
                   ) : content.isLoading ? (
                     <LoadingBlock />
                   ) : content.data?.content_available ? (

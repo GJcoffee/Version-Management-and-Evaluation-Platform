@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import re
+from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
 from fastapi.responses import FileResponse
 
 from evalp.api.deps import get_ctx
@@ -20,9 +25,17 @@ from evalp.schemas.asset import (
     RevisionCreate,
     RevisionDetail,
     RevisionOut,
+    SkillUploadOut,
     UploadOut,
 )
 from evalp.services.asset import AssetService
+from evalp.utils.skill_package import (
+    ENTRY_LIMIT,
+    EXPANDED_LIMIT,
+    PACKAGE_LIMIT,
+    SkillPackage,
+    package_entries,
+)
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
@@ -55,6 +68,44 @@ async def upload_blob(file: UploadFile = File(...), ctx: AppContext = Depends(ge
     return await ctx.svc(AssetService).upload(file.read)
 
 
+@router.post("/skill/upload", response_model=SkillUploadOut)
+async def upload_skill(
+    files: list[UploadFile] = File(...),
+    folder: bool = Form(False),
+    ctx: AppContext = Depends(get_ctx),
+):
+    """导入原始 ZIP，或带相对路径的文件夹；ZIP 字节与目录层级保持原样。"""
+    if len(files) > ENTRY_LIMIT or (not folder and len(files) != 1):
+        raise ValidationFailed("请选择一个 Skill ZIP 或一个文件夹")
+    entries: list[tuple[str, bytes]] = []
+    total = 0
+    limit = EXPANDED_LIMIT if folder else PACKAGE_LIMIT
+    for file in files:
+        data = await file.read(limit - total + 1)
+        total += len(data)
+        if total > limit:
+            raise ValidationFailed("Skill 文件包超出大小限制")
+        entries.append((file.filename or "", data))
+    try:
+        data = await asyncio.to_thread(package_entries, entries) if folder else entries[0][1]
+        package = await asyncio.to_thread(SkillPackage, data)
+    except ValueError as exc:
+        raise ValidationFailed(str(exc)) from None
+    h = await ctx.blobs.put_bytes(data)
+    stem = PurePosixPath(package.default_path).parent.name
+    if not stem:
+        stem = package.display_name if package.display_name != "skill" else PurePosixPath(entries[0][0]).stem
+    stem = re.sub(r"-(?:v\d+(?:\.\d+)*|\d+(?:\.\d+)+)$", "", stem, flags=re.IGNORECASE)
+    suggested = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")[:64].rstrip("-")
+    if not suggested or not stem.isascii():
+        digest = hashlib.sha256(stem.encode()).hexdigest()[:12]
+        suggested = (suggested[:50].rstrip("-") or "skill") + "-" + digest
+    return SkillUploadOut(
+        blob_upload_id=h, size=len(data), display_name=package.display_name,
+        suggested_name=suggested, file_count=package.metadata()["file_count"],
+    )
+
+
 @router.get("/diff")
 async def diff_revisions(left: str, right: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
     """两个资产修订（arv_…）的 diff。"""
@@ -73,12 +124,43 @@ async def get_revision_raw(revision_id: str, ctx: AppContext = Depends(get_ctx))
     rev = await ctx.svc(AssetService).get_revision(revision_id)
     if not ctx.blobs.exists(rev.blob_hash):
         raise NotFound(f"blob 不存在: {rev.blob_hash}")
+    filename = f"{rev.asset_id}@{rev.rev}"
+    if rev.meta.get("format") == "skill_package":
+        source_name = str(rev.meta.get("display_name") or rev.asset_id).replace("/", "-").replace("\\", "-")
+        filename = f"{source_name}@r{rev.rev}.zip"
     return FileResponse(
         ctx.blobs.path(rev.blob_hash),
         media_type=rev.content_type,
-        filename=f"{rev.asset_id}@{rev.rev}",
+        filename=filename,
         content_disposition_type="attachment",
         headers={"X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.get("/revisions/{revision_id}/skill/tree")
+async def get_skill_tree(revision_id: str, ctx: AppContext = Depends(get_ctx)):
+    package = await ctx.svc(AssetService).skill_package(revision_id)
+    return package.tree()
+
+
+@router.get("/revisions/{revision_id}/skill/file")
+async def get_skill_file(
+    revision_id: str, path: str = Query(...), download: bool = False,
+    ctx: AppContext = Depends(get_ctx),
+):
+    package = await ctx.svc(AssetService).skill_package(revision_id)
+    try:
+        if not download:
+            return await asyncio.to_thread(package.preview, path)
+        data = await asyncio.to_thread(package.read, path)
+    except KeyError:
+        raise NotFound(f"Skill 文件不存在: {path}") from None
+    return Response(
+        data, media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(PurePosixPath(path).name)}",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

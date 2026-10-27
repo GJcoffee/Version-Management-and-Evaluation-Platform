@@ -50,7 +50,7 @@ from evalp.services.asset_content import (
     validate_content,
 )
 from evalp.services.conventions import conventions_of
-from evalp.spec.diff import identity_paths, unified_content_diff
+from evalp.spec.diff import diff_packages, identity_paths, unified_content_diff
 from evalp.spec.refs import AssetRef, parse_asset_ref, validate_asset_name
 from evalp.spec.resolve import ResolvedAsset, lookup_revision
 from evalp.store.models import (
@@ -64,6 +64,7 @@ from evalp.store.models import (
     Version,
     VersionAssetRef,
 )
+from evalp.utils.skill_package import SkillPackage, legacy_skill_metadata, open_package
 from evalp.utils.time import now_iso
 
 log = get_logger(__name__)
@@ -94,7 +95,7 @@ def asset_out(a: Asset, latest: AssetRevision | None = None) -> AssetOut:
         id=a.id,
         kind=a.kind,
         name=a.name,
-        display_name=a.display_name,
+        display_name=a.display_name or ((latest.meta or {}).get("display_name") if latest else None),
         source_id=a.source_id,
         former_names=list(a.meta.get("former_names", [])),
         description=a.description,
@@ -153,7 +154,11 @@ class AssetService:
         if q:
             like = f"%{q}%"
             stmt = stmt.where(
-                or_(Asset.name.like(like), Asset.display_name.like(like), Asset.description.like(like))
+                or_(Asset.name.like(like), Asset.display_name.like(like), Asset.description.like(like),
+                    select(AssetRevision.id).where(
+                        AssetRevision.asset_id == Asset.id, AssetRevision.rev == Asset.latest_rev,
+                        func.json_extract(cast(AssetRevision.meta, Text), "$.display_name").like(like),
+                    ).exists())
             )
         async with self.ctx.db.read() as s:
             page = await paginate(s, stmt, Asset.id, limit=limit, cursor=cursor)
@@ -166,6 +171,8 @@ class AssetService:
                     )
                 ).scalars()
                 latest = {(r.asset_id, r.rev): r for r in rows}
+                for a in assets:
+                    await self._fill_skill_meta(a, latest.get((a.id, a.latest_rev)))
             items = [asset_out(a, latest.get((a.id, a.latest_rev))) for a in assets]
         return Page[AssetOut](items=items, next_cursor=page.next_cursor)
 
@@ -173,7 +180,15 @@ class AssetService:
         """按 id 获取资产（含最新修订摘要，已软删除的也可获取）。"""
         async with self.ctx.db.read() as s:
             a = await self._get_asset(s, asset_id)
-            return asset_out(a, await self._latest_of(s, a))
+            latest = await self._latest_of(s, a)
+            await self._fill_skill_meta(a, latest)
+            return asset_out(a, latest)
+
+    async def _fill_skill_meta(self, asset: Asset, revision: AssetRevision | None) -> None:
+        """兼容升级前已入库的 Skill 元数据，无需修改历史 blob。"""
+        if asset.kind == "skill" and revision and not (revision.meta or {}).get("format"):
+            data = await self.ctx.blobs.get_bytes(revision.blob_hash)
+            revision.meta = {**(revision.meta or {}), **legacy_skill_metadata(data)}
 
     async def find(self, kind: str, name: str, *, include_deleted: bool = False) -> AssetOut | None:
         """按 (kind, name) 查找；不存在返回 None。"""
@@ -237,16 +252,25 @@ class AssetService:
                 else await self._rev_orm(s, asset_id or "", rev if rev is not None else "latest")
             )
             a = await self._get_asset(s, r.asset_id)
+            await self._fill_skill_meta(a, r)
             base = revision_out(r)
             kind, name = a.kind, a.name
         content: str | None = None
-        if base.size <= CONTENT_INLINE_LIMIT:
+        if base.size <= CONTENT_INLINE_LIMIT and base.meta.get("format") != "skill_package":
             try:
                 content = (await self.ctx.blobs.get_bytes(base.blob_hash)).decode("utf-8")
             except UnicodeDecodeError:
                 content = None
         return RevisionDetail(
             **base.model_dump(), kind=kind, name=name, content=content, content_available=content is not None
+        )
+
+    async def skill_package(self, revision_id: str) -> SkillPackage:
+        detail = await self.revision_detail(revision_id=revision_id)
+        if detail.kind != "skill" or detail.meta.get("format") != "skill_package":
+            raise ValidationFailed("该修订只有 Skill 元数据，缺少原始文件包")
+        return await asyncio.to_thread(
+            SkillPackage, await self.read_revision_bytes(revision_id), verify_contents=False,
         )
 
     # ------------------------------------------------------------ 供其他模块使用
@@ -776,6 +800,15 @@ class AssetService:
             }
         lb = await self.ctx.blobs.get_bytes(lo.blob_hash)
         rb = await self.ctx.blobs.get_bytes(ro.blob_hash)
+        if kind == "skill":
+            lpkg, rpkg = await asyncio.to_thread(open_package, lb), await asyncio.to_thread(open_package, rb)
+            if lpkg is not None and rpkg is not None:
+                return {
+                    **head,
+                    "type": "skill_package",
+                    "content_diff": None,
+                    "package_diff": await asyncio.to_thread(diff_packages, lpkg, rpkg),
+                }
         try:
             lt, rt = lb.decode("utf-8"), rb.decode("utf-8")
         except UnicodeDecodeError:

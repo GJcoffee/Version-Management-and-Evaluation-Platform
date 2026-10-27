@@ -10,9 +10,15 @@ import { formatApiError, type FormattedError } from '@/lib/apiError'
 import { formatBytes } from '@/lib/format'
 import { toast } from '@/stores/toast'
 import { contentTypeForFile, languageFor } from './assetUtils'
+import { SkillImportDialog } from './SkillImportDialog'
 
 /** 新建修订（prompt / tool / knowledge / file）：编辑内容或上传文件，填写提交说明 */
-export function NewRevisionDialog({
+export function NewRevisionDialog(props: Parameters<typeof TextRevisionDialog>[0]) {
+  if (props.asset.kind === 'skill') return <SkillImportDialog asset={props.asset} onClose={props.onClose} onCreated={props.onCreated} />
+  return <TextRevisionDialog {...props} />
+}
+
+function TextRevisionDialog({
   asset,
   baseContent,
   baseContentType,

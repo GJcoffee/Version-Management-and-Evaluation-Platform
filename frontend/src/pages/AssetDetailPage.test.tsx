@@ -1,5 +1,7 @@
+// Synthetic fixtures authored by hand; no recorded agent data.
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Asset, AssetRevision } from '@/api/types'
@@ -35,12 +37,18 @@ const asset = (meta: AssetRevision['meta']): Asset => ({
   latest: rev(2, meta),
 })
 
-function setup(meta: AssetRevision['meta'], url = '/assets/ast_1') {
+function setup(meta: AssetRevision['meta'], url = '/assets/ast_1', native = false) {
   mockApi({
     'GET /api/v1/assets/ast_1': asset(meta),
     'GET /api/v1/assets/ast_1/revisions': { items: [rev(2, meta), rev(1, meta)], next_cursor: null },
     'GET /api/v1/assets/revisions/arv_1': { ...rev(1, meta), kind: 'skill', name: 'crawl-engine', content: '{"steps": 3}', content_available: true },
     'GET /api/v1/assets/revisions/arv_2': { ...rev(2, meta), kind: 'skill', name: 'crawl-engine', content: '{"steps": 4}', content_available: true },
+    ...(native ? {
+      'GET /api/v1/assets/revisions/arv_1/skill/tree': { display_name: 'image-gen', file_count: 1, default_path: 'image-gen-1/SKILL.md', entries: [{ path: 'image-gen-1/SKILL.md', type: 'file', size: 30 }] },
+      'GET /api/v1/assets/revisions/arv_2/skill/tree': { display_name: 'image-gen', file_count: 1, default_path: 'image-gen-2/SKILL.md', entries: [{ path: 'image-gen-2/SKILL.md', type: 'file', size: 30 }] },
+      'GET /api/v1/assets/revisions/arv_1/skill/file': { path: 'image-gen-1/SKILL.md', content: '# 第一版文档', content_available: true, size: 30 },
+      'GET /api/v1/assets/revisions/arv_2/skill/file': { path: 'image-gen-2/SKILL.md', content: '# 第二版文档', content_available: true, size: 30 },
+    } : {}),
   })
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
@@ -74,6 +82,18 @@ describe('AssetDetailPage：来自 agent 快照的资产只读', () => {
 
   it('?rev=N 默认查看该修订的内容', async () => {
     setup({ origin: 'snapshot' }, '/assets/ast_1?rev=1')
-    expect(await screen.findByTestId('code')).toHaveTextContent('"steps": 3')
+    expect(await screen.findByText('缺少 Skill 原始文件')).toBeInTheDocument()
+    expect(screen.queryByTestId('code')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '下载原始元数据' })).toHaveAttribute('href', '/api/v1/assets/revisions/arv_1/raw')
+  })
+
+  it('原始包展示原名，切换修订后打开当时的 SKILL.md 和目录', async () => {
+    setup({ origin: 'snapshot', format: 'skill_package', display_name: 'image-gen' }, '/assets/ast_1', true)
+    expect(await screen.findByRole('heading', { name: 'image-gen' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '第二版文档' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /r1/ }))
+    expect(await screen.findByRole('heading', { name: '第一版文档' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'image-gen-1/SKILL.md' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByRole('button', { name: 'image-gen-2/SKILL.md' })).not.toBeInTheDocument()
   })
 })

@@ -8,6 +8,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { formatBytes } from '@/lib/format'
 import { languageFor } from './assetUtils'
+import { PackageDiffView } from './PackageDiffView'
 
 /** 两个修订的对比：文本类用 Monaco DiffEditor，数据集显示增删改明细 */
 export function RevisionDiff({ kind, leftId, rightId }: { kind: AssetKind; leftId: string; rightId: string }) {
@@ -17,6 +18,13 @@ export function RevisionDiff({ kind, leftId, rightId }: { kind: AssetKind; leftI
   const d = diff.data
   if (!d) return null
   if (d.type === 'dataset') return <DatasetDiffView d={d} />
+  if (d.type === 'skill_package') {
+    return (
+      <div className="h-[560px]">
+        <PackageDiffView diff={d.package_diff} leftRevisionId={leftId} rightRevisionId={rightId} />
+      </div>
+    )
+  }
   if (d.type === 'binary') {
     return (
       <EmptyState title="二进制内容，无法逐行对比" description={`左侧 ${formatBytes(d.sizes.left)}，右侧 ${formatBytes(d.sizes.right)}`} />

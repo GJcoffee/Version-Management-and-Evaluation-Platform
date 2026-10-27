@@ -14,7 +14,7 @@ from evalp import actions
 from evalp.cli.main import app as cli_app
 from evalp.client import EvalpClient, EvalpClientError
 from evalp.mcp.server import build_server
-from evalp.workspace_client import Workspace, find_project
+from evalp.workspace_client import Workspace, WorkspaceError, find_project
 from mcp import Client
 from typer.testing import CliRunner
 
@@ -325,6 +325,28 @@ async def test_require_source_id_rejects_push_and_publish_without_id(project, ws
     # 规则配了 id（不需要 id 的类型不受限）就能推送
     write_agent(project, snapshot={**AGENT["snapshot"], "map": [SKILL_RULE, {**mcp_rule, "id": "$.id"}]})
     assert (await ws.push(evalp_client, force=True)).draft_id
+
+
+async def test_directory_skill_with_frontmatter_id_satisfies_require_source_id(
+    project, ws, evalp_client, client
+):
+    await ws.push(evalp_client)  # 先建 agent
+    await set_conventions(client, require_source_id=["skill"])
+    (project / "exports" / "current" / "skills" / "crawl-0.5.3.json").unlink()
+    root = project / "exports" / "current" / "skills" / "image-gen-0.0.1"
+    root.mkdir()
+    (root / "SKILL.md").write_text("---\nskill_id: sk-img-1\nname: 画图\n---\n画一只猫\n", encoding="utf-8")
+    rule = {
+        "glob": "skills/*", "kind": "skill", "name": "{stem_nover}", "id": "$.skill_id", "display": "$.name",
+    }
+    write_agent(project, snapshot={**AGENT["snapshot"], "map": [rule]})
+    assert (await ws.push(evalp_client, force=True)).draft_id
+    (asset,) = [a for a in await list_assets(client, kind="skill") if a["name"] == "image-gen"]
+    assert (asset["name"], asset["source_id"], asset["display_name"]) == ("image-gen", "sk-img-1", "画图")
+
+    (root / "SKILL.md").write_text("---\nname: 画图\n---\n画一只猫\n", encoding="utf-8")
+    with pytest.raises(WorkspaceError, match=r"找不到 'skill_id'.*SKILL\.md 的 YAML frontmatter"):
+        await ws.push(evalp_client, force=True)
 
 
 # ---------------------------------------------------------------- 规范：快照资产只读

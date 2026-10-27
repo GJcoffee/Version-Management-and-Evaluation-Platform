@@ -673,7 +673,8 @@ def render_conventions(name: str, conv: dict[str, Any] | None, spec: dict[str, A
         "命中的文件按 `kind` 入库为资产，按顺序取第一条匹配的。",
         "- `name`、`id` 的值以 `$.` 开头时，从 JSON 文件内容按点路径取值"
         "（如 `$.id`、`$.meta.skill_id`、`$.name`）；"
-        "否则是模板，变量 `{stem}` `{stem_nover}` `{agent}` `{path}`。字段名按实际导出的 JSON 调整。",
+        "否则是模板，变量 `{stem}` `{stem_nover}` `{agent}` `{path}`。字段名按实际导出的 JSON 调整；"
+        "目录 / ZIP 形式的 skill 从包内 SKILL.md 的 YAML frontmatter 取值。",
         "- `name` 的值规范化后成为资产名（小写字母、数字、连字符），原文作为显示名保留（可以是中文）。",
         "- `id` 是来源平台上的稳定 ID：相同的 `(kind, id)` 始终是同一个资产，文件改名或名字变了会自动改名"
         "并保留修订历史，不会存成新资产。skill / mcp 等有稳定 ID 的类型都应配置 `id`。",

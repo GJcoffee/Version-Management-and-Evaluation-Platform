@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from evalp.client import EvalpClient, EvalpClientError
 from evalp.spec.models import SnapshotRule, format_validation_errors
 from evalp.spec.refs import RefError, validate_asset_name
+from evalp.utils.skill_package import SkillPackage, package_directory
 from evalp.yamlio import dump_preserving, plain_dump
 
 CONFIG_NAME = ".evalp.toml"
@@ -315,38 +316,59 @@ class SnapshotEntry:
     display_name: str | None = None
 
 
-def _json_value(data: bytes, path: str, rel: str, rule: SnapshotRule, field: str) -> str:
-    """按 ``$.a.b.0`` 点路径从 JSON 文件内容取值（对象按键、数组按下标），要求取到非空的字符串或数字。"""
-    where = f"文件 {rel} 按规则 {{glob: {rule.glob}, {field}: {path}}}"
-    try:
-        node: Any = json.loads(data)
-    except ValueError:
-        raise WorkspaceError(f"{where} 取值失败: 文件不是合法的 JSON") from None
+def _walk_value(node: Any, path: str, where: str, hint: str) -> str:
+    """按 ``$.a.b.0`` 点路径取值（对象按键、数组按下标），要求取到非空的字符串或数字。"""
     for seg in path[2:].split("."):
         if isinstance(node, dict) and seg in node:
             node = node[seg]
         elif isinstance(node, list) and seg.isdigit() and int(seg) < len(node):
             node = node[int(seg)]
         else:
-            raise WorkspaceError(f"{where} 取值失败: 找不到 {seg!r}。请按实际导出的 JSON 调整字段路径。")
+            raise WorkspaceError(f"{where} 取值失败: 找不到 {seg!r}。{hint}")
     if isinstance(node, bool) or not isinstance(node, str | int | float) or not str(node).strip():
         raise WorkspaceError(f"{where} 取值失败: 取到的不是非空的字符串或数字（{node!r}）")
     return str(node).strip()
 
 
-def snapshot_rule_entry(agent_name: str, rule: SnapshotRule, rel: str, data: bytes) -> SnapshotEntry:
+def _json_value(data: bytes, path: str, rel: str, rule: SnapshotRule, field: str) -> str:
+    where = f"文件 {rel} 按规则 {{glob: {rule.glob}, {field}: {path}}}"
+    try:
+        node: Any = json.loads(data)
+    except ValueError:
+        raise WorkspaceError(f"{where} 取值失败: 文件不是合法的 JSON") from None
+    return _walk_value(node, path, where, "请按实际导出的 JSON 调整字段路径。")
+
+
+def _frontmatter_value(data: bytes, path: str, rel: str, rule: SnapshotRule, field: str) -> str:
+    where = (
+        f"目录 / ZIP skill {rel} 按规则 {{glob: {rule.glob}, {field}: {path}}}"
+        "（从 SKILL.md 的 YAML frontmatter 取值）"
+    )
+    try:
+        package = SkillPackage(data, verify_contents=False)
+    except ValueError as exc:
+        raise WorkspaceError(f"{where} 取值失败: {exc}") from None
+    hint = "目录 skill 的 $. 从 SKILL.md 的 YAML frontmatter 取值，请按实际字段调整。"
+    return _walk_value(package.frontmatter, path, where, hint)
+
+
+def snapshot_rule_entry(
+    agent_name: str, rule: SnapshotRule, rel: str, data: bytes, *, directory: bool = False
+) -> SnapshotEntry:
     """按规则展开快照文件 ``rel``（内容 ``data``）的资产 ``kind/name``、来源 ID 与显示名。
 
-    ``name`` / ``id`` / ``display`` 以 ``$.`` 开头时从 JSON 内容取值，否则按模板展开。
+    ``name`` / ``id`` / ``display`` 以 ``$.`` 开头时从 JSON 内容取值（目录 / ZIP skill 从 SKILL.md 的
+    YAML frontmatter 取值），否则按模板展开。
     资产名由 ``name`` 的值规范化得到（小写，非字母数字替换为连字符）；显示名取 ``display``，
     省略时取 ``name`` 的原值；``id`` 保持原样。展开结果不合法时抛 WorkspaceError。
     """
     p = Path(rel)
+    stem = p.name if directory else p.stem
     values = {
-        "stem": p.stem,
-        "stem_nover": strip_version(p.stem),
+        "stem": stem,
+        "stem_nover": strip_version(stem),
         "agent": agent_name,
-        "path": p.with_suffix("").as_posix(),
+        "path": p.as_posix() if directory else p.with_suffix("").as_posix(),
     }
 
     def expand(m: re.Match[str]) -> str:
@@ -359,11 +381,17 @@ def snapshot_rule_entry(agent_name: str, rule: SnapshotRule, rel: str, data: byt
 
     def evaluate(value: str, field: str) -> str:
         if value.startswith("$."):
+            if rule.kind == "skill" and data.startswith(b"PK"):
+                return _frontmatter_value(data, value, rel, rule, field)
             return _json_value(data, value, rel, rule, field)
         return _TEMPLATE_VAR.sub(expand, value)
 
     display = evaluate(rule.name, "name")
     name = normalize_stem(display)
+    if directory and rule.kind == "skill" and (not name or not display.isascii()):
+        digest = hashlib.sha256(display.encode()).hexdigest()[:12]
+        prefix = name[:50].rstrip("-") or "skill"
+        name = f"{prefix}-{digest}"
     try:
         validate_asset_name(name)
     except RefError as e:
@@ -374,6 +402,8 @@ def snapshot_rule_entry(agent_name: str, rule: SnapshotRule, rel: str, data: byt
     source_id = evaluate(rule.id, "id") if rule.id else None
     if rule.display:
         display = evaluate(rule.display, "display")
+    elif directory and rule.kind == "skill":
+        display = SkillPackage(data, verify_contents=False).display_name
     return SnapshotEntry(f"{rule.kind}/{name}", source_id, display)
 
 
@@ -421,6 +451,8 @@ class LocalFile:
             ext = self.path.rsplit(".", 1)[-1].lower() if "." in self.path else ""
             if not self.asset.startswith("file/") and ext in _CONTENT_TYPES:
                 item["content_type"] = _CONTENT_TYPES[ext]
+        if self.asset.startswith("skill/") and self.data.startswith(b"PK"):
+            item["content_type"] = "application/zip"
         if with_content:
             try:
                 item["content"] = self.data.decode("utf-8")
@@ -515,11 +547,30 @@ class Workspace:
         base = self.root / snap_dir
         if not base.is_dir():
             raise WorkspaceError(f"{self.project.spec_path} 的 snapshot.dir 不是目录: {snap_dir}")
-        return {
-            p.relative_to(base).as_posix(): p.relative_to(self.root).as_posix()
-            for p in sorted(base.rglob("*"))
-            if p.is_file()
-        }
+        snap = spec.get("snapshot")
+        rules = []
+        for i, raw in enumerate((snap.get("map") or []) if isinstance(snap, dict) else []):
+            try:
+                rules.append(SnapshotRule.model_validate(raw))
+            except ValidationError as exc:
+                problems = "; ".join(
+                    "{}: {}".format(x["path"], x["message"])
+                    for x in format_validation_errors(exc)
+                )
+                raise WorkspaceError(f"snapshot.map[{i}] 不合法: {problems}") from None
+        out: dict[str, str] = {}
+        packages: list[Path] = []
+        for item in sorted(base.rglob("*")):
+            if any(item.is_relative_to(root) for root in packages):
+                continue
+            rel = item.relative_to(base).as_posix()
+            rule = next((r for r in rules if glob_match(r.glob, rel)), None)
+            if item.is_dir() and rule and rule.kind == "skill":
+                packages.append(item)
+                out[rel] = item.relative_to(self.root).as_posix()
+            elif item.is_file():
+                out[rel] = item.relative_to(self.root).as_posix()
+        return out
 
     def snapshot_entries(self, spec: dict[str, Any]) -> dict[str, SnapshotEntry]:
         """快照目录内每个文件对应的资产：目录内相对路径 -> :class:`SnapshotEntry`。
@@ -541,7 +592,12 @@ class Workspace:
         for rel, path in self.snapshot_files(spec).items():
             rule = next((r for r in rules if glob_match(r.glob, rel)), None)
             out[rel] = (
-                snapshot_rule_entry(self.project.agent_name, rule, rel, (self.root / path).read_bytes())
+                snapshot_rule_entry(
+                    self.project.agent_name, rule, rel,
+                    package_directory(self.root / path) if (self.root / path).is_dir()
+                    else (self.root / path).read_bytes(),
+                    directory=(self.root / path).is_dir(),
+                )
                 if rule
                 else SnapshotEntry(snapshot_asset(self.project.agent_name, rel))
             )
@@ -581,7 +637,14 @@ class Workspace:
             seen[asset] = path
         files = []
         for path, asset in sorted(mapping.items()):
-            data = (self.root / path).read_bytes()
+            source = self.root / path
+            try:
+                data = (
+                    package_directory(source)
+                    if source.is_dir() and asset.startswith("skill/") else source.read_bytes()
+                )
+            except ValueError as exc:
+                raise WorkspaceError(str(exc)) from None
             entry = snap_entries.get(path)
             files.append(
                 LocalFile(

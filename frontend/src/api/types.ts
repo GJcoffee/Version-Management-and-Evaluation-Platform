@@ -440,6 +440,16 @@ export interface ContentDiff {
   text: string
 }
 
+/** 两个 Skill 文件包的逐文件差异；路径相对各自的顶层目录（`left_root` / `right_root`，没有则为空串） */
+export interface PackageDiff {
+  added: string[]
+  removed: string[]
+  modified: Array<{ path: string; /** 二进制或过大的文件没有 */ content_diff?: ContentDiff }>
+  unchanged_count: number
+  left_root: string
+  right_root: string
+}
+
 export interface SpecChange {
   /**
    * 点号连接；列表元素按身份键：`tools[query-order]`、`knowledge.inject[faq]`，其余按下标 `a[1]`；
@@ -452,6 +462,8 @@ export interface SpecChange {
   left?: unknown
   right?: unknown
   content_diff?: ContentDiff
+  /** 两侧都是 Skill 文件包的 asset_changed */
+  package_diff?: PackageDiff
 }
 
 /** diff 的一侧：版本，或草稿（`draft: true`，没有 seq，有 name / revision） */
@@ -557,6 +569,29 @@ export interface AssetWriteResult {
   created: boolean
 }
 
+export interface SkillTree {
+  format: 'skill_package'
+  display_name: string
+  file_count: number
+  default_path: string
+  entries: Array<{ path: string; type: 'file' | 'directory'; size: number }>
+}
+
+export interface SkillFile {
+  path: string
+  size: number
+  content: string | null
+  content_available: boolean
+}
+
+export interface SkillUpload {
+  blob_upload_id: string
+  size: number
+  display_name: string
+  suggested_name: string
+  file_count: number
+}
+
 export interface AssetDeleteResult {
   deleted: 'soft' | 'hard'
   id: string
@@ -610,6 +645,11 @@ export interface BinaryAssetDiff extends AssetDiffBase {
   content_diff: null
   sizes: { left: number; right: number }
 }
+export interface SkillPackageAssetDiff extends AssetDiffBase {
+  type: 'skill_package'
+  content_diff: null
+  package_diff: PackageDiff
+}
 export interface DatasetAssetDiff extends AssetDiffBase {
   type: 'dataset'
   summary: { added: number; removed: number; modified: number; unchanged: number; left_count: number; right_count: number }
@@ -623,7 +663,7 @@ export interface DatasetAssetDiff extends AssetDiffBase {
   }>
   truncated: boolean
 }
-export type AssetDiff = TextAssetDiff | BinaryAssetDiff | DatasetAssetDiff
+export type AssetDiff = TextAssetDiff | BinaryAssetDiff | SkillPackageAssetDiff | DatasetAssetDiff
 
 /** 数据集修订解析后的用例 */
 export interface EvalCase {

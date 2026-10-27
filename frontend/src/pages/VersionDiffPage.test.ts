@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SpecChange, VersionAssetRef } from '@/api/types'
-import { assetChangeInfo, assetChangeText, findAssetForPath, findLeftAsset, groupChanges, groupOfPath } from './VersionDiffPage'
+import { assetChangeInfo, assetChangeText, findAssetForPath, findLeftAsset, groupChanges, groupOfPath, packageChangeText } from './VersionDiffPage'
 
 const ch = (path: string, op: SpecChange['op'] = 'replace'): SpecChange => ({ path, op })
 
@@ -77,5 +77,16 @@ describe('资产改名', () => {
     ]
     expect(findAssetForPath(left, renamed.path)).toBeUndefined()
     expect(findLeftAsset(left, renamed)?.asset_revision_id).toBe('arv_old')
+  })
+})
+
+describe('Skill 文件包变化摘要', () => {
+  it('列出新增、删除、修改的文件数', () => {
+    expect(
+      packageChangeText({
+        added: ['a'], removed: ['b', 'c'], modified: [{ path: 'SKILL.md' }, { path: 'd' }, { path: 'e' }],
+        unchanged_count: 1, left_root: '', right_root: '',
+      }),
+    ).toBe('新增 1 · 删除 2 · 修改 3')
   })
 })
