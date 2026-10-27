@@ -128,3 +128,17 @@ describe('表单 <-> YAML 同步', () => {
     expect(r.ok && r.value).toEqual({ kind: 'config' })
   })
 })
+
+describe('lineOfPath：快照里的资产按 类型/名称 定位', () => {
+  const SNAP = `kind: code
+snapshot:
+  dir: exports/current
+  files:
+    skills/crawl-engine-0.5.3.json: asset://skill/crawl-engine@3
+    platform/app-config.json: asset://app_config/bot-app-config@1
+`
+  it('键是文件路径，路径里的 snapshot.files[skill/crawl-engine] 找到值引用该资产的那一行', () => {
+    expect(lineOfPath(SNAP, 'snapshot.files[skill/crawl-engine]')).toBe(5)
+    expect(lineOfPath(SNAP, 'snapshot.files[app_config/bot-app-config]')).toBe(6)
+  })
+})

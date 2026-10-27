@@ -101,6 +101,27 @@ async def test_publish_creates_version_with_resolved_spec(api, client, ctx, worl
     assert (await client.get(f"{API}/agents/bot")).json()["latest_version"]["id"] == v["id"]
 
 
+async def test_version_assets_for_config_agent_merge_paths_and_track_last_change(api, client, world):
+    v1 = (await api.publish(world["draft"]))["version"]
+    await api.revision(world["prompt"]["asset"]["id"], "你是客服。\n请非常礼貌。\n")
+    draft = await api.draft(world["draft"]["id"])
+    v2 = (await api.publish(draft))["version"]
+    out = (await client.get(f"{API}/versions/{v2['id']}/assets")).json()
+    items = {i["name"]: i for i in out["items"]}
+    assert [i["kind"] for i in out["items"]] == ["knowledge", "prompt", "tool"]
+    assert (
+        items["sys"]["rev"] == 2 and items["sys"]["changed_in_seq"] == 2 and items["sys"]["previous_rev"] == 1
+    )
+    # 没改过的资产：最近一次变化在首次出现的版本
+    assert items["q"]["changed_in_seq"] == 1 and items["q"]["previous_rev"] is None
+    assert items["q"]["changed_in_version_id"] == v1["id"] and items["q"]["origin"] is None
+    # 同一个资产在多处引用：合并为一项，列出全部位置
+    assert items["faq"]["spec_paths"] == [
+        "knowledge.inject[faq]",
+        "tools[knowledge_search].with.sources[faq]",
+    ]
+
+
 async def test_publish_same_content_twice_gives_one_version(api, client, world):
     first = await api.publish(world["draft"])
     second = await api.publish(world["draft"])

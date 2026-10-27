@@ -1,6 +1,6 @@
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../client'
-import type { Draft, Page, Version, VersionDiff, VersionSummary, VersionTag } from '../types'
+import type { Draft, Page, Version, VersionAssets, VersionDiff, VersionSummary, VersionTag } from '../types'
 import { agentKeys } from './agents'
 import { draftKeys } from './drafts'
 
@@ -31,6 +31,15 @@ export function useVersion(ref: string | undefined | null) {
     queryKey: versionKeys.detail(ref ?? ''),
     queryFn: () => api.get<Version>(`/versions/${encodeURIComponent(ref!)}`),
     enabled: !!ref,
+  })
+}
+
+/** 版本绑定的资产：所用修订、来源（只读标记）、最近一次变化发生在哪个版本 */
+export function useVersionAssets(versionId: string | undefined | null) {
+  return useQuery({
+    queryKey: [...versionKeys.detail(versionId ?? ''), 'assets'] as const,
+    queryFn: () => api.get<VersionAssets>(`/versions/${encodeURIComponent(versionId!)}/assets`),
+    enabled: !!versionId,
   })
 }
 

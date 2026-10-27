@@ -22,7 +22,9 @@ from evalp.errors import NotFound, ValidationFailed
 from evalp.schemas.agent import (
     DraftOut,
     TagOut,
+    VersionAssetItem,
     VersionAssetRefOut,
+    VersionAssetsOut,
     VersionOut,
     VersionSummary,
 )
@@ -34,7 +36,7 @@ from evalp.spec.diff import diff_specs, identity_paths
 from evalp.spec.models import CodeSpec, ConfigSpec, parse_spec
 from evalp.spec.resolve import unresolve
 from evalp.spec.validate import validate_spec
-from evalp.store.models import Agent, AssetRevision, Draft, Version, VersionAssetRef, VersionTag
+from evalp.store.models import Agent, Asset, AssetRevision, Draft, Version, VersionAssetRef, VersionTag
 from evalp.utils.time import now_iso
 
 _SEQ_RE = re.compile(r"^v(\d+)$")
@@ -176,6 +178,64 @@ class VersionService:
         async with self.ctx.db.read() as s:
             v = await self.resolve_ref_orm(s, ref)
             return await self.out_in_session(s, v)
+
+    async def assets(self, ref: str) -> VersionAssetsOut:
+        """版本绑定的资产清单：所用修订、来源，以及每个资产最近一次变化发生在哪个版本。
+
+        "最近一次变化"：从该版本往前，连续使用同一修订的最早版本；前一个版本用了别的修订时，
+        ``previous_rev`` 给出变化前的修订号，资产是该版本新加入的则为 null。
+        """
+        async with self.ctx.db.read() as s:
+            v = await self.resolve_ref_orm(s, ref)
+            rows = (
+                await s.execute(
+                    select(Version, VersionAssetRef.spec_path, AssetRevision, Asset)
+                    .join(VersionAssetRef, VersionAssetRef.version_id == Version.id)
+                    .join(AssetRevision, AssetRevision.id == VersionAssetRef.asset_revision_id)
+                    .join(Asset, Asset.id == AssetRevision.asset_id)
+                    .where(Version.agent_id == v.agent_id, Version.seq <= v.seq)
+                    .order_by(Version.seq.desc(), VersionAssetRef.spec_path)
+                )
+            ).all()
+            tags = await self._tags_of(s, [v.id])
+            summary = version_summary(v, tags.get(v.id))
+            xpaths = identity_paths(v.spec)
+        # 每个资产在各版本使用的修订（版本从新到旧）：asset_id -> [(版本, 修订)]
+        history: dict[str, list[tuple[Version, AssetRevision]]] = {}
+        current: dict[str, tuple[Asset, AssetRevision, list[str]]] = {}
+        for ver, spec_path, rev, asset in rows:
+            seen = history.setdefault(asset.id, [])
+            if not seen or seen[-1][0].id != ver.id:
+                seen.append((ver, rev))
+            if ver.id == v.id:
+                _, _, paths = current.setdefault(asset.id, (asset, rev, []))
+                paths.append(xpaths.get(spec_path, spec_path))
+        items: list[VersionAssetItem] = []
+        for asset_id, (asset, rev, paths) in current.items():
+            changed_in, previous = v, None
+            for ver, used in history[asset_id][1:]:
+                if ver.seq != changed_in.seq - 1:  # 中间有版本没用这个资产：从头算
+                    break
+                if used.id != rev.id:
+                    previous = used.rev
+                    break
+                changed_in = ver
+            items.append(
+                VersionAssetItem(
+                    asset_id=asset_id,
+                    kind=asset.kind,
+                    name=asset.name,
+                    rev=rev.rev,
+                    asset_revision_id=rev.id,
+                    spec_paths=paths,
+                    origin=(rev.meta or {}).get("origin"),
+                    changed_in_seq=changed_in.seq,
+                    changed_in_version_id=changed_in.id,
+                    previous_rev=previous,
+                )
+            )
+        items.sort(key=lambda i: (i.kind, i.name))
+        return VersionAssetsOut(version=summary, items=items)
 
     async def list(
         self, agent_ref: str, *, limit: int = 50, cursor: str | None = None

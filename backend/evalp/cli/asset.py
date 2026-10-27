@@ -13,12 +13,13 @@ from rich.table import Table
 from evalp import actions
 from evalp.cli.common import DataDirOpt, cli_errors, console, err_console, open_client, run
 from evalp.client import EvalpClient, EvalpClientError
+from evalp.spec.refs import ASSET_KINDS
 from evalp.utils.time import fmt_local
 from evalp.workspace_client import WorkspaceError
 
 app = typer.Typer(help="资产管理：列表、查看、上传、比较修订", no_args_is_help=True)
 
-KINDS = ("prompt", "tool", "knowledge", "dataset", "file")
+KINDS = ASSET_KINDS
 
 
 def human_size(n: int | None) -> str:

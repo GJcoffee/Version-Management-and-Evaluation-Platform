@@ -16,6 +16,7 @@ from typing import Annotated, Any, Literal, Union
 
 from evalp.spec.refs import (
     ASSET_KEY,
+    AssetKindName,
     RefError,
     is_asset_ref,
     is_file_ref,
@@ -52,7 +53,7 @@ class _Model(BaseModel):
 class AssetPin(_Model):
     """固化后的资产修订：``hash`` 是该修订内容（blob）的 sha256。"""
 
-    kind: Literal["prompt", "tool", "knowledge", "dataset", "file"]
+    kind: AssetKindName
     name: str
     rev: int = Field(ge=1)
     hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -64,8 +65,8 @@ class ResolvedRef(_Model):
     asset: AssetPin = Field(alias=ASSET_KEY)
 
 
-def _check_ref_str(kind: str):
-    """生成校验函数：字符串必须是指定类型的资产引用。"""
+def _check_ref_str(kind: str | None):
+    """生成校验函数：字符串必须是指定类型的资产引用（``kind`` 为 None 时不限类型）。"""
 
     def check(v: str) -> str:
         if is_file_ref(v):
@@ -74,16 +75,16 @@ def _check_ref_str(kind: str):
             ref = parse_asset_ref(v)
         except RefError as e:
             raise ValueError(str(e)) from None
-        if ref.kind != kind:
+        if kind is not None and ref.kind != kind:
             raise ValueError(f"这里需要 {kind} 类型的资产，实际是 {ref.kind}: {v}")
         return v.strip()
 
     return check
 
 
-def _check_pin_kind(kind: str):
+def _check_pin_kind(kind: str | None):
     def check(v: ResolvedRef) -> ResolvedRef:
-        if v.asset.kind != kind:
+        if kind is not None and v.asset.kind != kind:
             raise ValueError(f"这里需要 {kind} 类型的资产，实际是 {v.asset.kind}")
         return v
 
@@ -109,12 +110,12 @@ def _ref_tag(v: Any) -> str:
     return TAG_STR
 
 
-def _pin_type(kind: str):
+def _pin_type(kind: str | None):
     return Annotated[ResolvedRef, AfterValidator(_check_pin_kind(kind))]
 
 
-def _ref_union(kind: str):
-    """``asset://kind/...`` 字符串 或 固化引用。"""
+def _ref_union(kind: str | None):
+    """``asset://kind/...`` 字符串 或 固化引用（``kind`` 为 None 时不限类型）。"""
     return Annotated[
         Union[  # noqa: UP007
             Annotated[Annotated[str, AfterValidator(_check_ref_str(kind))], Tag(TAG_STR)],
@@ -126,7 +127,7 @@ def _ref_union(kind: str):
 
 ToolRef = _ref_union("tool")
 KnowledgeRef = _ref_union("knowledge")
-FileRef = _ref_union("file")
+SnapshotRef = _ref_union(None)  # 快照里的资产可以是任意类型（按 snapshot.map 入库）
 
 
 def _check_system(v: Any) -> Any:
@@ -237,12 +238,29 @@ class CodeRuntime(_Model):
     turn_timeout_s: float = Field(300, gt=0)
 
 
+class SnapshotRule(_Model):
+    """快照入库规则：``glob`` 匹配目录内相对路径，命中的文件作为 ``kind`` 类型的资产入库。
+
+    ``name`` 是资产名模板，变量：``{stem}``（文件名去扩展名）、``{stem_nover}``（再去掉末尾的版本号，
+    如 ``-0.5.3`` / ``-v1.2``）、``{agent}``（agent 名）、``{path}``（目录内相对路径去扩展名）。
+    变量展开后统一为合法的资产名（小写字母、数字、连字符）。
+    """
+
+    glob: str = Field(min_length=1, description="匹配目录内相对路径；* 不跨目录，** 跨目录")
+    kind: AssetKindName
+    name: str = Field(min_length=1, description="资产名模板")
+
+
 class SnapshotSpec(_Model):
-    """版本快照：只做记录、不参与运行。``dir`` 下的全部文件在 push 时作为 file 资产上传并固化到版本里。"""
+    """版本快照：只做记录、不参与运行。``dir`` 下的全部文件在 push 时作为资产上传并固化到版本里。
+
+    先按 ``map`` 的顺序取第一条匹配的规则决定资产类型与名称；没有命中的文件存为 file 资产。
+    """
 
     dir: str = Field(min_length=1, description="本地目录（相对项目根）")
-    files: dict[str, FileRef] = Field(
-        default_factory=dict, description="目录内相对路径 -> file 资产引用；push 时由客户端按目录内容填充"
+    map: list[SnapshotRule] = Field(default_factory=list, description="入库规则，按顺序取第一条匹配的")
+    files: dict[str, SnapshotRef] = Field(
+        default_factory=dict, description="目录内相对路径 -> 资产引用；push 时由客户端按目录内容填充"
     )
 
 

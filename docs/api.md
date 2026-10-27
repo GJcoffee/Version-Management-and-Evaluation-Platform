@@ -68,11 +68,28 @@
 `source.repo` 相对路径相对于服务进程的当前目录，建议客户端传绝对路径。`source.git` 由服务端在发布时写入，不要手写。
 可选的顶层字段 `name` / `description` / `notes` 仅用于显示，不参与哈希。
 
-**版本快照（代码型，可选）**：`"snapshot": {"dir": "exports/current", "files": {"platform/app-config.json": "asset://file/snap-…@latest"}}`。
-`dir` 是本地目录（相对项目根；`snapshot` 也可以简写为目录字符串 `"exports/current"`，等价于 `{"dir": …}`）；`files` 是「目录内相对路径 → file 资产引用」，引用位置同其他资产引用，发布时固化为 `{"$asset": …}` 并参与哈希
-（所以快照里任一文件变化都会产生新版本）。只做记录、不参与运行。`evalp push` / `publish` 会把 `dir` 下的全部文件上传为 `file` 资产
-（资产名 `snap-{agent}-{路径}-{路径哈希}`）并填好 `files`；`evalp pull` 不会把 `files` 写回 `agent.yaml`。未声明 `snapshot` 时它不出现在规范化结果中，
-所以旧版本的 `spec_hash` 不变。版本 diff 里每个文件一条变更，路径形如 `snapshot.files.platform/app-config.json`；文本文件的 `asset_changed` 带 `content_diff`，二进制文件只标记变化。
+**版本快照（代码型，可选）**：
+
+```json
+"snapshot": {
+  "dir": "exports/current",
+  "map": [{"glob": "skills/*.json", "kind": "skill", "name": "{stem_nover}"}],
+  "files": {"skills/crawl-engine-0.5.3.json": "asset://skill/crawl-engine@latest"}
+}
+```
+
+`dir` 是本地目录（相对项目根；`snapshot` 也可以简写为目录字符串 `"exports/current"`，等价于 `{"dir": …}`）；
+`files` 是「目录内相对路径 → 资产引用」（任意资产类型），引用位置同其他资产引用，发布时固化为 `{"$asset": …}` 并参与哈希
+（所以快照里任一文件变化都会产生新版本）。只做记录、不参与运行。`evalp push` / `publish` 会把 `dir` 下的全部文件上传为资产并填好 `files`；
+`evalp pull` 不会把 `files` 写回 `agent.yaml`。未声明 `snapshot` 时它不出现在规范化结果中，`map` 为空时同样不出现，所以旧版本的 `spec_hash` 不变。
+
+`map` 是入库规则（客户端在 push 时应用）：`glob` 匹配目录内的相对路径（`*` / `?` 不跨目录，`**` 跨目录），`kind` 是资产类型，`name` 是资产名模板，
+变量 `{stem}`（文件名去扩展名）、`{stem_nover}`（再去掉末尾版本号，如 `-0.5.3`、`-v1.2`）、`{agent}`（agent 名）、`{path}`（相对路径去扩展名），
+展开后统一为合法资产名。按顺序取第一条匹配的规则；没有命中的文件存为 `file` 资产（名字 `snap-{agent}-{路径}-{路径哈希}`）。
+快照入库的修订在 `meta.origin` 里标记 `"snapshot"`（见 §5）。
+
+版本 diff 里快照里的每个资产一条变更，按资产匹配而不是按文件路径：路径形如 `snapshot.files[skill/crawl-engine]`（`类型/名称`），
+文件改名（如 skill 文件名带的版本号变了）只要资产名不变，就是同一个资产的 `asset_changed`。文本类资产的 `asset_changed` 带 `content_diff`，二进制文件只标记变化。
 
 **引用写法**（`prompts.system` 也可以直接写内联文本）：
 
@@ -208,6 +225,21 @@ DELETE → 204；已有版本时返回 409 `AGENT_IN_USE`，请改为归档。
 
 → 同 publish 响应里的 `version`（含 `spec`、`tags`、`assets`）。`ref` 见"版本引用"。
 
+### GET /versions/{ref}/assets
+
+版本绑定的资产清单（前端 Agent 详情页「资产」标签用），按 `kind`、`name` 排序；同一个资产在 Spec 里多处引用时合并为一项。
+
+```json
+{"version": {"id": "ver_02…", "agent_id": "agt_01…", "seq": 5, "…": "…", "tags": ["prod"]},
+ "items": [{"asset_id": "ast_01…", "kind": "skill", "name": "crawl-engine", "rev": 4, "asset_revision_id": "arv_04…",
+            "spec_paths": ["snapshot.files[skill/crawl-engine]"], "origin": "snapshot",
+            "changed_in_seq": 4, "changed_in_version_id": "ver_01…", "previous_rev": 3}]}
+```
+
+- `origin`：该修订的来源（`meta.origin`），`"snapshot"` 表示来自 agent 快照（只读），否则为 `null`。
+- `changed_in_seq` / `changed_in_version_id`：这个修订最近一次变化发生在哪个版本——从该版本往前，连续使用同一修订的最早版本。
+  `previous_rev` 是变化前的修订号；资产是该版本新加入的（或中间有版本没用到它）则为 `null`。
+
 ### POST /versions/{ref}/tags
 
 `{"tag": "prod"}` → `{"agent_id": "agt_01…", "tag": "prod", "version_id": "ver_01…", "updated_at": "…"}`。
@@ -232,7 +264,8 @@ UPSERT：同一个标签会从旧版本移到这个版本。标签名：字母�
   "right": {"id": "ver_02…", "seq": 13, "spec_hash": "…"},
   "changes": [
     {"path": "model.params.temperature", "op": "replace", "left": 0.3, "right": 0.7},
-    {"path": "tools[query-order]", "op": "asset_changed", "left": {"rev": 3}, "right": {"rev": 4},
+    {"path": "tools[query-order]", "op": "asset_changed", "asset": {"kind": "tool", "name": "query-order"},
+     "left": {"rev": 3}, "right": {"rev": 4},
      "content_diff": {"format": "unified", "text": "@@ -3,7 +3,8 @@ …"}},
     {"path": "prompts.system", "op": "replace", "left": "第一行\n第二行", "right": "第一行\n第二行（改）",
      "content_diff": {"format": "unified", "text": "@@ -1,2 +1,2 @@ …"}},
@@ -248,8 +281,9 @@ UPSERT：同一个标签会从旧版本移到这个版本。标签名：字母�
   版本详情 `assets[].spec_path`、`GET /assets/{id}/references` 的 `versions[].spec_path` 用的是**同一套路径**，
   所以 `asset_changed` 的 `path` 可以直接在 `assets[]` 里按 `spec_path` 相等找到两侧的资产修订。
   （库里 `version_asset_refs.spec_path` 仍存下标路径，如 `tools[0]`，接口输出时换算；`validate` 报告里的 `errors[].path` 指向草稿里的位置，也仍是下标。）
-- 资产引用在 `add`/`remove`/`replace` 里以 `{"kind","name","rev"}` 表示；内容哈希相同视为未变化（即使修订号不同）。
-- 多行或超过 80 个字符的文本变更附 `content_diff`（unified diff，从 `@@` 开始，不含文件头）；文本类资产（prompt / tool / knowledge）的 `asset_changed` 同样附 `content_diff`。
+- 资产引用在 `add`/`remove`/`replace` 里以 `{"kind","name","rev"}` 表示；`asset_changed` 带 `asset: {kind, name}`（两侧的修订在 `left` / `right`）；
+  内容哈希相同视为未变化（即使修订号不同）。代码型的 `snapshot.files` 按 `类型/名称` 匹配资产：`snapshot.files[skill/crawl-engine]`（见 §2 版本快照）。
+- 多行或超过 80 个字符的文本变更附 `content_diff`（unified diff，从 `@@` 开始，不含文件头）；文本类资产（除 dataset 外的各类型）的 `asset_changed` 同样附 `content_diff`。
 - 前端用 Monaco DiffEditor 展示完整文本时，用 `GET /assets/revisions/{revision_id}` 取两侧内容。
 - **草稿一侧**：取已保存的草稿内容（编辑器里未保存的修改看不到），按发布时的流程固化引用（`@latest` 取当前最新修订）并规范化（补齐默认值），
   所以和"现在发布会得到的 Spec"比较；校验不通过时和发布一样报错（400 `VALIDATION_ERROR` / `SPEC_INVALID`，`details.errors`）。
@@ -259,7 +293,8 @@ UPSERT：同一个标签会从旧版本移到这个版本。标签名：字母�
 
 ## 5. 资产
 
-资产名：只允许小写字母、数字、连字符，首尾必须是字母或数字，最长 64。`kind`：`prompt | tool | knowledge | dataset | file`。
+资产名：只允许小写字母、数字、连字符，首尾必须是字母或数字，最长 64。
+`kind`：`prompt | tool | knowledge | kb_config | skill | mcp | database | app_config | dataset | file`。
 
 内容校验（失败 400 `VALIDATION_ERROR`，数据集 422）：
 
@@ -268,10 +303,16 @@ UPSERT：同一个标签会从旧版本移到这个版本。标签名：字母�
 | prompt | UTF-8；Jinja2 模板语法可解析 | `{"variables": ["now", "variables"]}` |
 | tool | YAML / JSON 解析为 ToolDefinition，`parameters` 是合法的 JSON Schema | `{"tool_name": "query_order", "impl_type": "http"}` |
 | knowledge | 大小 ≤ 20MB；`content_type=application/jsonl` 时逐行校验 `{id,text,meta}` | `{"format": "text"}` / `{"format": "jsonl", "doc_count": 3}` |
+| kb_config（知识库配置）/ skill / mcp（MCP 插件）/ app_config（应用配置）| UTF-8 文本（JSON / Markdown / YAML，按文本存储与 diff）；大小 ≤ 5MB | `{}` |
+| database（数据库）| 同上；大小 ≤ 20MB | `{}` |
 | dataset | JSONL / CSV 逐行解析，见 §6 | `{"case_count", "schema_warnings", "format"}` |
 | file | 大小 ≤ 100MB | `{}` |
 
-`content_type` 省略时按 kind 取默认值（prompt/knowledge `text/markdown`，tool `application/x-yaml`（以 `{` 开头为 `application/json`），dataset `application/jsonl`，file `application/octet-stream`）。
+后五类（`kb_config`、`skill`、`mcp`、`app_config`、`database`）是 agent 快照（HiAgent 导出的配置等）的入库类型，不参与配置型 agent 的运行；
+`kb_config` 是知识库的 JSON 配置，不是可检索文本，所以没有复用 `knowledge`（`knowledge_search` 只检索 `knowledge`）。
+由快照入库的修订带 `meta.origin = "snapshot"`：表示来源平台维护、在 EvalP 里只读——这是前端的约定，接口不拦截写入。
+`content_type` 省略时按 kind 取默认值（prompt/knowledge `text/markdown`，tool `application/x-yaml`（以 `{` 开头为 `application/json`），
+kb_config / skill / mcp / app_config / database 以 `{` 或 `[` 开头为 `application/json`、否则 `text/markdown`，dataset `application/jsonl`，file `application/octet-stream`）。
 
 ### POST /assets
 
@@ -463,7 +504,7 @@ CSV 需要 `column_map`（`{字段名: 列名}`）；字段名可用 `case_key /
 ```
 
 - `files[].hash` 是文件内容的 sha256（十六进制）；`content` 为空表示客户端认为服务端已有该 hash 的内容（`encoding` 默认 `utf-8`，二进制用 `base64`）。
-  可选字段：`content_type`、`column_map`（数据集 CSV）。
+  可选字段：`content_type`、`column_map`（数据集 CSV）、`origin`（`"snapshot"`：写入新修订的 `meta.origin`，表示来自 agent 快照、只读）。
 - agent 不存在时创建（`agent_kind`、`spec.kind`、默认 `config` 依次决定类型）；草稿不存在时创建（新建 agent 且 `draft_name` 不是 `main` 时同时建一个 `main` 草稿）。
 - 对每个文件：与资产当前最新修订的 hash 相同 → `skipped`；否则创建修订 → `uploaded`（hash 在该资产的旧修订里 → 把最新指针指回去，`existed=true`；
   `content` 为空但库里有这个 hash 的内容 → 直接用它创建修订）。

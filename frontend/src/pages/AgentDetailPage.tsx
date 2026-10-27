@@ -5,13 +5,14 @@ import { useVersions } from '@/api/queries/versions'
 import { Badge } from '@/components/ui/Badge'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
+import { AssetsTab } from './agent/AssetsTab'
 import { DraftsTab } from './agent/DraftsTab'
 import { EvalsTab } from './agent/EvalsTab'
 import { SessionsTab } from './agent/SessionsTab'
 import { VersionsTab } from './agent/VersionsTab'
 import { KIND_LABEL } from './AgentsPage'
 
-const TABS = ['drafts', 'versions', 'sessions', 'evals'] as const
+const TABS = ['assets', 'drafts', 'versions', 'sessions', 'evals'] as const
 type TabKey = (typeof TABS)[number]
 
 export default function AgentDetailPage() {
@@ -20,7 +21,7 @@ export default function AgentDetailPage() {
   const agent = useAgent(id)
   const versions = useVersions(id)
   const tabParam = sp.get('tab')
-  const tab: TabKey = (TABS as readonly string[]).includes(tabParam ?? '') ? (tabParam as TabKey) : 'drafts'
+  const tab: TabKey = (TABS as readonly string[]).includes(tabParam ?? '') ? (tabParam as TabKey) : 'assets'
 
   if (agent.isLoading) return <LoadingBlock className="py-24" />
   if (agent.error || !agent.data) {
@@ -56,6 +57,7 @@ export default function AgentDetailPage() {
 
       <Tabs value={tab} onValueChange={(v) => setSp({ tab: v }, { replace: true })}>
         <TabsList>
+          <TabsTrigger value="assets">资产</TabsTrigger>
           <TabsTrigger value="drafts">草稿</TabsTrigger>
           <TabsTrigger value="versions" badge={list.length ? <span className="text-xs text-muted-foreground">{list.length}{versions.hasNextPage ? '+' : ''}</span> : undefined}>
             版本
@@ -63,6 +65,9 @@ export default function AgentDetailPage() {
           <TabsTrigger value="sessions">会话</TabsTrigger>
           <TabsTrigger value="evals">评测</TabsTrigger>
         </TabsList>
+        <TabsContent value="assets" className="pt-4">
+          <AssetsTab agent={a} versions={list} onEditDraft={() => setSp({ tab: 'drafts' }, { replace: true })} />
+        </TabsContent>
         <TabsContent value="drafts" className="pt-4">
           <DraftsTab agent={a} versions={list} />
         </TabsContent>

@@ -127,7 +127,13 @@ export function lineOfPath(text: string, path: string): number | null {
   let best: number | null = null
   for (const seg of parsePath(path)) {
     if (isMap(node)) {
-      const pair: Pair | undefined = node.items.find((p) => String(keyOf(p)) === seg)
+      const pair: Pair | undefined =
+        node.items.find((p) => String(keyOf(p)) === seg) ??
+        // `snapshot.files[skill/crawl-engine]`：键是文件路径，值是资产引用，按引用的 类型/名称 匹配
+        node.items.find((p) => {
+          const ref = isScalar(p.value) ? parseAssetRef(p.value.value) : null
+          return ref !== null && `${ref.kind}/${ref.name}` === seg
+        })
       if (!pair) break
       const keyNode = pair.key as Node | undefined
       best = toLine(keyNode?.range?.[0]) ?? best

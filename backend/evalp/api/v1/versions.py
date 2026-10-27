@@ -14,6 +14,7 @@ from evalp.schemas.agent import (
     TagIn,
     TagOut,
     ToDraftIn,
+    VersionAssetsOut,
     VersionOut,
     VersionSummary,
 )
@@ -47,6 +48,12 @@ async def diff_versions(left: str, right: str, ctx: AppContext = Depends(get_ctx
 async def get_version(version_ref: str, ctx: AppContext = Depends(get_ctx)):
     """版本详情（含标签、固化后的 Spec、引用的资产）。"""
     return await ctx.svc(VersionService).get(version_ref)
+
+
+@router.get("/versions/{version_ref}/assets", response_model=VersionAssetsOut)
+async def get_version_assets(version_ref: str, ctx: AppContext = Depends(get_ctx)):
+    """版本绑定的资产清单：所用修订、来源（origin），以及每个资产最近一次变化发生在哪个版本。"""
+    return await ctx.svc(VersionService).assets(version_ref)
 
 
 @router.post("/versions/{version_ref}/tags", response_model=TagOut)

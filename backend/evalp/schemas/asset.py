@@ -6,9 +6,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from evalp.spec.refs import ASSET_KINDS, RefError, validate_asset_name
+from evalp.spec.refs import ASSET_KINDS, AssetKindName, RefError, validate_asset_name
 
-AssetKind = Literal["prompt", "tool", "knowledge", "dataset", "file"]
+AssetKind = AssetKindName
 DatasetFormat = Literal["jsonl", "csv"]
 
 

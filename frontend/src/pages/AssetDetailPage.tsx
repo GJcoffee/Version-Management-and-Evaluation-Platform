@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Download, FilePlus2, GitCompare, RotateCcw, Trash2 } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import { useAsset, useAssetRevisions, useDeleteAsset, useRestoreAsset, useRevision } from '@/api/queries/assets'
@@ -15,7 +15,7 @@ import { RelativeTime } from '@/components/ui/RelativeTime'
 import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
-import { ASSET_KIND_LABEL } from '@/lib/assetRef'
+import { ASSET_KIND_LABEL, SNAPSHOT_READONLY_NOTE, isSnapshotAsset } from '@/lib/assetRef'
 import { cn } from '@/lib/cn'
 import { formatBytes } from '@/lib/format'
 import { toast } from '@/stores/toast'
@@ -57,11 +57,16 @@ function AssetDetail({ asset }: { asset: Asset }) {
   const del = useDeleteAsset()
   const restore = useRestoreAsset()
 
-  const activeId = viewId ?? asset.latest?.id ?? revisions.find((r) => r.rev === asset.latest_rev)?.id ?? revisions[0]?.id ?? null
+  // `?rev=N`：从 agent 的资产列表进来时，默认查看该版本用的修订
+  const [sp] = useSearchParams()
+  const linkedRev = revisions.find((r) => r.rev === Number(sp.get('rev')))
+  const activeId =
+    viewId ?? linkedRev?.id ?? asset.latest?.id ?? revisions.find((r) => r.rev === asset.latest_rev)?.id ?? revisions[0]?.id ?? null
   const active = revisions.find((r) => r.id === activeId) ?? asset.latest
   const isDataset = asset.kind === 'dataset'
   const content = useRevision(isDataset ? null : activeId)
   const deleted = !!asset.deleted_at
+  const readonly = isSnapshotAsset(asset)
 
   const toggleCompare = (rev: AssetRevision) => {
     const cur = [pair.left, pair.right].filter((x): x is string => !!x)
@@ -92,31 +97,39 @@ function AssetDetail({ asset }: { asset: Asset }) {
               当前 r{asset.latest_rev}
             </Badge>
             {deleted && <Badge variant="danger">已删除</Badge>}
+            {readonly && <Badge variant="secondary">只读</Badge>}
           </div>
           {asset.description && <p className="mt-1 text-sm text-muted-foreground">{asset.description}</p>}
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {deleted ? (
-            <Button variant="outline" size="sm" onClick={onRestore} loading={restore.isPending}>
-              <RotateCcw className="h-3.5 w-3.5" />
-              恢复
-            </Button>
-          ) : (
-            <Button size="sm" onClick={() => (isDataset ? setImportOpen(true) : setNewRevOpen(true))}>
-              <FilePlus2 className="h-3.5 w-3.5" />
-              {isDataset ? '导入新修订' : '新建修订'}
-            </Button>
+          {readonly && (
+            <p className="mt-1 text-sm text-muted-foreground" data-testid="readonly-note">
+              {SNAPSHOT_READONLY_NOTE}
+            </p>
           )}
-          {!deleted && (
-            <Button variant="outline" size="sm" onClick={() => setSoftOpen(true)}>
-              <Trash2 className="h-3.5 w-3.5" />
-              删除
-            </Button>
-          )}
-          <Button variant="ghost" size="sm" className="text-danger" onClick={() => setHardOpen(true)}>
-            彻底删除
-          </Button>
         </div>
+        {!readonly && (
+          <div className="flex flex-wrap items-center gap-2">
+            {deleted ? (
+              <Button variant="outline" size="sm" onClick={onRestore} loading={restore.isPending}>
+                <RotateCcw className="h-3.5 w-3.5" />
+                恢复
+              </Button>
+            ) : (
+              <Button size="sm" onClick={() => (isDataset ? setImportOpen(true) : setNewRevOpen(true))}>
+                <FilePlus2 className="h-3.5 w-3.5" />
+                {isDataset ? '导入新修订' : '新建修订'}
+              </Button>
+            )}
+            {!deleted && (
+              <Button variant="outline" size="sm" onClick={() => setSoftOpen(true)}>
+                <Trash2 className="h-3.5 w-3.5" />
+                删除
+              </Button>
+            )}
+            <Button variant="ghost" size="sm" className="text-danger" onClick={() => setHardOpen(true)}>
+              彻底删除
+            </Button>
+          </div>
+        )}
       </div>
 
       {deleted && (

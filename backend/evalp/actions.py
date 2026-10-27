@@ -18,6 +18,7 @@ import yaml
 
 from evalp.client import EvalpClient, EvalpClientError
 from evalp.render import TERMINAL_STATUSES, item_input, item_output, item_score, truncate
+from evalp.spec.refs import ASSET_KINDS
 from evalp.workspace_client import ProjectConfig, PushResult, Workspace, WorkspaceError
 
 POLL_STATES = TERMINAL_STATUSES | {"paused"}  # 这些状态下不会再有进展，等待可以结束
@@ -414,7 +415,7 @@ def project_or_none(start: Path | None = None) -> ProjectConfig | None:
 # ---------------------------------------------------------------------- 资产与数据集
 
 INLINE_UPLOAD_LIMIT = 1_000_000  # 超过这个大小（或非 UTF-8）的文件走 /assets/upload，不放进 JSON 请求体
-ASSET_KIND_NAMES = ("prompt", "tool", "knowledge", "dataset", "file")
+ASSET_KIND_NAMES = ASSET_KINDS
 
 
 def parse_asset_ref(ref: str) -> tuple[str, int | None]:

@@ -1,11 +1,27 @@
 import type { AssetKind } from '@/api/types'
 
-export const ASSET_KINDS: AssetKind[] = ['prompt', 'tool', 'knowledge', 'dataset', 'file']
+export const ASSET_KINDS: AssetKind[] = [
+  'prompt',
+  'tool',
+  'knowledge',
+  'kb_config',
+  'skill',
+  'mcp',
+  'database',
+  'app_config',
+  'dataset',
+  'file',
+]
 
 export const ASSET_KIND_LABEL: Record<AssetKind, string> = {
   prompt: '提示词',
   tool: '工具',
   knowledge: '知识库',
+  kb_config: '知识库配置',
+  skill: 'Skill',
+  mcp: 'MCP 插件',
+  database: '数据库',
+  app_config: '应用配置',
   dataset: '数据集',
   file: '文件',
 }
@@ -17,7 +33,7 @@ export interface ParsedAssetRef {
   rev: 'latest' | number
 }
 
-const REF_RE = /^asset:\/\/(prompt|tool|knowledge|dataset|file)\/([^@\s]+)@(latest|\d+)$/
+const REF_RE = new RegExp(`^asset://(${ASSET_KINDS.join('|')})/([^@\\s]+)@(latest|\\d+)$`)
 
 /** 解析 `asset://{kind}/{name}@{latest|rev}`；不是资产引用（如内联文本）返回 null */
 export function parseAssetRef(value: unknown): ParsedAssetRef | null {
@@ -41,3 +57,11 @@ export function formatAssetRef(r: ParsedAssetRef): string {
 export function isAssetRefString(value: unknown): value is string {
   return typeof value === 'string' && REF_RE.test(value.trim())
 }
+
+/** 通过 agent 快照入库的资产（来源平台上维护）在 EvalP 里只读 */
+export function isSnapshotAsset(a: { latest: { meta: { origin?: string } } | null }): boolean {
+  return a.latest?.meta.origin === 'snapshot'
+}
+
+/** 只读资产的说明文案 */
+export const SNAPSHOT_READONLY_NOTE = '来自 agent 快照（只读），请在源平台修改后重新发布'

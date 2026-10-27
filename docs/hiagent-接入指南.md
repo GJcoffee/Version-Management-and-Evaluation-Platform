@@ -85,11 +85,41 @@ source:
 params:
   hiagent_app: <测试应用 id>
   hiagent_version: "0.5.3"   # 每次发布前更新
-snapshot: exports/current      # hiagentctl 导出目录；文件随版本存档，版本 diff 可逐文件对比
+snapshot:                      # hiagentctl 导出目录；文件随版本存档，按 map 规则入库为各类型的资产
+  dir: exports/current
+  map:                         # 按顺序取第一条匹配的规则；glob 按实际导出目录调整
+    - {glob: "system-prompt.md", kind: prompt, name: "{agent}-system"}
+    - {glob: "skills/*.json", kind: skill, name: "{stem_nover}"}
+    - {glob: "resources/database*.json", kind: database, name: "{agent}-{stem}"}
+    - {glob: "resources/tables/*.json", kind: database, name: "{agent}-table-{stem}"}
+    - {glob: "resources/knowledge-*.json", kind: kb_config, name: "{agent}-{stem}"}
+    - {glob: "platform/*.json", kind: app_config, name: "{agent}-{stem}"}
 ```
 
-`snapshot` 目录里的文件只做记录，不参与运行。建议导出时把 `platform/harness-agent.json` 里的 `SystemPrompt` 另存为
-`system-prompt.md`，版本 diff 里就能逐行看提示词的变化（JSON 里的长字符串只能整段对比）。
+## 快照与资产
+
+`snapshot.dir` 下的文件只做记录，不参与运行。`push` / `publish` 时每个文件都会上传为资产并固化到版本里：
+
+- `map` 里每条规则 `{glob, kind, name}`：`glob` 匹配**快照目录内的相对路径**（`*` 不跨目录，`**` 跨目录），命中的文件存为 `kind` 类型的资产，
+  资产名由 `name` 模板生成；按顺序取**第一条**匹配的规则，所以更具体的规则写在前面（上例 `resources/database*.json` 在 `resources/tables/*.json` 之前）。
+  没有命中任何规则的文件仍存为 `file` 资产（名字形如 `snap-<agent>-<路径>-<哈希>`，看不出是什么，建议补规则）。
+- 可用资产类型：`prompt`、`skill`（Skill）、`mcp`（MCP 插件）、`knowledge`（知识库）、`kb_config`（知识库配置）、`database`（数据库）、
+  `app_config`（应用配置）、`tool`、`dataset`、`file`。HiAgent 导出的知识库配置是 JSON 配置而不是可检索的知识文本，所以用 `kb_config`，
+  不要用 `knowledge`（`knowledge` 会出现在配置型 agent 的知识库选择器里，并可被 `knowledge_search` 检索 / 注入提示词）。
+- `name` 模板的变量：`{stem}` 文件名去扩展名；`{stem_nover}` 在此基础上再去掉末尾的版本号（`-0.5.3`、`-v1.2`、`-v2` 这类）；
+  `{agent}` agent 名（`.evalp.toml` 的 `[agent].name`）；`{path}` 目录内相对路径去扩展名。变量展开后统一为合法资产名（小写字母、数字、连字符，最长 64）。
+- **skill 文件名带版本号**（如 `skills/crawl-engine-0.5.3.json`）：用 `{stem_nover}` 命名，skill 升级到 0.5.4 后仍是同一个资产
+  `skill/crawl-engine` 的新修订，而不是新资产；版本 diff 里显示为 “Skill crawl-engine r3 → r4”。
+- 建议导出时把 `platform/harness-agent.json` 里的 `SystemPrompt` 另存为 `system-prompt.md`（上例第一条规则）：它成为独立的 `prompt` 资产，
+  版本 diff 里能逐行看提示词的变化（JSON 里的长字符串只能整段对比）。
+- 展开后的资产名不合法（比如文件名全是中文，`{stem}` 展开为空），或两个文件得到同一个资产名，push 会报错并指出文件与规则。
+
+通过快照入库的资产在修订元数据里带 `origin: snapshot`，在 EvalP 里**只读**：Web UI 隐藏编辑 / 新建修订 / 删除入口，并提示
+“来自 agent 快照（只读），请在源平台修改后重新发布”（只是界面约定，API 不拦截）。修改在 HiAgent 上做，重新导出、发布即可记录新修订。
+
+在 Web UI 里：Agent 详情页的「资产」标签按类型（提示词 / Skill / MCP 插件 / 知识库 / 数据库 / 应用配置 / 其他文件）列出所选版本绑定的资产，
+每项显示所用修订和最近一次变化发生在哪个版本，点击进入资产详情（内容、修订历史与对比、被哪些版本引用）；
+也可以在「资产库」按类型总览所有资产。
 
 ## 日常流程
 

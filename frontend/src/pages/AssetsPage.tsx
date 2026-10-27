@@ -12,7 +12,7 @@ import { RelativeTime } from '@/components/ui/RelativeTime'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/Tabs'
-import { ASSET_KINDS, ASSET_KIND_LABEL } from '@/lib/assetRef'
+import { ASSET_KINDS, ASSET_KIND_LABEL, isSnapshotAsset } from '@/lib/assetRef'
 import { formatBytes } from '@/lib/format'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { CreateAssetDialog } from './assets/CreateAssetDialog'
@@ -45,7 +45,9 @@ export default function AssetsPage() {
       <div className="flex items-center justify-between gap-3">
         <div>
           <h1 className="text-lg font-semibold">资产库</h1>
-          <p className="text-xs text-muted-foreground">提示词、工具、知识库、数据集和文件。每次修改产生不可变的新修订，Agent 通过 @latest 或固定修订引用。</p>
+          <p className="text-xs text-muted-foreground">
+            提示词、工具、知识库、Skill、MCP 插件、数据库、应用配置、数据集和文件。每次修改产生不可变的新修订，Agent 通过 @latest 或固定修订引用。
+          </p>
         </div>
         <Button onClick={openNew}>
           <Plus className="h-4 w-4" />
@@ -54,7 +56,7 @@ export default function AssetsPage() {
       </div>
 
       <Tabs value={kind} onValueChange={(v) => setSp({ kind: v }, { replace: true })}>
-        <TabsList>
+        <TabsList className="flex-wrap">
           {ASSET_KINDS.map((k) => (
             <TabsTrigger key={k} value={k}>
               {ASSET_KIND_LABEL[k]}
@@ -118,6 +120,11 @@ export default function AssetsPage() {
                     {a.deleted_at && (
                       <Badge variant="danger" className="ml-2">
                         已删除
+                      </Badge>
+                    )}
+                    {isSnapshotAsset(a) && (
+                      <Badge variant="secondary" className="ml-2" title="来自 agent 快照（只读），请在源平台修改后重新发布">
+                        只读
                       </Badge>
                     )}
                     {a.description && <p className="mt-0.5 max-w-md truncate text-xs text-muted-foreground">{a.description}</p>}

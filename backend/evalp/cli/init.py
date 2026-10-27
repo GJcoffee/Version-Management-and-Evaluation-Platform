@@ -186,4 +186,4 @@ def init(
     console.print("  1. 编辑 agent.yaml（配置型需要把 model.provider 改成已登记的 Provider）")
     console.print("  2. [bold]evalp serve[/bold]（另开终端启动服务）")
     console.print('  3. [bold]evalp push[/bold] -> [bold]evalp publish -m "初版" --tag baseline[/bold]')
-    console.print("  4. [bold]evalp eval run --wait[/bold]（数据集和评估器取自 .evalp.toml 的 [eval]）")
+    console.print("  4. [bold]evalp eval run --wait[/bold]（数据集和评估器取自 .evalp.toml 的 \\[eval]）")

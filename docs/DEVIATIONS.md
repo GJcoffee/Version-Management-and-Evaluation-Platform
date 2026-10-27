@@ -459,3 +459,14 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 ## 前端 — 助手消息中的图片 / 视频
 
 `Markdown` 增加 remark 插件（`lib/remarkMedia.ts`，无新依赖）：markdown 图片、`<img src>`、`<video src>`、以 png/jpg/jpeg/webp/gif/mp4/webm/mov 结尾的裸 URL 渲染为图片（点击放大）/ 视频播放器；裸 URL 的原文保留在文字中，其他写法在媒体下方显示原始链接。取舍：裸 URL 允许带查询串（带签名的对象存储链接）；只识别上述 `<img>` / `<video>` 标签，其他原始 HTML 仍不渲染；人工标注页的「输出」是纯文本，原文不变，媒体列在文本下方（`MediaText`）。只做渲染，不下载、不代理，链接过期后图片会加载失败。
+
+## 资产 — 新增 5 个类型与快照入库规则 `snapshot.map`（迁移 0004）
+
+详设 3.3 / 5.1 的资产类型只有 5 种。为让 agent 快照里的配置（HiAgent 导出）按含义入库，新增 `kb_config`（知识库配置）、`skill`、`mcp`（MCP 插件）、
+`database`（数据库）、`app_config`（应用配置）：内容都是 UTF-8 文本（JSON / Markdown / YAML），只做存储与 diff；`assets.kind` 的 CHECK 约束放宽（迁移 0004，只改约束）。
+**没有复用 `knowledge`**：它的校验和 `knowledge_search` 对 JSON 文本不会报错，但 JSON 配置会被当作可检索文本切块，并出现在配置型 agent 的知识库选择器里、可被注入提示词，语义不对。
+`SnapshotSpec` 新增 `map: [{glob, kind, name}]`（客户端 push 时按顺序取第一条匹配的规则，未命中仍存为 `file` 资产）；`snapshot.files` 的引用不再限定 `file` 类型；
+`map` 为空时规范化结果里不出现，旧版本哈希不变。版本 diff 对 `snapshot.files` 按 `类型/名称` 匹配（路径 `snapshot.files[skill/crawl-engine]`，不再是文件路径），
+`asset_changed` 增加 `asset: {kind, name}`；diff 的 `TEXT_KINDS` 改为 `NON_TEXT_KINDS = (dataset,)`（除数据集外都按文本比较）。
+只读标记：快照入库的修订在 `asset_revisions.meta.origin = "snapshot"`（`workspace/push` 的 `files[].origin` 写入），只有前端据此隐藏编辑入口，后端不拦截。
+新增接口 `GET /versions/{ref}/assets`（版本绑定的资产及其最近一次变化所在版本）；Agent 详情页新增「资产」标签并成为默认标签。

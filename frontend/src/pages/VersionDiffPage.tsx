@@ -5,16 +5,18 @@ import { ApiError } from '@/api/client'
 import { useRevision } from '@/api/queries/assets'
 import { useAgent } from '@/api/queries/agents'
 import { useVersion, useVersionDiff, useVersions } from '@/api/queries/versions'
-import type { DiffOp, SpecChange, Version, VersionAssetRef } from '@/api/types'
+import type { AssetKind, DiffOp, SpecChange, Version, VersionAssetRef } from '@/api/types'
 import { Badge, type BadgeVariant } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { DiffEditor } from '@/components/ui/DiffEditor'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
+import { ASSET_KIND_LABEL } from '@/lib/assetRef'
 import { cn } from '@/lib/cn'
 import { unpinSpec } from '@/lib/specDiff'
 import { lineOfPath, specToYaml } from '@/lib/specYaml'
+import { languageFor } from './assets/assetUtils'
 
 export const OP_LABEL: Record<DiffOp, string> = {
   add: '新增',
@@ -50,7 +52,35 @@ export function findAssetForPath(assets: VersionAssetRef[], path: string): Versi
   return assets.find((a) => a.spec_path === path)
 }
 
-const KIND_LANG = { prompt: 'markdown', tool: 'yaml', knowledge: 'markdown', dataset: 'plaintext', file: 'plaintext' } as const
+
+/** 导航分组的显示名；没有登记的直接显示 Spec 的第一段路径 */
+const GROUP_LABEL: Record<string, string> = { snapshot: '快照资产' }
+
+export interface AssetChangeInfo {
+  kind: AssetKind
+  name: string
+  /** 修订变化：修改为 `r3 → r4`，新增 / 删除为单个 `r1` */
+  revs: string
+}
+
+function pinSummary(v: unknown): { kind: AssetKind; name: string; rev: number } | null {
+  const p = v as { kind?: AssetKind; name?: string; rev?: number } | null | undefined
+  return p && p.kind && p.name && p.rev !== undefined ? { kind: p.kind, name: p.name, rev: p.rev } : null
+}
+
+/** 资产类的变更按"类型 名称"显示（不显示 Spec 路径）；不是资产变更返回 null */
+export function assetChangeInfo(c: SpecChange): AssetChangeInfo | null {
+  if (c.op === 'asset_changed' && c.asset) {
+    const l = (c.left as { rev?: number } | undefined)?.rev
+    const r = (c.right as { rev?: number } | undefined)?.rev
+    return { ...c.asset, revs: `r${l} → r${r}` }
+  }
+  if (c.op === 'add' || c.op === 'remove') {
+    const p = pinSummary(c.op === 'add' ? c.right : c.left)
+    return p && { kind: p.kind, name: p.name, revs: `r${p.rev}` }
+  }
+  return null
+}
 
 function preview(v: unknown): string {
   if (v === undefined) return ''
@@ -171,39 +201,38 @@ export default function VersionDiffPage() {
             {groups.map((g) => (
               <div key={g.group} className="mb-2">
                 <p className="px-2 pb-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  {g.group} <span className="font-normal">({g.items.length})</span>
+                  {GROUP_LABEL[g.group] ?? g.group} <span className="font-normal">({g.items.length})</span>
                 </p>
                 <ul>
-                  {g.items.map((c) => (
-                    <li key={`${c.path}-${c.op}`}>
-                      <button
-                        type="button"
-                        data-testid={`change-${c.path}`}
-                        onClick={() => onSelect(c)}
-                        className={cn(
-                          'flex w-full flex-col gap-0.5 rounded-md px-2 py-1 text-left hover:bg-accent',
-                          selected === c && 'bg-accent',
-                        )}
-                      >
-                        <span className="flex items-center gap-1.5">
-                          <Badge variant={OP_VARIANT[c.op]}>{OP_LABEL[c.op]}</Badge>
-                          <span className="min-w-0 truncate font-mono text-xs" title={c.path}>
-                            {c.path}
+                  {g.items.map((c) => {
+                    const asset = assetChangeInfo(c)
+                    return (
+                      <li key={`${c.path}-${c.op}`}>
+                        <button
+                          type="button"
+                          data-testid={`change-${c.path}`}
+                          onClick={() => onSelect(c)}
+                          className={cn(
+                            'flex w-full flex-col gap-0.5 rounded-md px-2 py-1 text-left hover:bg-accent',
+                            selected === c && 'bg-accent',
+                          )}
+                        >
+                          <span className="flex items-center gap-1.5">
+                            <Badge variant={OP_VARIANT[c.op]}>{OP_LABEL[c.op]}</Badge>
+                            <span className="min-w-0 truncate font-mono text-xs" title={c.path}>
+                              {asset ? `${ASSET_KIND_LABEL[asset.kind]} ${asset.name}` : c.path}
+                            </span>
                           </span>
-                        </span>
-                        {c.op === 'replace' && c.content_diff === undefined && (
-                          <span className="truncate pl-1 font-mono text-[11px] text-muted-foreground">
-                            {preview(c.left)} → {preview(c.right)}
-                          </span>
-                        )}
-                        {c.op === 'asset_changed' && (
-                          <span className="pl-1 font-mono text-[11px] text-muted-foreground">
-                            r{(c.left as { rev?: number } | undefined)?.rev} → r{(c.right as { rev?: number } | undefined)?.rev}
-                          </span>
-                        )}
-                      </button>
-                    </li>
-                  ))}
+                          {c.op === 'replace' && c.content_diff === undefined && (
+                            <span className="truncate pl-1 font-mono text-[11px] text-muted-foreground">
+                              {preview(c.left)} → {preview(c.right)}
+                            </span>
+                          )}
+                          {asset && <span className="pl-1 font-mono text-[11px] text-muted-foreground">{asset.revs}</span>}
+                        </button>
+                      </li>
+                    )
+                  })}
                 </ul>
               </div>
             ))}
@@ -250,7 +279,6 @@ function AssetContentDiff({
 }) {
   const l = useRevision(view.l?.asset_revision_id)
   const r = useRevision(view.r?.asset_revision_id)
-  const kind = view.l?.kind ?? 'tool'
   return (
     <>
       <div className="flex shrink-0 items-center gap-3 border-b border-border px-3 py-1.5 text-xs">
@@ -259,7 +287,7 @@ function AssetContentDiff({
           返回配置视图
         </Button>
         <span className="font-mono">
-          {view.l?.kind}/{view.l?.name}
+          {view.l && ASSET_KIND_LABEL[view.l.kind]} {view.l?.name}
         </span>
         <span className="text-muted-foreground">
           r{view.l?.rev} → r{view.r?.rev}
@@ -279,7 +307,7 @@ function AssetContentDiff({
           <DiffEditor
             original={l.data.content ?? ''}
             modified={r.data.content ?? ''}
-            language={KIND_LANG[kind]}
+            language={languageFor(view.l?.kind ?? 'file', r.data.content_type)}
             height="100%"
             className="rounded-none border-0"
           />

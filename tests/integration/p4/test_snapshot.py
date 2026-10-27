@@ -99,14 +99,14 @@ async def test_publish_pins_files_and_diff_shows_text_changes(project, evalp_cli
 
     d = (await client.get(f"{API}/versions/diff", params={"left": v1["id"], "right": v2["id"]})).json()
     by_path = {c["path"]: c for c in d["changes"]}
-    prompt = by_path["snapshot.files.platform/harness-agent.json"]
+    prompt = by_path[f"snapshot.files[{snapshot_asset('hiagent', 'platform/harness-agent.json')}]"]
     assert prompt["op"] == "asset_changed"
     assert '-  "SystemPrompt": "你是助手。\\n只回答问题。"' in prompt["content_diff"]["text"]
     assert "多回答一点" in prompt["content_diff"]["text"]
-    assert "content_diff" not in by_path["snapshot.files.logo.png"]  # 二进制文件只标记变化
-    assert by_path["snapshot.files.logo.png"]["op"] == "asset_changed"
-    assert by_path["snapshot.files.skills/new.json"]["op"] == "add"
-    assert by_path["snapshot.files.skills/画图 skill.json"]["op"] == "remove"
+    logo = by_path[f"snapshot.files[{snapshot_asset('hiagent', 'logo.png')}]"]
+    assert "content_diff" not in logo and logo["op"] == "asset_changed"  # 二进制文件只标记变化
+    assert by_path[f"snapshot.files[{snapshot_asset('hiagent', 'skills/new.json')}]"]["op"] == "add"
+    assert by_path[f"snapshot.files[{snapshot_asset('hiagent', 'skills/画图 skill.json')}]"]["op"] == "remove"
 
 
 async def test_publish_without_changes_returns_existing_version(project, evalp_client):
@@ -145,3 +145,169 @@ async def test_missing_snapshot_dir_is_reported(project, evalp_client):
     )
     with pytest.raises(WorkspaceError, match="snapshot.dir"):
         await snap_ws(project).push(evalp_client)
+
+
+# ---------------------------------------------------------------- 按规则入库（snapshot.map）
+
+MAPPED_YAML = (
+    AGENT_YAML
+    + """\
+  map:
+    - {glob: "system-prompt.md", kind: prompt, name: "{agent}-system"}
+    - {glob: "skills/*.json", kind: skill, name: "{stem_nover}"}
+    - {glob: "resources/database*.json", kind: database, name: "{agent}-{stem}"}
+    - {glob: "resources/tables/*.json", kind: database, name: "{agent}-table-{stem}"}
+    - {glob: "resources/knowledge-*.json", kind: kb_config, name: "{agent}-{stem}"}
+    - {glob: "platform/*.json", kind: app_config, name: "{agent}-{stem}"}
+"""
+)
+
+EXPORT = {
+    "system-prompt.md": "你是爬虫助手。\n",
+    "skills/crawl-engine-0.5.3.json": '{"name": "crawl-engine", "steps": 3}',
+    "resources/database.json": '{"Name": "db"}',
+    "resources/database-tables.json": '{"Tables": ["t1"]}',
+    "resources/tables/t1.json": '{"Columns": []}',
+    "resources/knowledge-base.json": '{"Name": "kb", "TopK": 5}',
+    "platform/app-config.json": '{"Model": "doubao"}',
+    "logo.png": PNG,
+}
+
+
+def write_export(project: Path, files: dict) -> None:
+    snap = project / "exports" / "current"
+    for rel, data in files.items():
+        (snap / rel).parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(data, bytes):
+            (snap / rel).write_bytes(data)
+        else:
+            (snap / rel).write_text(data, encoding="utf-8")
+
+
+@pytest.fixture
+def mapped_project(tmp_path: Path) -> Path:
+    d = tmp_path / "mapped"
+    (d / "exports" / "current").mkdir(parents=True)
+    (d / ".evalp.toml").write_text(TOML, encoding="utf-8")
+    (d / "agent.yaml").write_text(MAPPED_YAML, encoding="utf-8")
+    write_export(d, EXPORT)
+    return d
+
+
+async def assets_of(client, kind: str) -> dict[str, dict]:
+    items = (await client.get(f"{API}/assets", params={"kind": kind})).json()["items"]
+    return {a["name"]: a for a in items}
+
+
+async def test_map_rules_store_snapshot_files_as_typed_assets(mapped_project, evalp_client, client):
+    ws = snap_ws(mapped_project)
+    r = await ws.push(evalp_client)
+    assert len(r.uploaded) == len(EXPORT)
+    expected = {
+        "prompt": {"hiagent-system"},
+        "skill": {"crawl-engine"},
+        "database": {"hiagent-database", "hiagent-database-tables", "hiagent-table-t1"},
+        "kb_config": {"hiagent-knowledge-base"},
+        "app_config": {"hiagent-app-config"},
+    }
+    for kind, names in expected.items():
+        assert set(await assets_of(client, kind)) == names, kind
+    skill = (await assets_of(client, "skill"))["crawl-engine"]
+    assert skill["latest"]["content_type"] == "application/json"
+    # 所有快照入库的资产都标记来源（只读）：包括没命中规则、存为 file 的文件
+    assert skill["latest"]["meta"]["origin"] == "snapshot"
+    assert (await assets_of(client, "prompt"))["hiagent-system"]["latest"]["meta"]["origin"] == "snapshot"
+    (logo,) = (await assets_of(client, "file")).values()
+    assert logo["name"] == snapshot_asset("hiagent", "logo.png").split("/")[1]
+    assert logo["latest"]["meta"]["origin"] == "snapshot"
+    draft = (await client.get(f"{API}/drafts/{r.draft_id}")).json()
+    assert draft["spec"]["snapshot"]["files"]["skills/crawl-engine-0.5.3.json"] == (
+        "asset://skill/crawl-engine@latest"
+    )
+    assert len(draft["spec"]["snapshot"]["map"]) == 6
+    again = await ws.push(evalp_client)
+    assert again.unchanged
+
+
+async def test_first_matching_rule_wins(mapped_project, evalp_client, client):
+    (mapped_project / "agent.yaml").write_text(
+        AGENT_YAML
+        + """\
+  map:
+    - {glob: "resources/database*.json", kind: database, name: "{agent}-{stem}"}
+    - {glob: "resources/*.json", kind: kb_config, name: "{agent}-other-{stem}"}
+""",
+        encoding="utf-8",
+    )
+    await snap_ws(mapped_project).push(evalp_client)
+    assert set(await assets_of(client, "database")) == {"hiagent-database", "hiagent-database-tables"}
+    assert set(await assets_of(client, "kb_config")) == {"hiagent-other-knowledge-base"}
+
+
+async def test_skill_upgrade_is_new_revision_of_same_asset_and_diff_shows_type_and_name(
+    mapped_project, evalp_client, client
+):
+    ws = snap_ws(mapped_project)
+    v1 = (await actions.publish(evalp_client, ws, notes="v1", tag=None, via="cli")).version
+    old = mapped_project / "exports" / "current" / "skills" / "crawl-engine-0.5.3.json"
+    old.rename(old.with_name("crawl-engine-0.5.4.json"))
+    write_export(mapped_project, {"skills/crawl-engine-0.5.4.json": '{"name": "crawl-engine", "steps": 4}'})
+    v2 = (await actions.publish(evalp_client, ws, notes="v2", tag=None, via="cli")).version
+    assert v2["seq"] == 2
+
+    skills = await assets_of(client, "skill")
+    assert list(skills) == ["crawl-engine"] and skills["crawl-engine"]["latest_rev"] == 2
+
+    d = (await client.get(f"{API}/versions/diff", params={"left": v1["id"], "right": v2["id"]})).json()
+    assert [(c["path"], c["op"]) for c in d["changes"]] == [
+        ("snapshot.files[skill/crawl-engine]", "asset_changed")
+    ]
+    change = d["changes"][0]
+    assert change["asset"] == {"kind": "skill", "name": "crawl-engine"}
+    assert (change["left"], change["right"]) == ({"rev": 1}, {"rev": 2})
+    assert '"steps": 4' in change["content_diff"]["text"]
+    # 版本详情里的 spec_path 与 diff 的路径一致，前端据此打开该资产的内容对比
+    detail = (await client.get(f"{API}/versions/{v2['id']}")).json()
+    assert "snapshot.files[skill/crawl-engine]" in {a["spec_path"] for a in detail["assets"]}
+
+
+async def test_version_assets_list_origin_and_where_each_asset_last_changed(
+    mapped_project, evalp_client, client
+):
+    ws = snap_ws(mapped_project)
+    v1 = (await actions.publish(evalp_client, ws, notes="v1", tag=None, via="cli")).version
+    write_export(mapped_project, {"skills/crawl-engine-0.5.3.json": '{"name": "crawl-engine", "steps": 4}'})
+    v2 = (await actions.publish(evalp_client, ws, notes="v2", tag=None, via="cli")).version
+    write_export(mapped_project, {"platform/app-config.json": '{"Model": "deepseek"}'})
+    v3 = (await actions.publish(evalp_client, ws, notes="v3", tag=None, via="cli")).version
+
+    out = (await client.get(f"{API}/versions/{v3['id']}/assets")).json()
+    assert out["version"]["seq"] == 3
+    items = {(i["kind"], i["name"]): i for i in out["items"]}
+    assert len(items) == len(EXPORT)
+    skill = items[("skill", "crawl-engine")]
+    assert (skill["rev"], skill["changed_in_seq"], skill["previous_rev"]) == (2, 2, 1)
+    assert skill["changed_in_version_id"] == v2["id"] and skill["origin"] == "snapshot"
+    assert skill["spec_paths"] == ["snapshot.files[skill/crawl-engine]"]
+    cfg = items[("app_config", "hiagent-app-config")]
+    assert (cfg["rev"], cfg["changed_in_seq"], cfg["previous_rev"]) == (2, 3, 1)
+    kb = items[("kb_config", "hiagent-knowledge-base")]
+    assert (kb["rev"], kb["changed_in_seq"], kb["previous_rev"]) == (1, 1, None)
+    assert [i["kind"] for i in out["items"]] == sorted(i["kind"] for i in out["items"])
+    # 选更早的版本：看到当时的修订
+    old = (await client.get(f"{API}/versions/{v1['id']}/assets")).json()["items"]
+    assert {i["rev"] for i in old} == {1}
+
+
+async def test_invalid_map_rules_are_reported(mapped_project, evalp_client):
+    (mapped_project / "agent.yaml").write_text(
+        AGENT_YAML + '  map:\n    - {glob: "*.json", kind: nope, name: x}\n', encoding="utf-8"
+    )
+    with pytest.raises(WorkspaceError, match=r"snapshot.map\[0\] 不合法: kind"):
+        await snap_ws(mapped_project).push(evalp_client)
+    (mapped_project / "agent.yaml").write_text(
+        AGENT_YAML + '  map:\n    - {glob: "skills/*.json", kind: skill, name: "same"}\n', encoding="utf-8"
+    )
+    write_export(mapped_project, {"skills/other.json": "{}"})
+    with pytest.raises(WorkspaceError, match="映射到同一个资产 skill/same"):
+        await snap_ws(mapped_project).push(evalp_client)

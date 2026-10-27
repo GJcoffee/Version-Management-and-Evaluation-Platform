@@ -5,7 +5,7 @@
 ## 功能（一期）
 
 - **草稿与版本**：草稿可随意修改，发布后生成以内容哈希标识的不可变版本；标签、回滚、任意两个版本的 diff
-- **资产**：prompt / tool / knowledge / dataset / file 五类资产，修订历史与 diff、引用关系
+- **资产**：prompt / tool / knowledge / dataset / file，以及 agent 快照入库的 Skill / MCP 插件 / 知识库配置 / 数据库 / 应用配置；修订历史与 diff、引用关系；Agent 详情页「资产」标签按类型列出所选版本绑定的资产（来自 agent 快照的资产在 EvalP 里只读，规则见 [docs/hiagent-接入指南.md](docs/hiagent-接入指南.md)）
 - **对话**：选定版本发起会话，流式输出，完整 trace（LLM 调用、工具调用、token、耗时）
 - **三类 agent**：配置型（prompt + 模型 + 工具，由平台执行）；代码型（HTTP 或子进程接入，见 `sdk/`）
 - **并发评测**：多版本 × 数据集 × 评估器（contains / exact_match / regex / LLM 评审），重试、断点续跑、结果缓存

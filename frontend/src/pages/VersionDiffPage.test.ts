@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SpecChange, VersionAssetRef } from '@/api/types'
-import { findAssetForPath, groupChanges, groupOfPath } from './VersionDiffPage'
+import { assetChangeInfo, findAssetForPath, groupChanges, groupOfPath } from './VersionDiffPage'
 
 const ch = (path: string, op: SpecChange['op'] = 'replace'): SpecChange => ({ path, op })
 
@@ -29,5 +29,27 @@ describe('变更导航', () => {
     expect(findAssetForPath(assets, 'knowledge.inject[faq]')?.asset_revision_id).toBe('arv_k')
     expect(findAssetForPath(assets, 'tools[knowledge_search].with.sources[faq]')?.asset_revision_id).toBe('arv_s')
     expect(findAssetForPath(assets, 'tools[none]')).toBeUndefined()
+  })
+})
+
+describe('资产变更按类型与名称显示', () => {
+  it('asset_changed：类型 + 名称 + 修订变化（不依赖 Spec 路径）', () => {
+    const c: SpecChange = {
+      path: 'snapshot.files[skill/crawl-engine]',
+      op: 'asset_changed',
+      asset: { kind: 'skill', name: 'crawl-engine' },
+      left: { rev: 3 },
+      right: { rev: 4 },
+    }
+    expect(assetChangeInfo(c)).toEqual({ kind: 'skill', name: 'crawl-engine', revs: 'r3 → r4' })
+  })
+  it('add / remove：取引用里的类型、名称与修订', () => {
+    const pin = { kind: 'mcp', name: 'search', rev: 2 }
+    expect(assetChangeInfo({ path: 'snapshot.files[mcp/search]', op: 'add', right: pin })).toEqual({ kind: 'mcp', name: 'search', revs: 'r2' })
+    expect(assetChangeInfo({ path: 'snapshot.files[mcp/search]', op: 'remove', left: pin })).toEqual({ kind: 'mcp', name: 'search', revs: 'r2' })
+  })
+  it('普通字段的变更不是资产变更', () => {
+    expect(assetChangeInfo({ path: 'params.top_k', op: 'replace', left: 1, right: 2 })).toBeNull()
+    expect(assetChangeInfo({ path: 'params.x', op: 'add', right: 1 })).toBeNull()
   })
 })

@@ -153,7 +153,11 @@ class Blob(Base):
 class Asset(Base):
     __tablename__ = "assets"
     __table_args__ = (
-        CheckConstraint("kind IN ('prompt','tool','knowledge','dataset','file')", name="kind"),
+        CheckConstraint(
+            "kind IN ('prompt','tool','knowledge','kb_config','skill','mcp','database','app_config',"
+            "'dataset','file')",
+            name="kind",
+        ),
         UniqueConstraint("kind", "name", name="uq_assets_kind_name"),
     )
 

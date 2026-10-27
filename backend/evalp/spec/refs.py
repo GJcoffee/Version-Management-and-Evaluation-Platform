@@ -15,12 +15,15 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, get_args
 
-ASSET_KINDS: tuple[str, ...] = ("prompt", "tool", "knowledge", "dataset", "file")
+AssetKindName = Literal[
+    "prompt", "tool", "knowledge", "kb_config", "skill", "mcp", "database", "app_config", "dataset", "file"
+]
+ASSET_KINDS: tuple[str, ...] = get_args(AssetKindName)
 ASSET_NAME_MAX = 64
 ASSET_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
-_ASSET_REF_RE = re.compile(r"^asset://([a-z]+)/([^/@\s]+)(?:@(\S*))?$")
+_ASSET_REF_RE = re.compile(r"^asset://([a-z_]+)/([^/@\s]+)(?:@(\S*))?$")
 ENV_REF_RE = re.compile(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
 _FILE_REF_RE = re.compile(r"^file:(?!//)(\S+)$")
 

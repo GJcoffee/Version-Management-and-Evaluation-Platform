@@ -181,10 +181,57 @@ async def test_file_asset_gets_content_diff_when_text():
     async def load(p):
         return "a\n" if p["rev"] == 1 else "b\n"
 
-    c = by_path(await diff_specs(left, right, load))["snapshot.files.a.json"]
+    c = by_path(await diff_specs(left, right, load))["snapshot.files[file/f]"]
     assert (
         c["op"] == "asset_changed" and "-a" in c["content_diff"]["text"] and "+b" in c["content_diff"]["text"]
     )
+
+
+def snap(**files):
+    return {"kind": "code", "snapshot": {"dir": "x", "files": files}}
+
+
+async def test_snapshot_files_are_matched_by_asset_not_by_path():
+    """skill 升级后文件名带新版本号：仍是同一个资产的新修订；只在一侧的资产是新增 / 删除。"""
+    left = snap(
+        **{
+            "skills/crawl-engine-0.5.3.json": pin("skill", "crawl-engine", 3, "a"),
+            "skills/old.json": pin("skill", "old", 1, "b"),
+            "same.json": pin("app_config", "cfg", 1, "c"),
+        }
+    )
+    right = snap(
+        **{
+            "skills/crawl-engine-0.5.4.json": pin("skill", "crawl-engine", 4, "d"),
+            "skills/new.json": pin("skill", "new", 1, "e"),
+            "same.json": pin("app_config", "cfg", 1, "c"),
+        }
+    )
+    result = await diff_specs(left, right)
+    changes = by_path(result)
+    assert set(changes) == {
+        "snapshot.files[skill/crawl-engine]",
+        "snapshot.files[skill/old]",
+        "snapshot.files[skill/new]",
+    }
+    up = changes["snapshot.files[skill/crawl-engine]"]
+    assert up["op"] == "asset_changed" and up["asset"] == {"kind": "skill", "name": "crawl-engine"}
+    assert (up["left"], up["right"]) == ({"rev": 3}, {"rev": 4})
+    assert changes["snapshot.files[skill/old]"]["op"] == "remove"
+    assert changes["snapshot.files[skill/new]"]["right"]["name"] == "new"
+
+
+async def test_snapshot_files_empty_on_one_side_lists_every_asset_as_add():
+    result = await diff_specs(snap(), snap(**{"a.json": pin("skill", "a", 1, "a")}))
+    assert [(c["path"], c["op"]) for c in result["changes"]] == [("snapshot.files[skill/a]", "add")]
+
+
+def test_identity_paths_for_snapshot_files():
+    s = snap(**{"skills/a-1.0.json": pin("skill", "a", 1, "a"), "b.json": pin("file", "snap-b", 1, "b")})
+    assert identity_paths(s) == {
+        "snapshot.files.skills/a-1.0.json": "snapshot.files[skill/a]",
+        "snapshot.files.b.json": "snapshot.files[file/snap-b]",
+    }
 
 
 def test_unified_diff_text_has_no_file_header():

@@ -171,3 +171,13 @@ def test_empty_snapshot_is_omitted_but_declared_snapshot_is_hashed():
     with_snap = {**base, "snapshot": {"dir": "exports/current"}}
     assert canonicalize(with_snap).data["snapshot"] == {"dir": "exports/current", "files": {}}
     assert canonicalize(with_snap).hash != canonicalize(base).hash
+
+
+def test_snapshot_map_is_omitted_when_empty_and_hashed_when_declared():
+    base = {"kind": "code", "transport": "http", "http": {"base_url": "http://x"}}
+    plain = canonicalize({**base, "snapshot": {"dir": "d"}})
+    assert "map" not in plain.data["snapshot"]
+    assert canonicalize({**base, "snapshot": {"dir": "d", "map": []}}).hash == plain.hash
+    rule = {"glob": "skills/*.json", "kind": "skill", "name": "{stem_nover}"}
+    mapped = canonicalize({**base, "snapshot": {"dir": "d", "map": [rule]}})
+    assert mapped.data["snapshot"]["map"] == [rule] and mapped.hash != plain.hash

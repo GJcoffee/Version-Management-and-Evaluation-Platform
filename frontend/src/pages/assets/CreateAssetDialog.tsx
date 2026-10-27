@@ -8,7 +8,7 @@ import { CodeEditor } from '@/components/ui/CodeEditor'
 import { Dialog } from '@/components/ui/Dialog'
 import { Field, Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
-import { ASSET_KIND_LABEL } from '@/lib/assetRef'
+import { ASSET_KINDS, ASSET_KIND_LABEL } from '@/lib/assetRef'
 import { formatApiError, type FormattedError } from '@/lib/apiError'
 import { formatBytes } from '@/lib/format'
 import { toast } from '@/stores/toast'
@@ -102,7 +102,7 @@ function Inner({ onOpenChange, defaultKind, onDataset }: CreateAssetDialogProps)
         <div className="grid grid-cols-[10rem_1fr] gap-3">
           <Field label="类型" htmlFor="as-kind">
             <Select id="as-kind" value={kind} onChange={(e) => changeKind(e.target.value as AssetKind)}>
-              {(['prompt', 'tool', 'knowledge', 'dataset', 'file'] as AssetKind[]).map((k) => (
+              {ASSET_KINDS.map((k) => (
                 <option key={k} value={k}>
                   {ASSET_KIND_LABEL[k]}（{k}）
                 </option>

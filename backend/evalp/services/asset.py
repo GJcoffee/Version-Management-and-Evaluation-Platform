@@ -436,15 +436,17 @@ class AssetService:
         content_type: str | None = None,
         message: str | None = None,
         column_map: dict[str, Any] | None = None,
+        meta_extra: dict[str, Any] | None = None,
     ) -> tuple[AssetRevision, bool]:
-        """事务内：校验并新增修订（供工作区同步使用）。"""
+        """事务内：校验并新增修订（供工作区同步使用）；``meta_extra`` 并入修订的 meta（如 ``origin``）。"""
         validated = await self.validate(asset.kind, data, content_type, column_map)
+        validated.meta = {**validated.meta, **(meta_extra or {})}
         payload = _Payload(hash=hashlib.sha256(data).hexdigest(), size=len(data), data=data)
         return await self.add_revision(s, asset, payload, validated, message)
 
     async def add_revision_from_blob(
         self, s: AsyncSession, asset: Asset, blob_hash: str, content_type: str | None = None,
-        message: str | None = None,
+        message: str | None = None, meta_extra: dict[str, Any] | None = None,
     ) -> tuple[AssetRevision, bool]:  # fmt: skip
         """事务内：用库中已有的 blob 新增修订（客户端只给了哈希）。"""
         blob = await s.get(Blob, blob_hash)
@@ -452,6 +454,7 @@ class AssetService:
             raise NotFound(f"blob 不存在: {blob_hash}")
         data = None if asset.kind == "file" else await self.ctx.blobs.get_bytes(blob_hash)
         validated = await self.validate(asset.kind, data, content_type, None)
+        validated.meta = {**validated.meta, **(meta_extra or {})}
         return await self.add_revision(s, asset, _Payload(hash=blob_hash, size=blob.size), validated, message)
 
     async def update(self, asset_id: str, description: str | None) -> AssetOut:

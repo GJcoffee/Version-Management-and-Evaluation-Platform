@@ -183,8 +183,29 @@ def test_json_schema_export():
 def test_code_snapshot_accepts_dir_shorthand_and_file_refs():
     base = {"kind": "code", "transport": "http", "http": {"base_url": "http://x"}}
     short = parse_spec({**base, "snapshot": "exports/current"})
-    assert dump_spec(short)["snapshot"] == {"dir": "exports/current", "files": {}}
+    assert dump_spec(short)["snapshot"] == {"dir": "exports/current", "map": [], "files": {}}
     full = parse_spec({**base, "snapshot": {"dir": "d", "files": {"a/b.json": "asset://file/snap-x@latest"}}})
     assert full.snapshot.files["a/b.json"] == "asset://file/snap-x@latest"
-    errs = errors_of({**base, "snapshot": {"dir": "d", "files": {"a": "asset://prompt/p@1"}}})
-    assert "需要 file 类型的资产" in errs["snapshot.files.a"]
+
+
+def test_code_snapshot_files_accept_any_asset_kind_and_map_rules_are_checked():
+    base = {"kind": "code", "transport": "http", "http": {"base_url": "http://x"}}
+    ok = parse_spec(
+        {
+            **base,
+            "snapshot": {
+                "dir": "d",
+                "map": [{"glob": "skills/*.json", "kind": "skill", "name": "{stem_nover}"}],
+                "files": {"skills/a.json": "asset://skill/a@latest"},
+            },
+        }
+    )
+    assert (
+        ok.snapshot.map[0].kind == "skill" and ok.snapshot.files["skills/a.json"] == "asset://skill/a@latest"
+    )
+    errs = errors_of(
+        {**base, "snapshot": {"dir": "d", "map": [{"glob": "*.json", "kind": "nope", "name": "x"}]}}
+    )
+    assert "snapshot.map[0].kind" in errs
+    errs = errors_of({**base, "snapshot": {"dir": "d", "map": [{"glob": "*.json", "kind": "skill"}]}})
+    assert "snapshot.map[0].name" in errs

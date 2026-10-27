@@ -150,6 +150,26 @@ class VersionAssetRefOut(BaseModel):
     asset_revision_id: str
 
 
+class VersionAssetItem(BaseModel):
+    """版本绑定的一个资产：所用修订，以及该修订最近一次变化发生在哪个版本。"""
+
+    asset_id: str
+    kind: str
+    name: str
+    rev: int
+    asset_revision_id: str
+    spec_paths: list[str] = Field(description="Spec 中引用它的位置（身份键路径）")
+    origin: str | None = Field(None, description="修订的来源；snapshot 表示来自 agent 快照（只读）")
+    changed_in_seq: int = Field(description="该修订最近一次变化发生在哪个版本（连续使用同一修订的最早版本）")
+    changed_in_version_id: str
+    previous_rev: int | None = Field(None, description="变化前的修订号；该版本首次出现这个资产时为 null")
+
+
+class VersionAssetsOut(BaseModel):
+    version: VersionSummary
+    items: list[VersionAssetItem]
+
+
 class VersionOut(VersionSummary):
     spec: dict[str, Any]
     assets: list[VersionAssetRefOut] = Field(default_factory=list)
@@ -196,12 +216,15 @@ class WorkspaceFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(min_length=1)
-    asset: str = Field(pattern=r"^[a-z]+/[^/\s]+$", description="kind/name，如 prompt/cs-system")
+    asset: str = Field(pattern=r"^[a-z_]+/[^/\s]+$", description="kind/name，如 prompt/cs-system")
     hash: str = Field(pattern=r"^[0-9a-f]{64}$", description="文件内容的 sha256（十六进制）")
     content: str | None = None
     encoding: Literal["utf-8", "base64"] = "utf-8"
     content_type: str | None = None
     column_map: dict[str, Any] | None = None
+    origin: Literal["snapshot"] | None = Field(
+        None, description="来源：snapshot 表示来自 agent 快照（只读），写入修订的 meta.origin"
+    )
 
 
 class PushIn(BaseModel):

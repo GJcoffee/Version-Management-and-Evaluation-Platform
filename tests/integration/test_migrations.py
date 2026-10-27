@@ -58,7 +58,7 @@ def test_orm_metadata_covers_design_tables():
 def test_idempotent(migrated):
     run_migrations(migrated)  # 再次执行不报错
     con = sqlite3.connect(migrated)
-    assert con.execute("select version_num from alembic_version").fetchall() == [("0003",)]
+    assert con.execute("select version_num from alembic_version").fetchall() == [("0004",)]
     con.close()
 
 
@@ -236,3 +236,35 @@ def test_0003_downgrade_restores_notes(tmp_path):
     con.close()
     assert not ({"replay_status", "replay_turns", "replay_error"} & cols)
     assert notes["c1"] == '{"replay_turns": [1, 3]}' and notes["c3"] == "我的备注"
+
+
+def test_0004_allows_snapshot_asset_kinds_and_downgrades(tmp_path):
+    """0003 -> 0004：已有资产保留，kind 约束放宽到快照入库的新类型；降级时新类型改回 file。"""
+    from alembic import command
+    from evalp.store.migrate import make_alembic_config
+
+    path = tmp_path / "k.db"
+    run_migrations(path, "0003")
+    con = sqlite3.connect(path)
+    con.execute("insert into assets(id,kind,name,created_at) values('a1','prompt','p','t')")
+    with pytest.raises(sqlite3.IntegrityError):  # 旧约束不认识 skill
+        con.execute("insert into assets(id,kind,name,created_at) values('a2','skill','s','t')")
+    con.commit()
+    con.close()
+
+    run_migrations(path)
+    con = sqlite3.connect(path)
+    for i, kind in enumerate(("kb_config", "skill", "mcp", "database", "app_config")):
+        con.execute("insert into assets(id,kind,name,created_at) values(?,?,?,'t')", (f"n{i}", kind, f"x{i}"))
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("insert into assets(id,kind,name,created_at) values('bad','nope','x','t')")
+    with pytest.raises(sqlite3.IntegrityError):  # (kind, name) 唯一约束仍在
+        con.execute("insert into assets(id,kind,name,created_at) values('dup','skill','x1','t')")
+    con.commit()
+    con.close()
+
+    command.downgrade(make_alembic_config(path), "0003")
+    con = sqlite3.connect(path)
+    assert con.execute("select kind from assets where id like 'n%'").fetchall() == [("file",)] * 5
+    assert con.execute("select kind from assets where id = 'a1'").fetchone() == ("prompt",)
+    con.close()

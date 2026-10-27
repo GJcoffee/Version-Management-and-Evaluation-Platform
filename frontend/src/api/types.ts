@@ -212,6 +212,14 @@ export interface ConfigSpec extends SpecDisplayFields {
   }
 }
 
+/** 快照入库规则：glob 匹配快照目录内的相对路径，命中的文件作为 kind 类型的资产入库；name 是资产名模板 */
+export interface SnapshotRule {
+  glob: string
+  kind: AssetKind
+  /** 变量：{stem}、{stem_nover}（去掉末尾版本号）、{agent}、{path} */
+  name: string
+}
+
 export interface CodeSpec extends SpecDisplayFields {
   schema: 'evalp/v1'
   kind: 'code'
@@ -227,8 +235,8 @@ export interface CodeSpec extends SpecDisplayFields {
   }
   params?: Record<string, unknown>
   runtime?: { turn_timeout_s?: number }
-  /** 版本快照：dir 下的文件在 push 时上传为 file 资产，files 由 push 填充；只做记录，不参与运行 */
-  snapshot?: { dir: string; files?: Record<string, AssetRefValue> } | null
+  /** 版本快照：dir 下的文件在 push 时按 map 规则上传为各类型资产（未命中的存为 file），files 由 push 填充；只做记录，不参与运行 */
+  snapshot?: { dir: string; map?: SnapshotRule[]; files?: Record<string, AssetRefValue> } | null
 }
 
 export type AgentSpec = ConfigSpec | CodeSpec
@@ -353,6 +361,29 @@ export interface VersionAssetRef {
   asset_revision_id: string
 }
 
+/** `GET /versions/{ref}/assets` 的一项：版本绑定的资产 */
+export interface VersionAssetItem {
+  asset_id: string
+  kind: AssetKind
+  name: string
+  rev: number
+  asset_revision_id: string
+  /** Spec 中引用它的位置（身份键路径） */
+  spec_paths: string[]
+  /** 'snapshot'：来自 agent 快照（只读） */
+  origin: 'snapshot' | null
+  /** 该修订最近一次变化发生在哪个版本（连续使用同一修订的最早版本） */
+  changed_in_seq: number
+  changed_in_version_id: string
+  /** 变化前的修订号；该版本首次出现这个资产时为 null */
+  previous_rev: number | null
+}
+
+export interface VersionAssets {
+  version: VersionSummary
+  items: VersionAssetItem[]
+}
+
 /** `GET /versions/{ref}` 与发布结果里的 version */
 export interface Version extends VersionSummary {
   /** 已固化、规范化的 Spec */
@@ -389,9 +420,14 @@ export interface ContentDiff {
 }
 
 export interface SpecChange {
-  /** 点号连接；列表元素按身份键：`tools[query-order]`、`knowledge.inject[faq]`，其余按下标 `a[1]` */
+  /**
+   * 点号连接；列表元素按身份键：`tools[query-order]`、`knowledge.inject[faq]`，其余按下标 `a[1]`；
+   * 快照里的资产按 `snapshot.files[类型/名称]`（如 `snapshot.files[skill/crawl-engine]`）。
+   */
   path: string
   op: DiffOp
+  /** asset_changed 时给出资产的类型与名称（add / remove 的 left / right 里有 kind、name、rev） */
+  asset?: { kind: AssetKind; name: string }
   left?: unknown
   right?: unknown
   content_diff?: ContentDiff
@@ -416,7 +452,17 @@ export interface VersionDiff {
 
 // ───────────────────────────── 资产（docs/api.md §5-6） ─────────────────────────────
 
-export type AssetKind = 'prompt' | 'tool' | 'knowledge' | 'dataset' | 'file'
+export type AssetKind =
+  | 'prompt'
+  | 'tool'
+  | 'knowledge'
+  | 'kb_config'
+  | 'skill'
+  | 'mcp'
+  | 'database'
+  | 'app_config'
+  | 'dataset'
+  | 'file'
 
 export interface AssetRevision {
   id: string
@@ -426,8 +472,11 @@ export interface AssetRevision {
   /** text/markdown、application/x-yaml、application/jsonl … */
   content_type: string
   size: number
-  /** prompt: {variables}；tool: {tool_name, impl_type}；dataset: {case_count, schema_warnings, format, column_map} */
-  meta: { case_count?: number; schema_warnings?: unknown[]; [k: string]: unknown }
+  /**
+   * prompt: {variables}；tool: {tool_name, impl_type}；dataset: {case_count, schema_warnings, format, column_map}。
+   * `origin: 'snapshot'`：来自 agent 快照（只读），由 push 写入。
+   */
+  meta: { case_count?: number; schema_warnings?: unknown[]; origin?: 'snapshot'; [k: string]: unknown }
   message: string | null
   created_at: ISODateTime
 }

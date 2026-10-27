@@ -21,6 +21,7 @@ from pydantic import Field
 from evalp import actions, render
 from evalp.client import EvalpClient, EvalpClientError, resolve_server_url
 from evalp.mcp.autostart import ServerLauncher
+from evalp.spec.refs import AssetKindName
 from evalp.workspace_client import (
     ProjectConfig,
     ProjectNotFound,
@@ -619,13 +620,11 @@ def build_server(
     @mcp.tool()
     @_guard
     async def list_assets(
-        kind: Annotated[
-            Literal["prompt", "tool", "knowledge", "dataset", "file"] | None, Field(description="资产类型")
-        ] = None,
+        kind: Annotated[AssetKindName | None, Field(description="资产类型")] = None,
         q: Annotated[str | None, Field(description="按名称 / 描述模糊搜索")] = None,
         limit: Annotated[int, Field(ge=1, le=100, description="最多返回多少个资产")] = 50,
     ) -> str:
-        """列出资产（prompt / 工具 / 知识库 / 数据集 / 文件）：最新修订、大小、说明。"""
+        """列出资产（提示词 / 工具 / 知识库 / Skill / MCP 插件 / 数据库 / 应用配置 / 数据集 / 文件）。"""
         async with env.client(env.project()) as c:
             page = await c.get("/assets", params={"kind": kind, "q": q, "limit": limit})
             text = "## 资产\n\n" + render.render_assets(page["items"])
@@ -636,9 +635,7 @@ def build_server(
     @mcp.tool()
     @_guard
     async def upsert_asset(
-        kind: Annotated[
-            Literal["prompt", "tool", "knowledge", "dataset", "file"], Field(description="资产类型")
-        ],
+        kind: Annotated[AssetKindName, Field(description="资产类型")],
         name: Annotated[str, Field(description="资产名称，如 cs-system")],
         content: Annotated[str | None, Field(description="文本内容；与 path 二选一")] = None,
         path: Annotated[

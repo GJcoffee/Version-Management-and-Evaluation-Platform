@@ -239,9 +239,10 @@ class WorkspaceService:
                     if head is not None and head.blob_hash == f.hash:
                         skipped.append({**info, "rev": head.rev, "asset_id": asset.id})
                         continue
+                    meta_extra = {"origin": f.origin} if f.origin else None
                     if f.content is not None:
                         revision, existed = await assets.add_revision_bytes(
-                            s, asset, data, f.content_type, f"push {path}", f.column_map
+                            s, asset, data, f.content_type, f"push {path}", f.column_map, meta_extra
                         )
                     else:
                         existing = (
@@ -256,7 +257,7 @@ class WorkspaceService:
                             revision, existed = existing, True
                         elif self.ctx.blobs.exists(f.hash) and await s.get(Blob, f.hash) is not None:
                             revision, existed = await assets.add_revision_from_blob(
-                                s, asset, f.hash, f.content_type, f"push {path}"
+                                s, asset, f.hash, f.content_type, f"push {path}", meta_extra
                             )
                         else:
                             missing.append(info)

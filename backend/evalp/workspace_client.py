@@ -15,12 +15,16 @@ import os
 import re
 import tomllib
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
 from evalp.client import EvalpClient, EvalpClientError
+from evalp.spec.models import SnapshotRule, format_validation_errors
+from evalp.spec.refs import RefError, validate_asset_name
 from evalp.yamlio import dump_preserving, plain_dump
 
 CONFIG_NAME = ".evalp.toml"
@@ -257,6 +261,94 @@ def _has_glob(pattern: str) -> bool:
     return any(c in pattern for c in _GLOB_CHARS)
 
 
+@lru_cache(maxsize=128)
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    """glob -> 正则：``*`` / ``?`` 不跨目录，``**`` 跨目录（``**/`` 可匹配零层目录）。"""
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+            continue
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+            continue
+        c = pattern[i]
+        close = pattern.find("]", i + 2) if c == "[" else -1
+        if close != -1:
+            body = pattern[i + 1 : close]
+            out.append("[" + ("^" + body[1:] if body[0] in "!^" else body) + "]")
+            i = close
+        elif c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("".join(out))
+
+
+def glob_match(pattern: str, rel: str) -> bool:
+    """``rel``（/ 分隔的相对路径）是否匹配 glob。"""
+    return _glob_regex(pattern).fullmatch(rel) is not None
+
+
+_VERSION_SUFFIX = re.compile(r"-(?:v\d+(?:\.\d+)*|\d+(?:\.\d+)+)$", re.IGNORECASE)
+_TEMPLATE_VAR = re.compile(r"\{(\w+)\}")
+_TEMPLATE_VARS = ("stem", "stem_nover", "agent", "path")
+
+
+def strip_version(stem: str) -> str:
+    """去掉文件名末尾的版本号：``crawl-engine-0.5.3`` / ``crawl-engine-v1.2`` -> ``crawl-engine``。"""
+    return _VERSION_SUFFIX.sub("", stem)
+
+
+def snapshot_rule_asset(agent_name: str, rule: SnapshotRule, rel: str) -> str:
+    """按规则展开快照文件 ``rel`` 的资产 ``kind/name``。
+
+    变量展开后统一为合法的资产名（小写，非字母数字替换为连字符）；展开结果不合法时抛 WorkspaceError。
+    """
+    p = Path(rel)
+    values = {
+        "stem": p.stem,
+        "stem_nover": strip_version(p.stem),
+        "agent": agent_name,
+        "path": p.with_suffix("").as_posix(),
+    }
+
+    def expand(m: re.Match[str]) -> str:
+        if m.group(1) not in values:
+            raise WorkspaceError(
+                f"snapshot.map 的 name 模板 {rule.name!r} 里有未知变量 {m.group(0)}"
+                f"（可用: {', '.join('{' + v + '}' for v in _TEMPLATE_VARS)}）"
+            )
+        return values[m.group(1)]
+
+    name = normalize_stem(_TEMPLATE_VAR.sub(expand, rule.name))
+    try:
+        validate_asset_name(name)
+    except RefError as e:
+        raise WorkspaceError(
+            f"文件 {rel} 按规则 {{glob: {rule.glob}, name: {rule.name}}} 得到的资产名不合法: {e}"
+        ) from None
+    return f"{rule.kind}/{name}"
+
+
+_CONTENT_TYPES = {
+    "json": "application/json",
+    "md": "text/markdown",
+    "markdown": "text/markdown",
+    "yaml": "application/x-yaml",
+    "yml": "application/x-yaml",
+    "txt": "text/plain",
+    "jsonl": "application/jsonl",
+    "csv": "text/csv",
+}
+
+
 def _asset_name(template: str, stem: str) -> str:
     return template.replace("{stem}", normalize_stem(stem))
 
@@ -267,11 +359,17 @@ class LocalFile:
     asset: str  # kind/name
     data: bytes
     hash: str
+    origin: str | None = None  # 快照目录里的文件为 "snapshot"：资产在 EvalP 里只读
 
     def payload(self, with_content: bool) -> dict[str, Any]:
         item: dict[str, Any] = {"path": self.path, "asset": self.asset, "hash": self.hash}
         if self.path.endswith(".csv") and self.asset.startswith("dataset/"):
             item["content_type"] = "text/csv"
+        if self.origin:
+            item["origin"] = self.origin
+            ext = self.path.rsplit(".", 1)[-1].lower() if "." in self.path else ""
+            if not self.asset.startswith("file/") and ext in _CONTENT_TYPES:
+                item["content_type"] = _CONTENT_TYPES[ext]
         if with_content:
             try:
                 item["content"] = self.data.decode("utf-8")
@@ -372,11 +470,40 @@ class Workspace:
             if p.is_file()
         }
 
+    def snapshot_assets(self, spec: dict[str, Any]) -> dict[str, str]:
+        """快照目录内每个文件对应的资产：目录内相对路径 -> ``kind/name``。
+
+        按 ``snapshot.map`` 的顺序取第一条匹配的规则；没有命中的文件存为 file 资产。
+        """
+        snap = spec.get("snapshot")
+        raw_rules = (snap.get("map") or []) if isinstance(snap, dict) else []
+        rules: list[SnapshotRule] = []
+        for i, raw in enumerate(raw_rules):
+            try:
+                rules.append(SnapshotRule.model_validate(raw))
+            except ValidationError as e:
+                problems = "; ".join(f"{x['path']}: {x['message']}" for x in format_validation_errors(e))
+                raise WorkspaceError(
+                    f"{self.project.spec_path} 的 snapshot.map[{i}] 不合法: {problems}"
+                ) from None
+        out: dict[str, str] = {}
+        for rel in self.snapshot_files(spec):
+            rule = next((r for r in rules if glob_match(r.glob, rel)), None)
+            out[rel] = (
+                snapshot_rule_asset(self.project.agent_name, rule, rel)
+                if rule
+                else snapshot_asset(self.project.agent_name, rel)
+            )
+        return out
+
     def collect_files(self, spec: dict[str, Any]) -> list[LocalFile]:
         """要同步的文件：``[assets]`` 映射到的文件，加上 spec 中 ``file:`` 引用的文件和快照目录下的文件。"""
         mapping = self.mapped_files()
-        for rel, path in self.snapshot_files(spec).items():
-            mapping[path] = snapshot_asset(self.project.agent_name, rel)
+        snap_paths: set[str] = set()
+        snap_files = self.snapshot_files(spec)
+        for rel, asset in self.snapshot_assets(spec).items():
+            mapping[snap_files[rel]] = asset
+            snap_paths.add(snap_files[rel])
         for ref in iter_file_refs(spec):
             if ref in mapping:
                 continue
@@ -394,13 +521,15 @@ class Workspace:
         for path, asset in mapping.items():
             if asset in seen:
                 raise WorkspaceError(
-                    f"文件 {seen[asset]} 与 {path} 映射到同一个资产 {asset}，请调整 [assets]。"
+                    f"文件 {seen[asset]} 与 {path} 映射到同一个资产 {asset}，请调整 [assets] / snapshot.map。"
                 )
             seen[asset] = path
         files = []
         for path, asset in sorted(mapping.items()):
             data = (self.root / path).read_bytes()
-            files.append(LocalFile(path, asset, data, sha256_bytes(data)))
+            files.append(
+                LocalFile(path, asset, data, sha256_bytes(data), "snapshot" if path in snap_paths else None)
+            )
         return files
 
     def _absolutize(self, spec: dict[str, Any]) -> dict[str, Any]:
@@ -419,9 +548,9 @@ class Workspace:
             snap = out["snapshot"]
             out["snapshot"] = {
                 "dir": snap["dir"] if isinstance(snap, dict) else snap,
+                **({"map": snap["map"]} if isinstance(snap, dict) and snap.get("map") else {}),
                 "files": {
-                    rel: f"asset://{snapshot_asset(self.project.agent_name, rel)}@latest"
-                    for rel in self.snapshot_files(spec)
+                    rel: f"asset://{asset}@latest" for rel, asset in self.snapshot_assets(spec).items()
                 },
             }
         return out

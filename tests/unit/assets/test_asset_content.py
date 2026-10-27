@@ -148,3 +148,14 @@ def test_content_type_helpers():
     assert normalize_content_type("") is None and normalize_content_type(None) is None
     assert default_content_type("tool", b'{"a":1}') == "application/json"
     assert default_content_type("tool", b"a: 1") == "application/x-yaml"
+
+
+@pytest.mark.parametrize("kind", ["kb_config", "skill", "mcp", "app_config", "database"])
+def test_text_config_kinds_store_utf8_text_with_sniffed_content_type(kind):
+    assert validate_content(kind, b('{"名称": "x"}')).content_type == "application/json"
+    assert validate_content(kind, b("# 说明\n正文")).content_type == "text/markdown"
+    assert validate_content(kind, b("a: 1"), "application/x-yaml").content_type == "application/x-yaml"
+    with pytest.raises(ValidationFailed):
+        validate_content(kind, b"\xff\xfe")
+    with pytest.raises(ValidationFailed):
+        validate_content(kind, b"x" * (MAX_SIZE[kind] + 1))
