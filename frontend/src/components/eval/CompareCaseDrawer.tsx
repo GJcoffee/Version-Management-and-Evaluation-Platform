@@ -6,10 +6,12 @@ import { useEvalItem } from '@/api/queries/evals'
 import { Badge } from '@/components/ui/Badge'
 import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
-import { formatCost, formatDatasetValue, formatDuration } from '@/lib/format'
+import { formatDatasetValue } from '@/lib/format'
 import { Drawer } from './Drawer'
 import { ItemConversation, ScoreList, VerdictBadge } from './ItemDetail'
-import { TONE_CLASS, deltaTone, formatScore, formatSigned, runVersionLabel } from './evalUtils'
+import {
+  TONE_CLASS, deltaTone, formatScore, formatSigned, isRemoteItem, itemCostText, itemLatencyText, runVersionLabel,
+} from './evalUtils'
 import { cn } from '@/lib/cn'
 
 function Side({ title, run, side, testId }: { title: string; run: Pick<EvalRunOut, 'id' | 'version_seq' | 'version_id'> | null; side: EvalCompareCaseSide | null; testId: string }) {
@@ -43,7 +45,7 @@ function Side({ title, run, side, testId }: { title: string; run: Pick<EvalRunOu
             <VerdictBadge item={item.data} />
             {item.data.cached && <Badge variant="outline">缓存命中</Badge>}
             <span className="ml-auto font-mono text-muted-foreground">
-              {formatDuration(item.data.latency_ms)} · {formatCost(item.data.cost)}
+              {itemLatencyText(item.data)}{!isRemoteItem(item.data) && ` · ${itemCostText(item.data)}`}
             </span>
           </div>
           <ScoreList scores={item.data.scores} />

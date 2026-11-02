@@ -226,11 +226,12 @@ def stats_lines(stats: dict[str, Any] | None) -> list[str]:
         lines.append(f"- 评估器 `{key}`: 均分 {num(ev.get('mean'), 3)}{extra}{err}")
     lat = stats.get("latency_ms") or {}
     if lat:
-        lines.append(f"- 延迟: p50 {num(lat.get('p50'), 0)} ms，p95 {num(lat.get('p95'), 0)} ms")
+        label = "HiAgent 用时" if stats.get("remote") else "延迟"
+        lines.append(f"- {label}: p50 {num(lat.get('p50'), 0)} ms，p95 {num(lat.get('p95'), 0)} ms")
     tok = stats.get("tokens") or {}
     if tok:
         lines.append(f"- tokens: 输入 {tok.get('prompt', '-')}，输出 {tok.get('completion', '-')}")
-    if stats.get("cost") is not None:
+    if stats.get("cost") is not None and not stats.get("remote"):  # 远端（HiAgent）不提供成本
         lines.append(f"- 成本: {num(stats.get('cost'), 4)}")
     return lines
 
@@ -380,7 +381,7 @@ def _flat_metric_deltas(summary: dict[str, Any]) -> list[str]:
         out.append(f"tokens {signed(m['tokens_total'], 0)}")
     elif isinstance(m.get("tokens"), dict):
         out.append(f"tokens {signed(sum(v for v in m['tokens'].values() if isinstance(v, int | float)), 0)}")
-    if "cost" in m:
+    if m.get("cost") is not None:
         out.append(f"成本 {signed(m['cost'], 4)}")
     return out
 

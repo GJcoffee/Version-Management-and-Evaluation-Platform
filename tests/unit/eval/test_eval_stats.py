@@ -163,3 +163,26 @@ def test_tool_stats_per_tool_metrics():
     assert draw["errors"] == 1 and draw["error_rate"] == pytest.approx(1 / 3)
     assert tools["search"]["calls"] == 1 and tools["search"]["error_rate"] == 0
     assert compute_stats(items, [], evaluator_keys=[], repeats=1)["tools"] == {}
+
+
+# ---------------------------------------------------------------- 远端为主
+
+
+def test_remote_items_use_remote_latency_and_leave_out_missing_ones_instead_of_local_values():
+    remote = {"prompt_tokens": 9, "completion_tokens": 3, "trace_status": "complete"}
+    items = [
+        item("i0", "c0", 0, lat=20_000, usage=remote, cost=0.0),
+        item("i1", "c1", 0, lat=40_000, usage=remote, cost=0.0),
+        item("i2", "c2", 0, lat=None, usage={**remote, "trace_status": "unavailable"}, cost=0.0),
+    ]
+    stats = compute_stats(items, [], evaluator_keys=[], repeats=1)
+    assert stats["latency_ms"] == {"p50": 30_000, "p95": pytest.approx(39_000)}
+    assert stats["latency_missing"] == 1 and stats["remote"] is True
+    assert stats["tokens"] == {"prompt": 27, "completion": 9}
+
+
+def test_agents_without_remote_data_are_unchanged():
+    stats = compute_stats([item("i0", "c0", 0, lat=100), item("i1", "c1", 0, lat=300)], [],
+                          evaluator_keys=[], repeats=1)
+    assert stats["remote"] is False and stats["latency_missing"] == 0
+    assert stats["latency_ms"]["p50"] == 200 and stats["cost"] == pytest.approx(0.002)

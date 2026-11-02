@@ -668,7 +668,8 @@ CSV 需要 `column_map`（`{字段名: 列名}`）；字段名可用 `case_key /
 `turns[].input` / `output` 存在 `turns` 表里，始终是完整的，不受影响。
 
 `TurnOut = {id, session_id, idx, pair_index, status: running|ok|error|cancelled|timeout, input: Message, output: {final, messages, partial_text?} | null, usage, cost, latency_ms, ttft_ms, error, anchored_from_turn_id, started_at, finished_at}`。
-`usage = {prompt_tokens, completion_tokens, llm_calls, tool_calls}`；`output.messages` 是本轮新增的 assistant / tool 消息（含工具调用），下一轮历史由它们拼接。
+`usage = {prompt_tokens, completion_tokens, llm_calls, tool_calls}`；有远端数据的轮次（内置 HiAgent 适配器）另有 `trace_status`（`pending` | `complete` | `partial` | `unavailable`）、`trace_note`，
+规范指标以远端为准：`latency_ms` = HiAgent Trace 运行时长，补齐前（`pending`）和未取得（`unavailable`）为 null，`ttft_ms` 恒为 null，`cost` 为 0 且不适用；本地测量只在 `usage.local_*` / `transport_ms` / `observe_ms` 里作诊断；`output.messages` 是本轮新增的 assistant / tool 消息（含工具调用），下一轮历史由它们拼接。
 
 **取消 / 出错 / 超时的轮次保留部分文本**：`llm.delta` 不落库，但轮次以 `cancelled` / `error` / `timeout` 结束时，如果某次 LLM 调用已经流出了文本、
 却没等到它的 `llm.response`，这部分文本会保存下来：`output = {"final": null, "messages": [], "partial_text": "…"}`（此时 `output` 非 null 但没有 `final`），
@@ -769,6 +770,8 @@ event: idle                  // 没有轮次在运行（或正在运行的这一
 data: {"status":"idle","last_seq":12}
 ```
 **重放会话的 idle**：重放（`POST /sessions/{id}/replay`）创建的新会话，在重放结束前（包括轮次之间的空档、第一轮开始前、排队等待并发名额时）连接一直保持打开、不发 `idle`（空闲时只有 `: ping` 心跳）；重放结束且对比组的 `replay_status` 已写成终态后才发 `idle`。
+**远端指标补齐**：有远端数据的轮次（内置 HiAgent 适配器）在 `turn.end` 后继续追加该轮的补齐事件（`llm.request` / `llm.response` / `tool.result` / `metrics`，`turn_id` 同该轮，`seq` 接在后面；
+`metrics` 带 `trace_status`、`upstream_run_ms`、`llm_calls`），补齐期间连接保持打开，补齐完成并落库后才发 `idle`；`turn.end` 时 `usage.trace_status` 为 `pending`，会话可立即发下一轮。
 **同一会话的并发轮次**（只有锚定重放会产生）共用同一个事件序列：`seq` 单调递增，各轮事件交错，靠 `turn_id` 区分；所有并发轮次都结束（且没有重放持有）才发 `idle`。
 
 **`error` 事件的帧名是 `agent.error`**（避开浏览器 `EventSource.onerror` 的同名事件，客户端不会再把它误判为断线）。只有 `event:` 这一行改名：
@@ -915,7 +918,7 @@ Spec 里的 `adapter` 字段已取消：草稿校验会报错（`path=adapter`�
 - **步骤对齐**：对两侧步骤签名序列（`llm` / `tool:{name}` / `span:{name}` / `final`）做 LCS（`difflib.SequenceMatcher`，取最长连续匹配，所以多出来的步骤不一定出现在开头），只有 `equal / insert / delete` 三种 op；签名不同的步骤是一个 delete 加一个 insert（delete 在前）。
 - **step_id**：每轮从 `s1` 开始，必须与 turn id 组合才唯一；`message.assistant`（`final`）通常没有 step_id，这里固定记为 `"final"`；没有 step_id 的其他步骤记为 `"e{seq}"`。
 - **tool_args_diff**：只列出参数有差异的、已对齐的工具调用；`changes[].path` 形如 `a.b`、`items[0]`，`op` 为 `change / add / remove`（缺的一侧值为 null）。工具结果的文本 diff 与 llm/final 的字符级 diff 由前端用 `final_text` 和 trace 自行完成。
-- **metrics**：`tokens` = 输入 + 输出 token；轮次尚未结束时 `latency_ms` / `ttft_ms` 为 null，其余为已累计的值（结束前通常为 0）。
+- **metrics**：有远端数据的轮次（HiAgent）`latency_ms` 是远端用时（补齐前 / 未取得为 null），`ttft_ms` 与 `cost` 为 null（不适用），另带 `trace_status`；`tokens` = 输入 + 输出 token；轮次尚未结束时 `latency_ms` / `ttft_ms` 为 null，其余为已累计的值（结束前通常为 0）。
 - **forks**（仅 live 模式，其余为 `[]`）：单侧消息列表。`after_pair` 是该侧在它之前最近一个成对轮次的 `pair_index`（前面没有则为 null），前端据此把它排在对应行之后；同一位置左侧先、再按 `idx`。
 - 包含正在执行的轮次的当前进度；前端在两侧 `turn.start` / `turn.end` 后重新拉取。
 - **缓存**：两侧会话都没有正在执行的轮次（库里无 `running` 轮次、内存里也没有占用的槽位，重放则要求已结束）时，结果按（对比模式、重放所选轮次、两侧会话的 `last_seq` 及各轮 `id/status/finished_at`）缓存，最多 64 条、LRU 淘汰；任何一侧有新事件或新轮次，`last_seq` 变化，旧条目自然失效。运行中的结果不缓存。缓存只在进程内，重启后重算；响应内容与不缓存时完全一致。
@@ -988,7 +991,8 @@ Spec 里的 `adapter` 字段已取消：草稿校验会报错（`path=adapter`�
 契约字段之外：`cancelled`、`cost_new`（不含缓存命中）、`cost_wasted`（失败尝试的成本）、`pass_at_k`、`flaky_cases`、`by_tag`、`score_error_rate`、`tools`；`evaluators[key]` 另有 `std`、`n`、`parse_failures`、`pending_human`。口径：
 
 - 用例通过率 = 通过的重复次数 / 参与判定的重复次数；执行失败的 Item 算未通过；没有任何可用门禁评分（如评审解析失败）的 Item 不参与判定；`pass_rate` 是各用例通过率的平均值。
-- `latency_ms`、`tokens` 只统计 `done` 的 Item，缓存命中的沿用来源 Item 的数值。
+- `latency_ms`、`tokens` 只统计 `done` 的 Item，缓存命中的沿用来源 Item 的数值。有远端数据的 Item（HiAgent，`usage.trace_status` 非空）用时是各轮远端用时之和，Trace 补齐后写回；
+  用时未取得的 Item 不参与 p50 / p95，数量在 `latency_missing`；`remote` 为 true 时成本不适用（对比里 `metric_deltas.cost` 为 null）。Item 在 Trace 补齐期间停在 `scoring`，补齐后才评分。
 - `tools`：按工具名聚合，调用次数多的在前，没有工具调用时为 `{}`。来自会话事件 `tool.call` / `tool.result`（按 `call_id` 配对；耗时取 `tool.result.latency_ms`，失败取 `tool.result.is_error`），统计已结束（`done` / `failed`）的 Item，缓存命中的沿用来源会话：
   `{"draw_image": {"calls": 12, "calls_per_case": 1.2, "latency_ms": {"p50": 8000, "p95": 15000}, "errors": 1, "error_rate": 0.083}}`。
   `calls_per_case` = 调用次数 / 已结束的 Item 数；耗时只统计带 `latency_ms` 的调用，都没有时为 null；有 `tool.call` 但没有 `tool.result` 的调用计入次数，不计失败。**该字段在这次改动之后完成（或重算）的评测才有**，旧报告里没有 `tools`。

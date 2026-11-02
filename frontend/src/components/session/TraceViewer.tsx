@@ -21,7 +21,8 @@ import { formatDuration } from '@/lib/format'
 import { useNow } from '@/lib/useNow'
 import { BlobJson } from './BlobView'
 import { isHighlighted } from './sessionState'
-import { exactSeconds, localTimeTitle, type UpstreamTiming } from './upstreamTiming'
+import type { TraceSync } from './sessionState'
+import { remoteTitle, remoteValueText } from './upstreamTiming'
 import {
   TRACE_KINDS,
   TRACE_KIND_LABEL,
@@ -43,10 +44,10 @@ export interface TraceViewerProps {
   /** 轮次起止时间（ISO）；缺省时按步骤自动计算。运行中 endedAt 为空，瀑布图右端随时间延伸 */
   startedAt?: string | null
   endedAt?: string | null
-  /** 轮次总耗时，与指标条一致；瀑布图可包含外围 Span，范围可能稍大。 */
+  /** 轮次总耗时，与指标条一致；瀑布图可包含外围 Span，范围可能稍大。远端为主的轮次是远端用时 */
   durationMs?: number | null
-  /** 上游（HiAgent）远端用时等指标；由轮次的全部事件得出（指标事件不是步骤，不在步骤树里） */
-  upstream?: UpstreamTiming | null
+  /** 有远端数据的轮次（HiAgent）的补齐状态：头部显示远端用时 / 同步中 / 未取得，不显示本地用时 */
+  trace?: TraceSync | null
   /** 轮次仍在运行：瀑布图持续刷新 */
   running?: boolean
   /** 受控的选中步骤（节点 id，即 step_id）；不传则内部管理 */
@@ -82,7 +83,7 @@ export function TraceViewer({
   startedAt,
   endedAt,
   durationMs,
-  upstream = null,
+  trace = null,
   running,
   selectedStepId,
   onSelectStep,
@@ -195,9 +196,9 @@ export function TraceViewer({
             )
           })}
           <span className="ml-auto font-mono text-[11px] text-muted-foreground"
-            title={upstream ? `${localTimeTitle(upstream)}；时间轴包含回答完成后的 Trace 补齐，HiAgent 远端用时仅为远端整轮运行耗时` : '本轮总耗时'}
+            title={trace ? remoteTitle(trace, 'HiAgent 用时') : '本轮总耗时'}
             data-testid="trace-duration">
-            {all.length} 步 · {upstream ? `本地用时 ${exactSeconds(durationMs ?? timeline.totalMs)} · HiAgent 远端用时 ${exactSeconds(upstream.runMs)}` : formatDuration(durationMs ?? timeline.totalMs)}
+            {all.length} 步 · {trace ? `HiAgent 用时 ${remoteValueText(trace, durationMs ?? null)}` : formatDuration(durationMs ?? timeline.totalMs)}
           </span>
         </div>
       </div>

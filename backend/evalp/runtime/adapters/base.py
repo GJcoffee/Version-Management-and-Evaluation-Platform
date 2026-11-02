@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -32,7 +32,10 @@ class RunContext:
     - ``cancel``：被置位时 Runner 终止本轮；
     - ``priority``：LLM 限流优先级（对话 > 重放 > 评测）；
     - ``new_messages``：Adapter 在执行过程中追加本轮新增的 assistant / tool 消息（供下一轮拼接历史）；
-      Adapter 没有填写时，Runner 退化为 ``[final]``。
+      Adapter 没有填写时，Runner 退化为 ``[final]``；
+    - ``late_observe``：Adapter 声明本轮的规范指标来自远端、需要在轮次结束后异步补齐时设置。它返回事件流
+      （llm.request / llm.response / tool.result / metrics 等），由会话服务在后台消费并以该轮的 turn_id 追加到
+      事件流；补齐前本轮的用时等规范指标为空，``usage.trace_status`` 为 ``pending``。
     """
 
     session_id: str
@@ -46,6 +49,7 @@ class RunContext:
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     priority: int = PRIORITY_INTERACTIVE
     new_messages: list[Message] = field(default_factory=list)
+    late_observe: Callable[[], AsyncIterator[AgentEvent]] | None = None
 
 
 class HealthResult(BaseModel):

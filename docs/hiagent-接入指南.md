@@ -226,6 +226,24 @@ evalp eval compare <上一版的 run id> <本次 run id>
 MCP / CLI 同样：`chat`、`run_eval`、`replay_session`（MCP）与 `evalp chat|eval run|replay --env test`（CLI）可选环境，默认生产；
 MCP 另有 `get_adapter_environments`、`update_test_adapter`、`push_adapter_to_production`、`rollback_production_adapter`。
 
+### 指标以 HiAgent 远端为准（Trace 后台补齐）
+
+HiAgent 的 Trace 是异步生成的，所以平台**不等 Trace**：收到最终回复（`message_end`）后本轮立即结束，会话可以马上发下一轮；
+Trace 由后台任务查询（先查 GetTraceInfo，拿到 TraceID 且 EndTime 存在才拉 ListTraceSpans 明细，未完整每 0.5 秒重试，最长 `observation_wait_s`，默认 15 秒），
+拿到后把 `llm.request` / `llm.response` / `tool.result` / `metrics` 等补齐事件以该轮的 `turn_id` 追加到事件流，并改写该轮的指标与会话累计。
+
+- 本轮 `usage.trace_status`：`pending`（补齐中，界面显示「同步中」）→ `complete` / `partial`（部分缺失，原因在 `trace_note`）/ `unavailable`
+  （未取得，原因在 `trace_note`，界面显示「未取得」并悬停给原因）。取消 / 出错 / 超时的轮次只要拿到 `message_id` 同样补齐，失败不影响轮次状态。
+- **规范指标全部用远端**：用时 `latency_ms` = Trace 的运行时长（`usage.upstream_run_ms`），token 用 SSE 整轮 / Trace，LLM 调用次数、每次调用耗时与 token、工具耗时来自 Trace。
+  补齐前、未取得时 `latency_ms` 为空，**不用本地值顶替**；HiAgent 没有的指标（首 token 时间、成本）不适用：`ttft_ms` 恒为空，界面不显示。
+  会话统计、双栏对比、评测报告 / 对比、导出都用这套规范指标。
+- 本地测量（`usage.local_latency_ms`、`local_ttft_ms`、`transport_ms`、`observe_ms` 等）只作诊断留在 `usage` 里，界面不显示，也不参与任何统计与对比。
+- 补齐期间会话的 SSE 保持打开（不发 `idle`），补齐完成并落库后才发 `idle`；服务重启时仍是 `pending` 的轮次启动恢复时标为 `unavailable`（原因「服务重启，Trace 补齐中断」）。
+- 评测：用例的评分和统计依赖远端指标，所以用例各轮执行完后若还有 Trace 在补齐，先释放并发名额，补齐结束（或未取得）再排队评分、计入统计；
+  未取得用时的执行不参与用时 p50 / p95（报告里标出数量），成本不适用时不显示。
+
+没有远端数据的 agent（配置型、普通代码型、桥接）保持原样：自己的测量就是真实指标。
+
 ## 验证
 
 1. 桥接启动后执行 `evalp adapter check --version <版本>`，协议检查全部通过。注意自检会真实调用 HiAgent，产生少量费用。

@@ -24,13 +24,13 @@ import {
   type ChatPaneHandle,
 } from '@/components/session'
 import { cn } from '@/lib/cn'
+import { exactSeconds } from '@/components/session/upstreamTiming'
 import { formatCost, formatDuration, formatTokens } from '@/lib/format'
 import { safeGet, safeSet } from '@/lib/safeStorage'
 import { useIsNarrow } from '@/lib/useMediaQuery'
 import { toast } from '@/stores/toast'
 import { MODE_LABEL, sessionTitle, versionLabel } from './session/sessionUtils'
 import { SessionStatusBadge } from './session/SessionList'
-import { exactSeconds, traceStatus, upstreamTiming, upstreamTotalMs } from '@/components/session/upstreamTiming'
 
 const TRACE_KEY = 'evalp.session.trace-open'
 const TRACE_WIDE_KEY = 'evalp.session.trace-wide'
@@ -91,11 +91,13 @@ function SessionView({ sessionId }: { sessionId: string }) {
   const runningTurnId = stream.runningTurn?.id ?? awaitingTurnId
 
   // 轮次结束后刷新会话信息（标题、累计指标、状态）
+  // 远端指标（Trace）补齐完成后也要刷新：会话累计的 token / 调用次数此时才完整
   const endedCount = stream.turns.filter((t) => t.ended).length
+  const syncedCount = stream.turns.filter((t) => t.trace && t.trace.status !== 'pending').length
   useEffect(() => {
     void qc.invalidateQueries({ queryKey: sessionKeys.session(sessionId) })
     void qc.invalidateQueries({ queryKey: [...sessionKeys.all, 'list'] })
-  }, [endedCount, qc, sessionId])
+  }, [endedCount, syncedCount, qc, sessionId])
 
   // Trace：默认显示最新一轮；点击某一轮后固定到那一轮，发送新消息后重新跟随
   const [pinnedTurnId, setPinnedTurnId] = useState<string | null>(null)
@@ -179,12 +181,8 @@ function SessionView({ sessionId }: { sessionId: string }) {
     // 会话统计里没有用时：回放期间不显示
     latencyMs: hasTurns ? totals.latencyMs : null,
   }
-  const upstreamMs = upstreamTotalMs(stream.turns)
-  const hasUpstream = stream.turns.some((turn) => upstreamTiming(turn.events) !== null)
-  const llmMissing = stream.turns.flatMap((turn, i) => {
-    const trace = traceStatus(turn.events)
-    return trace?.status === 'unavailable' ? [`第 ${i + 1} 轮：${trace.note ?? '未知原因'}`] : []
-  })
+  const llmMissing = stream.turns.flatMap((turn, i) =>
+    turn.trace?.status === 'unavailable' ? [`第 ${i + 1} 轮：${turn.trace.note ?? '未知原因'}`] : [])
   const spanMs = sessionSpanMs(stream.turns)
   const traceTiming = traceTurn ? turnTiming(traceTurn) : null
   const varCount = Object.keys(session.variables ?? {}).length
@@ -233,23 +231,30 @@ function SessionView({ sessionId }: { sessionId: string }) {
         <div className="ml-auto flex flex-wrap items-center justify-end gap-x-3 gap-y-1 font-mono text-xs text-muted-foreground" data-testid="session-metrics">
           <span title="轮数">{metrics.turns} 轮</span>
           <span title="累计 tokens">{formatTokens(metrics.tokens)} tokens</span>
-          <span
-            title={`各轮用时之和${spanMs === null ? '（进行中的轮次不计）' : `；首轮开始到末轮结束共 ${formatDuration(spanMs)}`}`}
-            data-testid="session-latency"
-          >
-            {hasUpstream ? `本地用时 ${metrics.latencyMs === null ? '—' : exactSeconds(metrics.latencyMs)}` : `总用时 ${formatDuration(metrics.latencyMs)}`}
-          </span>
-          {upstreamMs !== null && (
-            <span title="各轮HiAgent原始Trace记录的运行耗时（远端用时）之和，不含本地外围开销与Trace补齐" data-testid="session-upstream-latency">
-              HiAgent 远端用时 {exactSeconds(upstreamMs)}
+          {totals.remote ? (
+            <span
+              title={totals.syncing ? 'HiAgent Trace 正在后台补齐，到达后自动刷新'
+                : totals.missing ? `有轮次的 HiAgent 用时未取得：${llmMissing.join('；')}`
+                : '各轮 HiAgent Trace 记录的运行时长（远端用时）之和'}
+              data-testid="session-latency"
+            >
+              HiAgent 用时 {totals.syncing ? '同步中' : totals.missing ? '未取得' : (metrics.latencyMs === null ? '—' : exactSeconds(metrics.latencyMs))}
+            </span>
+          ) : (
+            <span
+              title={`各轮用时之和${spanMs === null ? '（进行中的轮次不计）' : `；首轮开始到末轮结束共 ${formatDuration(spanMs)}`}`}
+              data-testid="session-latency"
+            >
+              总用时 {formatDuration(metrics.latencyMs)}
             </span>
           )}
-          <span title="累计成本">{formatCost(metrics.cost)}</span>
+          {!totals.remote && <span title="累计成本">{formatCost(metrics.cost)}</span>}
           <span
             title={llmMissing.length ? `Trace 未取得：${llmMissing.join('；')}` : 'LLM 调用 / 工具调用'}
             data-testid="session-calls"
           >
-            LLM ×{metrics.llm}{llmMissing.length > 0 && `（${llmMissing.length} 轮未取得）`} · 工具 ×{metrics.tools}
+            {totals.syncing ? 'LLM 同步中' : `LLM ×${metrics.llm}`}
+            {llmMissing.length > 0 && `（${llmMissing.length} 轮未取得）`} · 工具 ×{metrics.tools}
           </span>
           <SessionCompareActions session={session} />
           <Button
@@ -385,7 +390,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
                 startedAt={traceTiming?.startedAt}
                 endedAt={traceTiming?.endedAt}
                 durationMs={traceTiming?.durationMs}
-                upstream={upstreamTiming(traceTurn.events)}
+                trace={traceTurn.trace}
                 running={!traceTurn.ended}
                 selectedStepId={selectedStep}
                 onSelectStep={setSelectedStep}

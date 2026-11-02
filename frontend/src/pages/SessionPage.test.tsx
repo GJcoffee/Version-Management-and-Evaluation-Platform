@@ -170,6 +170,47 @@ describe('SessionPage 总用时', () => {
   })
 })
 
+describe('SessionPage 远端指标（HiAgent）', () => {
+  const remoteEvents = (extra: ReturnType<typeof mk>[]) => [
+    mk('turn.start', { input: { role: 'user', content: '查订单' }, history_len: 0 }, { seq: 1, at: 0 }),
+    mk('turn.end', { status: 'completed', output: null, cost: 0, latency_ms: null, ttft_ms: null,
+      usage: { trace_status: 'pending', prompt_tokens: 9, completion_tokens: 3, tool_calls: 1 } }, { seq: 2, at: 300 }),
+    ...extra,
+  ]
+
+  it('Trace 补齐中：会话汇总显示同步中，不显示本地用时与成本', async () => {
+    stubViewport(false)
+    stream.turns = buildSessionState(remoteEvents([])).turns
+    renderPage()
+    expect(await screen.findByTestId('session-latency')).toHaveTextContent('HiAgent 用时 同步中')
+    expect(screen.getByTestId('session-calls')).toHaveTextContent('LLM 同步中')
+    expect(screen.getByTestId('session-metrics')).not.toHaveTextContent('¥')
+  })
+
+  it('补齐后显示远端用时与调用次数', async () => {
+    stubViewport(false)
+    stream.turns = buildSessionState(remoteEvents([
+      mk('metrics', { scope: 'turn', source: 'hiagent_trace', upstream_run_ms: 20_000, llm_calls: 2, trace_status: 'complete' },
+        { seq: 3, at: 400 }),
+    ])).turns
+    renderPage()
+    expect(await screen.findByTestId('session-latency')).toHaveTextContent('HiAgent 用时 20.000s')
+    expect(screen.getByTestId('session-calls')).toHaveTextContent('LLM ×2')
+  })
+
+  it('未取得：显示未取得，悬停给出原因', async () => {
+    stubViewport(false)
+    stream.turns = buildSessionState(remoteEvents([
+      mk('metrics', { scope: 'turn', trace_status: 'unavailable', trace_note: 'Trace 查询 HTTP 401' }, { seq: 3, at: 400 }),
+    ])).turns
+    renderPage()
+    const latency = await screen.findByTestId('session-latency')
+    expect(latency).toHaveTextContent('HiAgent 用时 未取得')
+    expect(latency.getAttribute('title')).toContain('Trace 查询 HTTP 401')
+    expect(screen.getByTestId('session-calls')).toHaveTextContent('1 轮未取得')
+  })
+})
+
 describe('SessionPage Trace 轮次切换', () => {
   const turnEl = (i: number) => screen.getAllByTestId('turn')[i]
 

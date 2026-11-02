@@ -420,3 +420,110 @@ async def test_latency_of_a_failed_turn_still_covers_the_whole_run():
     adapter = ScriptAdapter([ev("message.assistant", message=FINAL), 0.2, RuntimeError("补查后失败")])
     result, _ = await run(adapter)
     assert result.status == "error" and result.latency_ms >= 200
+
+
+# ---------------------------------------------------------------- 远端为主：事后补齐
+
+def remote_ctx(late):
+    ctx = make_ctx()
+    ctx.late_observe = late
+    return ctx
+
+
+SSE_PHASE = [
+    ev("llm.delta", step_id="stage:1", text="你好", source="hiagent_sse"),
+    ev("tool.call", step_id="tool:c", call_id="c", name="查", source="hiagent_sse"),
+    ev("tool.result", step_id="tool:c", call_id="c", name="查", output=1, latency_ms=200,
+       source="hiagent_sse"),
+    ev("message.assistant", message=FINAL),
+    ev("metrics", scope="turn", usage={"prompt_tokens": 9, "completion_tokens": 3, "source": "hiagent_sse",
+                                       "observation_status": "partial"}, transport_ms=1234),
+]
+
+
+def trace_stream(*events):
+    async def late():
+        for e in events:
+            yield e
+    return late
+
+
+async def test_remote_turn_has_no_canonical_timing_until_observed_and_keeps_local_as_diagnostics():
+    ctx = remote_ctx(trace_stream())
+    result, events = await run(ScriptAdapter([0.05, *SSE_PHASE]), ctx)
+    assert result.status == "ok"
+    assert result.latency_ms is None and result.ttft_ms is None
+    assert events[-1].payload["latency_ms"] is None and events[-1].payload["ttft_ms"] is None
+    assert result.usage["trace_status"] == "pending"
+    assert result.usage["local_latency_ms"] >= 40 and result.usage["local_ttft_ms"] is not None
+    assert result.usage["prompt_tokens"] == 9 and result.usage["tool_calls"] == 1  # SSE 整轮 token 已有
+    assert result.usage["transport_ms"] == 1234
+
+
+async def test_observe_rewrites_canonical_metrics_to_the_remote_values():
+    trace = [
+        ev("llm.request", step_id="llm:a", model="m", source="hiagent_trace"),
+        ev("llm.response", step_id="llm:a", usage={"prompt_tokens": 4, "completion_tokens": 1},
+           latency_ms=2000, source="hiagent_trace"),
+        ev("tool.result", step_id="tool:c", call_id="c", name="查", output=1, latency_ms=1000,
+           source="hiagent_trace"),
+        ev("metrics", scope="turn", source="hiagent_trace", usage={"prompt_tokens": 9, "completion_tokens": 3,
+           "source": "hiagent_sse", "observation_status": "complete"}, llm_calls=1, llm_api_ms=2000,
+           tool_execution_ms=1000, upstream_run_ms=20000, trace_status="complete"),
+    ]
+    ctx = remote_ctx(trace_stream(*trace))
+    result, _ = await run(ScriptAdapter(SSE_PHASE), ctx)
+    emitted = []
+
+    async def emit(e):
+        emitted.append(e)
+
+    final = await Runner().observe(ctx, result, emit)
+    assert types(emitted) == ["llm.request", "llm.response", "tool.result", "metrics"]
+    assert all(e.turn_id == "trn_x" for e in emitted)
+    assert final.latency_ms == 20000 and final.ttft_ms is None
+    assert final.usage["trace_status"] == "complete" and final.usage["upstream_run_ms"] == 20000
+    assert final.usage["llm_calls"] == 1
+    assert final.usage["tool_calls"] == 1  # SSE 与 Trace 的同一次工具调用只算一次
+    assert final.usage["prompt_tokens"] == 9 and final.usage["llm_calls_status"] == "confirmed"
+    assert final.usage["local_latency_ms"] == result.usage["local_latency_ms"]  # 本地值只作诊断
+    assert "observe_ms" in final.usage
+
+
+async def test_unavailable_trace_leaves_latency_empty_instead_of_using_the_local_value():
+    unavailable = ev("metrics", scope="turn", trace_status="unavailable",
+                     trace_note="凭据未提供 observe_headers")
+    ctx = remote_ctx(trace_stream(unavailable))
+    result, _ = await run(ScriptAdapter([0.05, *SSE_PHASE]), ctx)
+
+    async def emit(e):
+        return None
+
+    final = await Runner().observe(ctx, result, emit)
+    assert final.latency_ms is None and final.usage["local_latency_ms"] >= 40
+    assert final.usage["trace_status"] == "unavailable" and "凭据" in final.usage["trace_note"]
+    assert final.usage["llm_calls_status"] == "unknown"
+
+
+async def test_observation_that_raises_is_reported_as_unavailable_not_pending_forever():
+    async def broken():
+        yield ev("log", message="开始")
+        raise RuntimeError("解析炸了")
+
+    ctx = remote_ctx(broken)
+    result, _ = await run(ScriptAdapter(SSE_PHASE), ctx)
+    emitted = []
+
+    async def emit(e):
+        emitted.append(e)
+
+    final = await Runner().observe(ctx, result, emit)
+    assert final.usage["trace_status"] == "unavailable" and "RuntimeError" in final.usage["trace_note"]
+    assert emitted[-1].type == "metrics" and final.latency_ms is None
+
+
+async def test_turn_without_late_observation_keeps_its_own_measurements():
+    result, events = await run(ScriptAdapter([0.05, ev("llm.delta", step_id="s", text="x"),
+                                              ev("message.assistant", message=FINAL)]))
+    assert result.latency_ms >= 40 and result.ttft_ms is not None
+    assert "trace_status" not in result.usage and "local_latency_ms" not in result.usage

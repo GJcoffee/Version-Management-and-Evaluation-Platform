@@ -136,14 +136,14 @@ def test_trace_skips_a_span_of_another_message_but_keeps_the_rest():
     assert m.usage["prompt_tokens"] == 5
 
 
-def test_trace_incomplete_is_not_ready_rather_than_failed():
+def test_trace_spans_not_fully_listed_is_not_ready_rather_than_failed():
     from evalp.runtime.adapters.hiagent_trace import TraceNotReady
 
     m = current_mapper()
     with pytest.raises(TraceNotReady):
-        trace_events(m.config, m, {**TRACE, "EndTime": None}, page(llm_span()))
-    with pytest.raises(TraceNotReady):
         trace_events(m.config, m, TRACE, {**page(llm_span()), "HasMore": True})
+    with pytest.raises(TraceNotReady):
+        trace_events(m.config, m, TRACE, {**page(llm_span()), "Total": 2})
 
 
 def test_trace_null_fields_are_missing_values_not_crashes():
@@ -210,7 +210,7 @@ def test_trace_events_emit_expected_totals():
     m = current_mapper()
     events = trace_events(m.config, m, TRACE, page(llm_span()))
     assert len(of_type(events, "llm.response")) == 1
-    assert events[-1].payload["llm_api_ms"] == 2000
+    assert events[-1].payload["llm_api_ms"] == 2000 and events[-1].payload["llm_calls"] == 1
     assert events[-1].payload["upstream_run_ms"] == 20000
     assert m.usage["prompt_tokens"] == 5 and m.usage["observation_status"] == "complete"
 

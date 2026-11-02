@@ -218,8 +218,22 @@ export const METRICS: MetricDef[] = [
   { key: 'tool_calls', label: '工具调用', lowerIsBetter: false },
 ]
 
+/** 远端没有的指标（首 token 时间、成本）：有远端数据的轮次（HiAgent）不适用，不拿本地值顶替 */
+export function metricApplicable(t: TurnState | undefined, key: MetricKey): boolean {
+  return !(t?.trace && (key === 'ttft' || key === 'cost'))
+}
+
+/** 远端指标的补齐状态文字：补齐中「同步中」，未取得「未取得」，其余（含数值）为 null */
+export function metricSyncLabel(t: TurnState | undefined, key: MetricKey): '同步中' | '未取得' | null {
+  if (!t?.trace || !t.ended || !metricApplicable(t, key)) return null
+  if (t.trace.status === 'pending' && key !== 'tokens' && key !== 'tool_calls') return '同步中'
+  if (key === 'latency' && metricValue(t, key) === null) return '未取得'
+  if (key === 'llm_calls' && t.trace.status === 'unavailable') return '未取得'
+  return null
+}
+
 export function metricValue(t: TurnState | undefined, key: MetricKey, now?: number): number | null {
-  if (!t) return null
+  if (!t || !metricApplicable(t, key)) return null
   const m = t.metrics
   switch (key) {
     case 'latency':

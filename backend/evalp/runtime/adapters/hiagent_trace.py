@@ -1,5 +1,8 @@
 """只查询当前消息的原生 Trace；指标缺失不改写执行结果。
 
+Trace 由 HiAgent 异步生成：会话服务在本轮结束后于后台调用 :func:`collect_trace`。每次轮询先查
+GetTraceInfo，只有拿到 TraceID 且 EndTime 存在（Trace 已完整）才拉 ListTraceSpans 明细，否则等待重试。
+
 身份核验只要求 TraceID 与 message_id 一致；应用、版本写法不同只标注差异。单个 span 不合格只跳过
 该 span 并记录原因，不丢弃整份 Trace。任何失败都只影响观测完整度，不影响本轮成败。
 """
@@ -61,12 +64,11 @@ def output_text(attrs: dict) -> str | None:
 def trace_events(
     config: HiAgentConfig, mapper: HiAgentMapper, trace: dict, page: dict,
 ) -> list[AgentEvent]:
-    """逐 span 补齐；Trace 未收齐时抛 TraceNotReady，其余问题只记录在指标里。"""
-    tid = trace.get("TraceID")
+    """逐 span 补齐；明细未收齐时抛 TraceNotReady，其余问题只记录在指标里。"""
+    tid = trace["TraceID"]
     items = page.get("Items") or []
-    if (not tid or not trace.get("EndTime")
-            or page.get("HasMore") is not False or page.get("Total") != len(items)):
-        raise TraceNotReady("Trace 尚未完整")
+    if page.get("HasMore") is not False or page.get("Total") != len(items):
+        raise TraceNotReady("Trace 明细尚未收齐")
     skipped: list[dict] = []
     spans: list[tuple[dict, dict, dict, str, int]] = []
     seen: set[str] = set()
@@ -159,7 +161,7 @@ def trace_events(
     run_ms = duration(trace.get("StartTime"), trace["EndTime"])
     events.append(ev(
         "metrics", scope="turn", source="hiagent_trace", usage=mapper.usage,
-        llm_api_ms=llm_ms, tool_execution_ms=tool_ms,
+        llm_calls=len(model_steps), llm_api_ms=llm_ms, tool_execution_ms=tool_ms,
         observation_status="complete" if complete else "partial",
         trace_status="complete" if complete else "partial",
         **({"upstream_run_ms": run_ms} if run_ms is not None else {}),
@@ -226,6 +228,8 @@ async def collect_trace(
                     trace = await query("GetTraceInfo", {"MessageID": mapper.message_id})
                     if not trace.get("TraceID"):
                         raise TraceNotReady("Trace 尚未生成")
+                    if not trace.get("EndTime"):
+                        raise TraceNotReady("Trace 尚未完整")  # 不完整时不拉明细，等待重试
                     page = await query("ListTraceSpans", {
                         "IsCustomApp": False, "PageSize": 1000,
                         "Sort": [{"SortBy": "StartTime", "SortOrder": "Asc"}],

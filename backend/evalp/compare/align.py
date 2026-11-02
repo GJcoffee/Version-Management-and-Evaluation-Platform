@@ -170,18 +170,24 @@ def _turn_timing(t: AlignTurn) -> tuple[int | float | None, int | float | None]:
 
 
 def turn_metrics(t: AlignTurn | None) -> dict[str, Any] | None:
-    """一轮的指标；该侧没有这一轮时为 None。"""
+    """一轮的指标；该侧没有这一轮时为 None。
+
+    轮次的规范指标已是对外口径：有远端数据的轮次（``usage.trace_status``，如 HiAgent）其用时是远端用时
+    （补齐前 / 未取得为 None），首 token 时间与成本远端没有，为 None（不适用）；并附带 ``trace_status``。
+    """
     if t is None:
         return None
     u = t.usage or {}
     latency, ttft = _turn_timing(t)
+    remote = "trace_status" in u
     return {
         "latency_ms": latency,
         "ttft_ms": ttft,
         "tokens": int(u.get("prompt_tokens", 0) or 0) + int(u.get("completion_tokens", 0) or 0),
-        "cost": t.cost or 0.0,
+        "cost": None if remote else t.cost or 0.0,
         "llm_calls": int(u.get("llm_calls", 0) or 0),
         "tool_calls": int(u.get("tool_calls", 0) or 0),
+        **({"trace_status": u["trace_status"]} if remote else {}),
     }
 
 

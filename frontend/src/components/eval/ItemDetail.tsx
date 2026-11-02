@@ -4,8 +4,10 @@ import { ExternalLink } from 'lucide-react'
 import type { EvalItemDetailOut, EvalScoreOut } from '@/api/evalTypes'
 import { ChatPane, useSessionStream } from '@/components/session'
 import { Badge } from '@/components/ui/Badge'
-import { formatCost, formatDatasetValue, formatDuration } from '@/lib/format'
-import { VERDICT_LABEL, formatScore, itemErrorText, itemVerdict, scoreTone } from './evalUtils'
+import { formatDatasetValue } from '@/lib/format'
+import {
+  VERDICT_LABEL, formatScore, isRemoteItem, itemCostText, itemErrorText, itemLatencyText, itemVerdict, scoreTone,
+} from './evalUtils'
 
 export function VerdictBadge({ item }: { item: Pick<EvalItemDetailOut, 'status' | 'passed'> }) {
   const v = itemVerdict(item)
@@ -94,8 +96,8 @@ export function ItemDetailBody({ item, showConversation = true }: { item: EvalIt
         ))}
         {item.cached && <Badge variant="outline">缓存命中</Badge>}
         <span className="ml-auto flex items-center gap-3 font-mono text-muted-foreground">
-          <span>{formatDuration(item.latency_ms)}</span>
-          <span>{formatCost(item.cost)}</span>
+          <span>{itemLatencyText(item)}</span>
+          {!isRemoteItem(item) && <span>{itemCostText(item)}</span>}
           {item.attempts > 1 && <span>尝试 {item.attempts} 次</span>}
         </span>
       </div>

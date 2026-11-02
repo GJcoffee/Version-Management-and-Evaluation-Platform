@@ -1,7 +1,6 @@
 import { useEffect } from 'react'
 import { X } from 'lucide-react'
 import { TraceViewer, turnTiming, type TurnState } from '@/components/session'
-import { upstreamTiming } from '@/components/session/upstreamTiming'
 import { Button } from '@/components/ui/Button'
 
 export interface TraceDrawerProps {
@@ -48,7 +47,7 @@ export function TraceDrawer({ title, turn, sessionId, selectedStepId, onSelectSt
           startedAt={timing?.startedAt}
           endedAt={timing?.endedAt}
           durationMs={timing?.durationMs}
-          upstream={upstreamTiming(turn.events)}
+          trace={turn.trace}
           running={!turn.ended}
           selectedStepId={selectedStepId}
           onSelectStep={onSelectStep}

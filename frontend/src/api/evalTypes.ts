@@ -2,7 +2,7 @@
  * 评测接口的类型（一期收窄版，见 docs/contract-eval.md 与 docs/api.md「评测（P3-B）」）。
  * 与 types.ts 里早期的设计稿类型（EvalRun / EvalItem）区分开，这里一律以 `Out` 结尾，按实际接口定义。
  */
-import type { ISODateTime } from './types'
+import type { ISODateTime, TraceSyncStatus } from './types'
 
 export type EvalRunStatusOut =
   | 'queued'
@@ -82,6 +82,10 @@ export interface EvalStatsOut {
   flaky_cases?: number
   /** 评分出错的比例 */
   score_error_rate?: number
+  /** 有远端数据（HiAgent）：用时 / token 为远端值，成本不适用 */
+  remote?: boolean
+  /** 用时未取得（Trace 不可用）、不参与 p50 / p95 的执行数 */
+  latency_missing?: number
   by_tag?: Record<string, { pass_rate: number | null; cases: number }>
   /** 按工具名聚合的指标，调用次数多的在前；旧版本生成的报告没有这个字段 */
   tools?: Record<string, EvalToolStat>
@@ -222,7 +226,7 @@ export interface EvalItemOut {
   error: EvalItemError | string | null
   latency_ms: number | null
   cost: number | null
-  usage: { prompt_tokens?: number; completion_tokens?: number } | null
+  usage: { prompt_tokens?: number; completion_tokens?: number; trace_status?: TraceSyncStatus } | null
   session_id: string | null
   scores: EvalScoreOut[]
 }

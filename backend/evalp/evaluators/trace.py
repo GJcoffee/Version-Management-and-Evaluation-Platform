@@ -83,7 +83,10 @@ class TraceEvaluator(Evaluator):
             checks.append((steps <= a.max_steps, f"步数 {steps}（上限 {a.max_steps}）"))
         if a.max_latency_ms is not None:
             lat = transcript.latency_ms
-            checks.append((lat <= a.max_latency_ms, f"耗时 {lat}ms（上限 {a.max_latency_ms}ms）"))
+            if lat is None:
+                checks.append((False, f"耗时未取得（上限 {a.max_latency_ms}ms），无法核对"))
+            else:
+                checks.append((lat <= a.max_latency_ms, f"耗时 {lat}ms（上限 {a.max_latency_ms}ms）"))
         if a.max_tokens is not None:
             tok = transcript.tokens
             checks.append((tok <= a.max_tokens, f"token {tok}（上限 {a.max_tokens}）"))

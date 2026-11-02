@@ -128,8 +128,11 @@ class Transcript:
         return "\n".join(t.input for t in self.turns)
 
     @property
-    def latency_ms(self) -> int:
-        return sum(t.latency_ms or 0 for t in self.turns)
+    def latency_ms(self) -> int | None:
+        """各轮规范用时之和（远端为主的轮次是远端用时）；任一轮未取得（补齐失败）则整体未知。"""
+        if any(t.latency_ms is None for t in self.turns):
+            return None
+        return sum(t.latency_ms for t in self.turns)
 
     @property
     def tokens(self) -> int:

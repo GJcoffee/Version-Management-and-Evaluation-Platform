@@ -170,3 +170,18 @@ def test_recorded_original_timing_fallbacks(ttft):
         ev("log", message="录制来源", source_mode="recorded", original_latency_ms=0, original_ttft_ms=0)
     ]
     assert turn_metrics(turn)["latency_ms"] == 0 and turn_metrics(turn)["ttft_ms"] == 0
+
+
+def test_remote_turn_metrics_use_remote_values_and_mark_not_applicable_ones():
+    remote = AlignTurn("r", 0, latency_ms=20_000, ttft_ms=None, cost=0.0,
+                       usage={"prompt_tokens": 9, "completion_tokens": 3, "llm_calls": 2, "tool_calls": 1,
+                              "trace_status": "complete", "local_latency_ms": 31_000})
+    assert turn_metrics(remote) == {
+        "latency_ms": 20_000, "ttft_ms": None, "tokens": 12, "cost": None,
+        "llm_calls": 2, "tool_calls": 1, "trace_status": "complete",
+    }
+    pending = AlignTurn("p", 0, latency_ms=None,
+                        usage={"trace_status": "pending", "local_latency_ms": 31_000})
+    assert turn_metrics(pending)["latency_ms"] is None and turn_metrics(pending)["trace_status"] == "pending"
+    local = AlignTurn("l", 0, latency_ms=100, ttft_ms=30, cost=0.5, usage={"prompt_tokens": 1})
+    assert "trace_status" not in turn_metrics(local) and turn_metrics(local)["cost"] == 0.5

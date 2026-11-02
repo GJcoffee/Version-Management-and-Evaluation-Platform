@@ -161,9 +161,10 @@ const metricsOf = (t: TurnState | undefined) =>
         latency_ms: t.metrics.latencyMs,
         ttft_ms: t.metrics.ttftMs,
         tokens: t.metrics.totalTokens,
-        cost: t.metrics.cost,
+        cost: t.trace ? null : t.metrics.cost,
         llm_calls: t.metrics.llmCalls,
         tool_calls: t.metrics.toolCalls,
+        ...(t.trace ? { trace_status: t.trace.status } : {}),
       }
     : null
 

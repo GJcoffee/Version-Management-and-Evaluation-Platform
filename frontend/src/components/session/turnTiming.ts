@@ -30,7 +30,7 @@ export function recordedTurnTiming(events: readonly EventEnvelope[]): TurnTiming
 }
 
 export type TimedTurn = Pick<TurnState, 'metrics' | 'startedAt' | 'ended'> &
-  Partial<Pick<TurnState, 'events' | 'endedAt'>>
+  Partial<Pick<TurnState, 'events' | 'endedAt' | 'trace'>>
 
 /** 录制来源未提供原始 TTFT 时，不能用导入过程的首 token 时间。 */
 export function turnTtftMs(turn: TimedTurn): number | null {
@@ -44,18 +44,18 @@ export function turnTtftMs(turn: TimedTurn): number | null {
   return turn.metrics.ttftMs
 }
 
-/** 展示口径：录制轮次用原始执行总耗时，普通轮次用 turn.end，运行中按当前时间累计；
- *  最终回复已到达、仍在补查观测数据（如 Trace）时，计时停在回复到达的时刻。 */
+/** 展示口径：录制轮次用原始执行总耗时；远端为主的轮次（HiAgent）只认远端用时，补齐前 / 未取得时为空，
+ *  不用本地时间顶替；其余轮次用 turn.end，运行中按当前时间累计。 */
 export function turnTiming(turn: TimedTurn, now?: number): TurnTiming {
   const recorded = recordedTurnTiming(turn.events ?? [])
   if (recorded) return recorded
   const startedAt = turn.startedAt
   const endedAt = turn.endedAt ?? null
   let durationMs = turn.metrics.latencyMs
+  if (turn.trace) return { startedAt, endedAt, durationMs }
   if (durationMs === null && startedAt) {
     const start = Date.parse(startedAt)
-    const answered = turn.events?.find((e) => e.type === 'message.assistant')
-    const end = turn.ended ? (endedAt ? Date.parse(endedAt) : NaN) : answered ? Date.parse(answered.ts) : now
+    const end = turn.ended ? (endedAt ? Date.parse(endedAt) : NaN) : now
     if (Number.isFinite(start) && end !== undefined && Number.isFinite(end)) {
       durationMs = Math.max(0, end - start)
     }

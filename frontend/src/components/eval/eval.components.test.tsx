@@ -12,7 +12,7 @@ import { EvalProgressBar } from './EvalStatus'
 import { EvaluatorEditor } from './EvaluatorEditor'
 import { ItemDetailBody } from './ItemDetail'
 import { MetricCards } from './MetricCards'
-import type { EvaluatorForm } from './evalUtils'
+import { isRemoteItem, itemCostText, itemLatencyText, type EvaluatorForm } from './evalUtils'
 
 const stats = (over: Partial<EvalStatsOut> = {}): EvalStatsOut => ({
   cases: 4,
@@ -38,6 +38,29 @@ describe('MetricCards', () => {
     expect(screen.getByTestId('metric-tokens')).toHaveTextContent('1.5k')
     expect(screen.getByTestId('metric-cost')).toHaveTextContent('¥0.0123')
     expect(screen.getByTestId('metric-error-rate')).toHaveTextContent('0.0%')
+  })
+})
+
+describe('MetricCards 远端为主', () => {
+  it('HiAgent 评测显示远端用时、说明未取得的执行数，成本不适用而隐藏', () => {
+    render(<MetricCards stats={{ ...stats(), remote: true, latency_missing: 2 }} />)
+    expect(screen.getByTestId('metric-latency')).toHaveTextContent('HiAgent 用时 p50 / p95')
+    expect(screen.getByTestId('metric-latency')).toHaveTextContent('2 次执行的远端用时未取得')
+    expect(screen.queryByTestId('metric-cost')).toBeNull()
+  })
+})
+
+describe('评测执行的远端指标文字', () => {
+  const base = { latency_ms: 20_000, cost: 0 }
+  it('补齐中 / 未取得 / 远端用时 / 本地 agent', () => {
+    expect(itemLatencyText({ ...base, latency_ms: null, usage: { trace_status: 'pending' } })).toBe('同步中')
+    expect(itemLatencyText({ ...base, latency_ms: null, usage: { trace_status: 'unavailable' } })).toBe('未取得')
+    expect(itemLatencyText({ ...base, usage: { trace_status: 'complete' } })).toBe('20.0s')
+    expect(itemLatencyText({ latency_ms: null, usage: {} })).toBe('-')
+    expect(itemCostText({ ...base, usage: { trace_status: 'complete' } })).toBe('不适用')
+    expect(itemCostText({ cost: 0.5, usage: {} })).toBe('¥0.5000')
+    expect(isRemoteItem({ usage: { trace_status: 'partial' } })).toBe(true)
+    expect(isRemoteItem({ usage: null })).toBe(false)
   })
 })
 

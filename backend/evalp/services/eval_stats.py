@@ -10,6 +10,10 @@
 - **按工具指标**（``tools``）：来自 ``tool.call`` / ``tool.result`` 事件（用 ``call_id`` 配对；耗时取
   ``tool.result.latency_ms``，失败取 ``tool.result.is_error``）；"每用例"指每个已结束（done / failed）的
   Item。
+- **远端为主**：有远端数据的 Item（HiAgent，``usage.trace_status`` 非空）其用时 / token 已是远端值
+  （Trace 补齐后写回）；用时未取得（Trace 不可用）的 Item 不参与 p50 / p95（``latency_missing`` 计数），
+  不用本地值顶替；
+  ``remote`` 为真时成本不适用（远端不提供成本）；
 - ``cost`` 是各 Item 的"名义成本"之和（缓存命中的 Item 沿用来源 Item 的成本）；``cost_new``
   是本次评测真正新增的成本
   （不含缓存命中），预算按它计算；``cost_wasted`` 是失败尝试的成本（记在 Item 的 ``usage.failed_attempts``
@@ -221,6 +225,7 @@ def compute_stats(
     score_errors = sum(1 for s in all_rows if s.status == "error")
 
     lat = [it.latency_ms for it in done_items if it.latency_ms is not None]
+    remote = any((it.usage or {}).get("trace_status") for it in done_items)
     prompt = sum(_usage_tokens(it.usage)[0] for it in done_items)
     completion = sum(_usage_tokens(it.usage)[1] for it in done_items)
     wasted = sum(float((it.usage or {}).get("wasted_cost", 0) or 0) for it in items)
@@ -239,6 +244,8 @@ def compute_stats(
         "flaky_cases": sum(1 for r in rates.values() if 0 < r < 1),
         "evaluators": ev_stats,
         "latency_ms": {"p50": percentile(lat, 50), "p95": percentile(lat, 95)},
+        "latency_missing": len(done_items) - len(lat),
+        "remote": remote,
         "tokens": {"prompt": prompt, "completion": completion},
         "cost": round(cost, 8),
         "cost_new": round(cost_new, 8),

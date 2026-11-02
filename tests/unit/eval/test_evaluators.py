@@ -237,3 +237,9 @@ def test_transcript_helpers():
     assert t.final == "d" and t.input_text == "a\nc" and t.tokens == 7 and t.latency_ms == 15
     assert t.tool_calls() == [{"name": "t", "arguments": {"x": 1}, "output": "res"}]
     json.dumps(t.to_dict())
+
+
+async def test_trace_latency_assert_cannot_be_checked_when_the_remote_latency_is_missing():
+    t = Transcript([TurnView(idx=0, input="q", output="a", latency_ms=None)])
+    r = await run({"type": "trace", "assert": {"max_latency_ms": 1000}}, t=t, events=[event("llm.response")])
+    assert r.passed is False and "未取得" in r.reason and t.latency_ms is None

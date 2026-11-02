@@ -3,6 +3,7 @@
 上游 SSE 与 Trace 全部是手写的虚构数据，不访问真实服务。
 """
 
+import asyncio
 import json
 
 import httpx
@@ -10,6 +11,7 @@ import pytest
 import respx
 from evalp.runtime.adapters.hiagent_adapter import HiAgentAdapter
 from evalp.runtime.adapters.registry import validate_binding
+from evalp.services.session import Idle, SessionService
 
 from tests.integration.adapter_env import configure_production, make_credential
 
@@ -89,23 +91,120 @@ def mock_upstream(router, handler=None):
         router.post(OBSERVE).mock(side_effect=handler)
 
 
-async def test_multi_segment_reply_and_every_model_call_with_input(world, client):
+class Gate:
+    """让 Trace 在放行前一直处于"尚未完整"，用来观察补齐之前的状态。"""
+
+    def __init__(self, spans, trace=TRACE, calls=None):
+        self.open = False
+        self.spans, self.trace, self.calls = spans, trace, calls if calls is not None else []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        action = request.url.params["Action"]
+        self.calls.append(action)
+        if action == "GetTraceInfo":
+            trace = self.trace if self.open else {**self.trace, "EndTime": None}
+            return httpx.Response(200, json={"Result": trace})
+        return httpx.Response(200, json={"Result": {"Items": self.spans, "Total": len(self.spans),
+                                                    "HasMore": False}})
+
+
+async def test_turn_ends_without_waiting_for_trace_and_trace_backfills_in_background(world, client):
     _, session = await make_session(world, client)
-    # 版本写法与配置不同、明细 token 与整轮不等：仍要展示每次调用
-    spans = [llm_span("a"), llm_span("b", output=json.dumps({"content": "第二段。"}, ensure_ascii=False)),
-             tool_span("t1")]
+    gate = Gate([llm_span("a"), llm_span("b", output=json.dumps({"content": "第二段。"})), tool_span("t1")])
     with respx.mock() as router:
-        mock_upstream(router, observe(TRACE, spans))
+        mock_upstream(router, gate)
         turn = await world.sessions.run_turn(session.id, "查订单", wait=True)
-    assert turn.status == "ok", turn.error
-    assert turn.output.final.content == "第一段，第二段。"
+        # 本轮已结束：回复、token 已有，规范用时等待远端，指标标为同步中
+        assert turn.status == "ok", turn.error
+        assert turn.output.final.content == "第一段，第二段。"
+        assert turn.usage["trace_status"] == "pending"
+        assert turn.latency_ms is None and turn.ttft_ms is None
+        assert turn.usage["prompt_tokens"] == 9 and turn.usage["local_latency_ms"] is not None
+        assert (await world.sessions.get_session(session.id)).status == "idle"
+        types = await world.types(session.id)
+        assert types[-1] == "turn.end" and "llm.request" not in types
+        assert "GetTraceInfo" in gate.calls and "ListTraceSpans" not in gate.calls  # 不完整时不拉明细
+
+        gate.open = True
+        done = await world.sessions.wait_trace(turn.id)
+    assert gate.calls.count("ListTraceSpans") == 1
+    assert done.usage["trace_status"] == "partial"  # 明细 token 与整轮不一致
+    assert done.latency_ms == 20000 and done.ttft_ms is None  # 远端用时；本地值只在 usage 里
+    assert done.usage["llm_calls"] == 2 and done.usage["tool_calls"] == 1
+    assert done.usage["prompt_tokens"] == 9  # 整轮以 SSE 为准
+    assert done.usage["token_detail_mismatch"]["prompt_tokens"] == {"turn": 9, "details": 8}
+    assert done.usage["local_latency_ms"] is not None and done.usage["observe_ms"] >= 0
     events = await world.events(session.id)
-    requests = [e for e in events if e.type == "llm.request"]
-    assert [r.payload["messages"] for r in requests] == [[{"role": "user", "content": "查一下订单"}]] * 2
-    assert len([e for e in events if e.type == "llm.response"]) == 2
-    assert turn.usage["llm_calls"] == 2 and turn.usage["tool_calls"] == 1
-    assert turn.usage["prompt_tokens"] == 9  # 整轮以 SSE 为准
-    assert turn.usage["token_detail_mismatch"]["prompt_tokens"] == {"turn": 9, "details": 8}
+    end_seq = next(e.seq for e in events if e.type == "turn.end")
+    late = [e for e in events if e.seq > end_seq]
+    assert {"llm.request", "llm.response", "tool.result", "metrics"} <= {e.type for e in late}
+    assert all(e.turn_id == turn.id for e in late)
+    assert [e.payload["messages"] for e in late if e.type == "llm.request"] == \
+        [[{"role": "user", "content": "查一下订单"}]] * 2
+    assert [e.seq for e in events] == list(range(1, len(events) + 1))
+    stats = (await world.sessions.get_session(session.id)).stats
+    assert stats["llm_calls"] == 2 and stats["tool_calls"] == 1 and stats["prompt_tokens"] == 9
+
+
+async def test_next_turn_can_start_while_the_previous_trace_is_still_syncing(world, client):
+    _, session = await make_session(world, client)
+    gate = Gate([llm_span("a")])
+    with respx.mock() as router:
+        mock_upstream(router, gate)
+        first = await world.sessions.run_turn(session.id, "一", wait=True)
+        second = await world.sessions.run_turn(session.id, "二", wait=True)  # 不会 SessionBusy
+        assert first.usage["trace_status"] == second.usage["trace_status"] == "pending"
+        gate.open = True
+        await world.sessions.wait_traces(session.id)
+    turns = (await world.sessions.get(session.id)).turns
+    assert [t.latency_ms for t in turns] == [20000, 20000]
+    assert (await world.sessions.get_session(session.id)).stats["llm_calls"] == 2
+    seqs = [e.seq for e in await world.events(session.id)]
+    assert seqs == list(range(1, len(seqs) + 1))
+
+
+async def test_sse_stays_open_until_the_trace_is_synced(world, client):
+    _, session = await make_session(world, client)
+    gate = Gate([llm_span("a", input_tokens=9, output_tokens=3)])
+    seen: list = []
+
+    async def consume():
+        async for item in world.sessions.stream(session.id):
+            seen.append(item)
+
+    with respx.mock() as router:
+        mock_upstream(router, gate)
+        started = await world.sessions.run_turn(session.id, "查订单", wait=False)
+        consumer = asyncio.create_task(consume())
+        await world.sessions.wait_turn(started.id)
+        await asyncio.sleep(0.3)
+        assert not consumer.done()  # 轮次结束了，但补齐期间不发 idle
+        assert any(getattr(i, "type", None) == "turn.end" for i in seen)
+        gate.open = True
+        await asyncio.wait_for(consumer, 5)
+    assert isinstance(seen[-1], Idle)
+    assert [i.type for i in seen[:-1]].index("turn.end") < [i.type for i in seen[:-1]].index("llm.response")
+    assert seen[-2].type == "metrics" and seen[-2].payload["trace_status"] == "complete"
+
+
+async def test_sse_opened_during_sync_replays_then_waits_for_the_backfill(world, client):
+    _, session = await make_session(world, client)
+    gate = Gate([llm_span("a", input_tokens=9, output_tokens=3)])
+    seen: list = []
+
+    async def consume():
+        async for item in world.sessions.stream(session.id):
+            seen.append(item)
+
+    with respx.mock() as router:
+        mock_upstream(router, gate)
+        await world.sessions.run_turn(session.id, "查订单", wait=True)
+        consumer = asyncio.create_task(consume())
+        await asyncio.sleep(0.3)
+        assert not consumer.done() and seen[-1].type == "turn.end"
+        gate.open = True
+        await asyncio.wait_for(consumer, 5)
+    assert isinstance(seen[-1], Idle) and seen[-2].payload["trace_status"] == "complete"
 
 
 @pytest.mark.parametrize("failure", ["null-status", "unauthorized", "not-json", "api-error", "null-items"])
@@ -132,18 +231,23 @@ async def test_trace_failure_never_changes_the_turn_outcome(world, client, failu
     with respx.mock() as router:
         mock_upstream(router, handler)
         turn = await world.sessions.run_turn(session.id, "查订单", wait=True)
-    assert turn.status == "ok", turn.error
+        assert turn.status == "ok", turn.error
+        done = await world.sessions.wait_trace(turn.id)
+    assert done.status == "ok" and done.usage["trace_status"] in ("complete", "partial", "unavailable")
 
 
-async def test_unavailable_trace_says_why_instead_of_hiding_the_llm_count(world, client):
+async def test_unavailable_trace_says_why_and_never_substitutes_the_local_latency(world, client):
     _, session = await make_session(world, client, observe_headers=False)
     with respx.mock() as router:
         mock_upstream(router)
         turn = await world.sessions.run_turn(session.id, "查订单", wait=True)
-    assert turn.status == "ok", turn.error
-    assert turn.usage["trace_status"] == "unavailable"
-    assert "凭据" in turn.usage["trace_note"]
-    assert turn.usage["llm_calls"] == 0
+        done = await world.sessions.wait_trace(turn.id)
+    assert done.status == "ok", done.error
+    assert done.usage["trace_status"] == "unavailable"
+    assert "凭据" in done.usage["trace_note"]
+    assert done.usage["llm_calls"] == 0 and done.usage["llm_calls_status"] == "unknown"
+    assert done.latency_ms is None and done.ttft_ms is None
+    assert done.usage["local_latency_ms"] >= 0  # 本地测量只留作诊断
 
 
 async def test_deterministic_trace_problem_is_not_retried(world, client):
@@ -152,24 +256,73 @@ async def test_deterministic_trace_problem_is_not_retried(world, client):
     with respx.mock() as router:
         mock_upstream(router, observe(TRACE, [tool_span("t1")], calls=calls))  # 没有模型调用
         turn = await world.sessions.run_turn(session.id, "查订单", wait=True)
-    assert turn.status == "ok", turn.error
+        done = await world.sessions.wait_trace(turn.id)
+    assert done.status == "ok", done.error
     assert calls == ["GetTraceInfo", "ListTraceSpans"]
-    assert turn.usage["trace_fetch_ms"] < 2000
-    assert "模型调用" in turn.usage["trace_note"]
+    assert done.usage["observe_ms"] < 2000
+    assert "模型调用" in done.usage["trace_note"]
+    assert done.usage["trace_status"] == "partial" and done.latency_ms == 20000
 
 
-async def test_trace_not_yet_complete_is_retried_and_its_time_is_not_turn_latency(world, client):
+async def test_incomplete_trace_is_polled_without_listing_spans(world, client):
     _, session = await make_session(world, client, wait=5)
     pending = {**TRACE, "EndTime": None}
     calls: list[str] = []
     with respx.mock() as router:
-        mock_upstream(router, observe([pending, TRACE], [llm_span("a")], calls=calls))
+        mock_upstream(router, observe([pending, {"TraceID": None}, TRACE], [llm_span("a")], calls=calls))
         turn = await world.sessions.run_turn(session.id, "查订单", wait=True)
-    assert turn.status == "ok", turn.error
-    assert calls.count("GetTraceInfo") == 2
-    assert turn.usage["llm_calls"] == 1 and turn.usage["upstream_run_ms"] == 20000
-    assert turn.usage["trace_fetch_ms"] >= 450
-    assert turn.latency_ms < turn.usage["trace_fetch_ms"]
+        assert turn.latency_ms is None
+        done = await world.sessions.wait_trace(turn.id)
+    assert calls == ["GetTraceInfo"] * 3 + ["ListTraceSpans"]
+    assert done.usage["llm_calls"] == 1 and done.usage["upstream_run_ms"] == 20000
+    assert done.latency_ms == 20000 and done.usage["observe_ms"] >= 900
+
+
+async def test_trace_that_never_completes_becomes_unavailable_with_the_reason(world, client):
+    _, session = await make_session(world, client, wait=1)
+    calls: list[str] = []
+    with respx.mock() as router:
+        mock_upstream(router, observe({**TRACE, "EndTime": None}, [], calls=calls))
+        turn = await world.sessions.run_turn(session.id, "查订单", wait=True)
+        done = await world.sessions.wait_trace(turn.id)
+    assert "ListTraceSpans" not in calls
+    assert done.usage["trace_status"] == "unavailable" and "尚未完整" in done.usage["trace_note"]
+    assert done.latency_ms is None
+
+
+async def test_failed_turn_with_a_message_id_still_backfills_and_stays_failed(world, client):
+    _, session = await make_session(world, client)
+    failing = "".join(f"data: {json.dumps(f)}\n\n" for f in [
+        {"event": "message_start", "id": "msg-1", "conversation_id": "conv-1"}, {"event": "message_error"}])
+    with respx.mock() as router:
+        mock_upstream(router, observe(TRACE, [llm_span("a", input_tokens=9, output_tokens=3)]))
+        router.post(CHAT).mock(return_value=httpx.Response(
+            200, text=failing, headers={"Content-Type": "text/event-stream"}))
+        turn = await world.sessions.run_turn(session.id, "查订单", wait=True)
+        assert turn.status == "error" and turn.usage["trace_status"] == "pending"
+        done = await world.sessions.wait_trace(turn.id)
+    assert done.status == "error"
+    assert done.usage["trace_status"] == "complete" and done.latency_ms == 20000
+
+
+async def test_pending_turns_are_marked_unavailable_after_a_restart(world, client):
+    _, session = await make_session(world, client)
+    gate = Gate([llm_span("a")])
+    with respx.mock() as router:
+        mock_upstream(router, gate)
+        turn = await world.sessions.run_turn(session.id, "查订单", wait=True)
+        assert turn.usage["trace_status"] == "pending"
+        await world.sessions.aclose()  # 进程退出：补齐被中断，库里仍是 pending
+    assert (await world.sessions.get_turn(turn.id)).usage["trace_status"] == "pending"
+    before = (await world.sessions.get_session(session.id)).last_seq
+    restarted = SessionService(world.ctx)
+    assert await restarted.recover() == 1
+    done = await restarted.get_turn(turn.id)
+    assert done.usage["trace_status"] == "unavailable"
+    assert done.usage["trace_note"] == "服务重启，Trace 补齐中断" and done.latency_ms is None
+    events = await restarted.get_events(session.id, after_seq=before)
+    assert [e.type for e in events] == ["metrics"] and events[0].turn_id == turn.id
+    assert events[0].payload["trace_status"] == "unavailable"
 
 
 def test_business_bridge_health_check_uses_the_same_headers_as_a_turn():

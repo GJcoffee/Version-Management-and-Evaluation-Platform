@@ -9,8 +9,11 @@
   超时 / 取消时关闭 Adapter 的事件流（Adapter 在 ``finally`` 里清理连接、子进程等）；
 - 捕获 Adapter 抛出的异常，转成 ``error`` 事件；
 - 从 ``llm.response`` 汇总 usage / cost / llm_calls / tool_calls（工具调用按 ``(step_id, call_id)`` 去重），
-  计算 ttft（第一个 ``llm.delta`` 或 ``llm.response`` 的时间，相对本轮开始）与 latency；
-  成功轮次的 latency 算到最终回复（``message.assistant``）到达为止，其后的补查（如 Trace）不计入；
+  计算 ttft（第一个 ``llm.delta`` 或 ``llm.response`` 的时间，相对本轮开始）与 latency（本地测量）；
+  成功轮次的 latency 算到最终回复（``message.assistant``）到达为止；
+- 远端为主：Adapter 设置了 ``ctx.late_observe`` 的轮次（如 HiAgent），规范的 latency / ttft 不用本地测量，
+  ``turn.end`` 时为空、``usage.trace_status`` 为 ``pending``，本地值只作为诊断留在 ``usage.local_*``；
+  :meth:`Runner.observe` 在轮次结束后消费补齐事件（同样汇总 usage），把规范用时改写为远端值；
 - 累积每次 LLM 调用已流出的文本（``llm.delta``），``llm.response`` 到达后丢弃（那时内容已随事件落库）；
   轮次以取消 / 出错 / 超时结束时，把仍未被 ``llm.response`` 取代的部分文本放进 ``TurnResult.partial_text``，
   由会话服务写入 ``turns.output.partial_text``，并随 ``turn.end`` 事件发布（刷新页面后仍能看到）；
@@ -27,7 +30,7 @@ import asyncio
 import contextlib
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from evalp.errors import EvalpError
@@ -57,10 +60,11 @@ class TurnResult:
     output: TurnOutput | None
     usage: dict[str, Any]
     cost: float
-    latency_ms: int
+    latency_ms: int | None  # 远端为主的轮次在补齐前为 None
     ttft_ms: int | None
     error: dict[str, Any] | None = None  # {code, message, retriable}
     partial_text: str | None = None  # 取消 / 出错 / 超时时，已流出但未成为 llm.response 的文本
+    state: _State | None = field(default=None, repr=False, compare=False)  # 补齐时继续汇总用
 
     @property
     def end_status(self) -> str:
@@ -230,6 +234,14 @@ class Runner:
         if event.type == "turn.end":
             state.agent_end = p
             return True
+        self._absorb(event, state)
+        await emit(event)
+        return False
+
+    @staticmethod
+    def _absorb(event: AgentEvent, state: _State) -> None:
+        """把一个事件汇总进轮次状态（正常执行与事后补齐共用）。"""
+        p = event.payload
         if event.type == "error":
             if state.error is None:
                 state.error = {
@@ -281,10 +293,50 @@ class Runner:
                         "message": f"message.assistant 的 message 不合法: {' '.join(str(e).split())[:300]}",
                         "retriable": False,
                     }
-        await emit(event)
-        return False
 
     # ------------------------------------------------------------ 收尾
+
+    @staticmethod
+    def _usage(state: _State, end: dict[str, Any]) -> tuple[dict[str, Any], float]:
+        """汇总 usage 与成本（正常收尾与事后补齐共用）。"""
+        usage: dict[str, Any] = {
+            "prompt_tokens": state.prompt_tokens,
+            "completion_tokens": state.completion_tokens,
+            "llm_calls": state.llm_calls,
+            "tool_calls": state.tool_calls,
+        }
+        cost = state.cost
+        if state.llm_calls == 0:  # 没有 llm.response 事件时采用 agent 自报的用量
+            reported_usage = end.get("usage")
+            if isinstance(reported_usage, dict):
+                for k, v in reported_usage.items():
+                    if isinstance(v, int | float) and not isinstance(v, bool):
+                        usage[k] = v
+                usage["tool_calls"] = max(usage.get("tool_calls", 0), state.tool_calls)
+            if isinstance(end.get("cost"), int | float):
+                cost = float(end["cost"])
+        if state.estimated:
+            usage["estimated"] = True
+        if state.metrics:
+            reported = state.metrics.get("usage") or {}
+            # 整轮与明细不可双重累计；整轮是独立来源。
+            for key in ("prompt_tokens", "completion_tokens"):
+                if reported.get(key) is not None:
+                    usage[key] = reported[key]
+                elif reported:
+                    usage.pop(key, None)
+            usage.update({k: v for k, v in state.metrics.items() if k != "usage"})
+            usage["observation_status"] = reported.get("observation_status", "partial")
+            usage["token_source"] = reported.get("source")
+            if state.responses:
+                usage["llm_calls_status"] = "confirmed"
+            else:
+                usage["llm_calls_status"] = "unknown"
+        if state.error and state.error.get("code") == "UPSTREAM_RESULT_UNKNOWN":
+            usage["execution_status"] = "unknown"
+        if state.middleware_ms is not None:
+            usage["middleware_ms"] = state.middleware_ms
+        return usage, cost
 
     async def _finish(
         self,
@@ -350,48 +402,17 @@ class Runner:
         if status == "ok" and state.final is not None:
             output = TurnOutput(final=state.final, messages=list(ctx.new_messages) or [state.final])
 
-        usage: dict[str, Any] = {
-            "prompt_tokens": state.prompt_tokens,
-            "completion_tokens": state.completion_tokens,
-            "llm_calls": state.llm_calls,
-            "tool_calls": state.tool_calls,
-        }
-        cost = state.cost
-        if state.llm_calls == 0:  # 没有 llm.response 事件时采用 agent 自报的用量
-            reported_usage = end.get("usage")
-            if isinstance(reported_usage, dict):
-                for k, v in reported_usage.items():
-                    if isinstance(v, int | float) and not isinstance(v, bool):
-                        usage[k] = v
-                usage["tool_calls"] = max(usage.get("tool_calls", 0), state.tool_calls)
-            if isinstance(end.get("cost"), int | float):
-                cost = float(end["cost"])
-        if state.estimated:
-            usage["estimated"] = True
-        if state.metrics:
-            reported = state.metrics.get("usage") or {}
-            # 整轮与明细不可双重累计；整轮是独立来源。
-            for key in ("prompt_tokens", "completion_tokens"):
-                if reported.get(key) is not None:
-                    usage[key] = reported[key]
-                elif reported:
-                    usage.pop(key, None)
-            usage.update({k: v for k, v in state.metrics.items() if k != "usage"})
-            usage["observation_status"] = reported.get("observation_status", "partial")
-            usage["token_source"] = reported.get("source")
-            if state.responses:
-                usage["llm_calls_status"] = "confirmed"
-            else:
-                usage["llm_calls_status"] = "unknown"
-        if state.error and state.error.get("code") == "UPSTREAM_RESULT_UNKNOWN":
-            usage["execution_status"] = "unknown"
-        if state.middleware_ms is not None:
-            usage["middleware_ms"] = state.middleware_ms
-        # 成功轮次的用时算到最终回复到达为止；之后的观测补查（如 Trace）由 Adapter 单独记录。
+        usage, cost = self._usage(state, end)
+        # 成功轮次的用时算到最终回复到达为止（本地测量）。
         latency_ms = (
             state.answer_ms if status == "ok" and state.answer_ms is not None
             else int((time.monotonic() - state.t0) * 1000)
         )
+        ttft_ms = state.ttft_ms
+        if ctx.late_observe is not None:
+            # 远端为主：本地用时 / 首正文只留作诊断，规范用时等补齐后改写为远端值。
+            usage.update(trace_status="pending", local_latency_ms=latency_ms, local_ttft_ms=ttft_ms)
+            latency_ms = ttft_ms = None
         partial = "".join(state.deltas.values()) if status != "ok" else ""
         if len(partial) > PARTIAL_TEXT_MAX:
             partial = partial[:PARTIAL_TEXT_MAX] + "…"
@@ -401,9 +422,10 @@ class Runner:
             usage=usage,
             cost=cost,
             latency_ms=latency_ms,
-            ttft_ms=state.ttft_ms,
+            ttft_ms=ttft_ms,
             error=state.error if status in ("error", "timeout") else None,
             partial_text=partial or None,
+            state=state,
         )
         if before_end is not None:
             try:
@@ -427,3 +449,30 @@ class Runner:
             )
         )
         return result
+
+    async def observe(self, ctx: RunContext, result: TurnResult, emit: EmitFn) -> TurnResult:
+        """轮次结束后补齐：消费 ``ctx.late_observe`` 的事件（汇总并发布），把规范用时改写为远端值。
+
+        远端用时取补齐指标里的 ``upstream_run_ms``；没有取得远端数据时为空，不用本地值顶替。
+        """
+        state = result.state
+        assert state is not None and ctx.late_observe is not None
+        started = time.monotonic()
+        try:
+            async for raw in ctx.late_observe():
+                event = raw.with_turn(ctx.turn_id)
+                self._absorb(event, state)
+                await emit(event)
+        except Exception as e:  # noqa: BLE001 - 补齐失败只影响指标，要明确标为未取得而不是一直同步中
+            log.warning("runner.observe_failed", turn_id=ctx.turn_id, error=f"{type(e).__name__}: {e}")
+            event = ev("metrics", scope="turn", trace_status="unavailable",
+                       trace_note=f"补齐异常（{type(e).__name__}）", turn_id=ctx.turn_id)
+            self._absorb(event, state)
+            await emit(event)
+        usage, cost = self._usage(state, state.agent_end or {})
+        usage.update(
+            local_latency_ms=result.usage["local_latency_ms"],
+            local_ttft_ms=result.usage["local_ttft_ms"],
+            observe_ms=int((time.monotonic() - started) * 1000),
+        )
+        return replace(result, usage=usage, cost=cost, latency_ms=usage.get("upstream_run_ms"), ttft_ms=None)

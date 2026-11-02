@@ -2,11 +2,14 @@ import { cn } from '@/lib/cn'
 import { formatCost, formatDuration, formatTokens } from '@/lib/format'
 import { useNow } from '@/lib/useNow'
 import type { TurnState } from '@/components/session'
-import { METRICS, metricDelta, metricValue, type ComparisonBaseline, type MetricDef, type MetricKey, type Trend } from './compareUtils'
+import { METRICS, metricApplicable, metricDelta, metricSyncLabel, metricValue, type ComparisonBaseline, type MetricDef, type MetricKey, type Trend } from './compareUtils'
 
 const DEFAULT_BASELINE: ComparisonBaseline = { label: '左侧', targetLabel: '右侧' }
 
-function fmt(key: MetricKey, v: number | null): string {
+function fmt(key: MetricKey, v: number | null, side?: TurnState): string {
+  if (side && !metricApplicable(side, key)) return '不适用'
+  const sync = metricSyncLabel(side, key)
+  if (sync) return sync
   if (v === null) return '-'
   switch (key) {
     case 'latency':
@@ -59,9 +62,9 @@ function MetricCell({ def, left, right, settled, now }: {
     <div className="min-w-0" data-metric={def.key} data-trend={d?.trend}>
       <div className="text-[11px] text-muted-foreground">{def.label}</div>
       <div className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5 font-mono text-xs tabular-nums">
-        <span data-side="left" data-role="baseline">{fmt(def.key, l)}</span>
+        <span data-side="left" data-role="baseline">{fmt(def.key, l, left)}</span>
         <span className="text-muted-foreground">→</span>
-        <span data-side="right" data-role="target">{fmt(def.key, r)}</span>
+        <span data-side="right" data-role="target">{fmt(def.key, r, right)}</span>
         {d && (
           <span className={cn('rounded px-1 py-0.5 text-[11px]', TREND_CLASS[d.trend])} data-testid="metric-delta">
             {fmtDelta(def.key, d.delta)}
