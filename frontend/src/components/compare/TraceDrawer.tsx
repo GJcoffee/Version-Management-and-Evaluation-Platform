@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { X } from 'lucide-react'
-import { TraceViewer, type TurnState } from '@/components/session'
+import { TraceViewer, turnTiming, type TurnState } from '@/components/session'
 import { Button } from '@/components/ui/Button'
 
 export interface TraceDrawerProps {
@@ -16,6 +16,7 @@ export interface TraceDrawerProps {
 
 /** 右侧抽屉：查看某一侧某一轮的 Trace */
 export function TraceDrawer({ title, turn, sessionId, selectedStepId, onSelectStep, highlightSteps, onClose }: TraceDrawerProps) {
+  const timing = turn ? turnTiming(turn) : null
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
@@ -43,8 +44,9 @@ export function TraceDrawer({ title, turn, sessionId, selectedStepId, onSelectSt
           steps={turn.steps}
           turnId={turn.id}
           sessionId={sessionId}
-          startedAt={turn.startedAt}
-          endedAt={turn.endedAt}
+          startedAt={timing?.startedAt}
+          endedAt={timing?.endedAt}
+          durationMs={timing?.durationMs}
           running={!turn.ended}
           selectedStepId={selectedStepId}
           onSelectStep={onSelectStep}

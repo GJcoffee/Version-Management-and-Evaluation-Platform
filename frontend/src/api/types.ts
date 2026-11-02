@@ -178,6 +178,7 @@ export interface BuiltinKnowledgeTool {
 export type ToolEntry = AssetRefValue | BuiltinKnowledgeTool
 
 export interface SpecDisplayFields {
+  adapter?: import('./queries/adapters').AdapterBinding | null
   /** 仅用于显示，不参与哈希，也不存入版本 */
   name?: string | null
   description?: string | null
@@ -223,7 +224,7 @@ export interface SnapshotRule {
 export interface CodeSpec extends SpecDisplayFields {
   schema: 'evalp/v1'
   kind: 'code'
-  transport: 'http' | 'subprocess'
+  transport: 'http' | 'subprocess' | 'adapter'
   http?: { base_url: string; headers?: Record<string, string>; timeout_s?: number } | null
   subprocess?: { command: string[]; cwd?: string; env?: Record<string, string> } | null
   source?: {
@@ -381,6 +382,8 @@ export interface VersionAssetItem {
   asset_id: string
   kind: AssetKind
   name: string
+  /** 资产用途；Skill 对应所选版本使用的修订 */
+  description?: string | null
   /** 来源平台上的原始名称（可含中文） */
   display_name: string | null
   /** 来源平台上的稳定 ID */
@@ -588,6 +591,7 @@ export interface SkillUpload {
   blob_upload_id: string
   size: number
   display_name: string
+  description: string | null
   suggested_name: string
   file_count: number
 }
@@ -626,7 +630,7 @@ export interface AssetReferences {
 export interface DatasetCaseBrief {
   case_key: string
   input: { turns: string[] }
-  expected?: string | null
+  expected?: unknown
   tags: string[]
 }
 
@@ -673,8 +677,9 @@ export interface EvalCase {
   idx: number
   /** 统一为多轮格式 */
   input: { turns: string[] }
-  expected: string | null
-  rubric: string | null
+  /** 后端允许文本、对象、数组等 JSON 值。 */
+  expected: unknown
+  rubric: unknown
   tags: string[]
   /** 可含 tool_mocks / variables */
   metadata: { variables?: Record<string, unknown>; tool_mocks?: Record<string, unknown>; [k: string]: unknown }
@@ -727,6 +732,7 @@ export interface SessionStats {
 }
 
 export interface Session {
+  adapter_snapshot?: import('./queries/adapters').BindingSnapshot | null
   id: string
   agent_id: string
   agent_name: string | null
@@ -799,6 +805,8 @@ export interface Turn {
   pair_index: number | null
   status: TurnStatus
   input: Message
+  effective_input?: Message | null
+  middleware_snapshot?: MiddlewareSnapshot | null
   output: TurnOutput | null
   usage: Usage
   cost: number
@@ -824,6 +832,36 @@ export interface TurnCreate {
   tool_mocks?: Record<string, unknown>
   pair_index?: number | null
   wait?: boolean
+  middlewares?: MiddlewareSelection[]
+}
+
+export interface MiddlewareSelection {
+  id: 'json_artifact'
+  version: '1.0.0'
+  source_turn_id?: string | null
+  expected_previous_turn_id?: string | null
+  config: {
+    url_pointer?: string | null
+    content_pointer?: string | null
+    selected_candidate_id?: string | null
+  }
+}
+
+export interface MiddlewareSnapshot {
+  schema_version: number
+  steps: (MiddlewareSelection & {
+    status: 'pending' | 'running' | 'ok' | 'error' | 'cancelled' | 'timeout'
+    duration_ms: number
+    source_url?: string
+    raw_sha256?: string
+    result_blob_hash?: string
+    error?: TurnError | null
+  })[]
+}
+
+export interface ArtifactCandidates {
+  source_turn_id: string
+  candidates: { id: string; url: string; location: string }[]
 }
 
 /** 默认 202：轮次已在后台执行，用 stream_url 订阅过程 */
@@ -847,6 +885,8 @@ export interface BlobRef {
 export interface TurnStartPayload {
   input: Message
   history_len: number
+  middleware_snapshot?: MiddlewareSnapshot
+  has_middleware?: boolean
 }
 export interface LlmRequestPayload {
   provider: string | null
@@ -895,6 +935,7 @@ export interface SpanStartPayload {
   attrs?: Record<string, unknown>
 }
 export interface SpanEndPayload {
+  status?: 'ok' | 'error' | 'cancelled' | 'timeout'
   name: string
   attrs?: Record<string, unknown>
   latency_ms: number | null
@@ -926,6 +967,9 @@ export interface TurnEndPayload {
 }
 
 export interface EventPayloadMap {
+  'llm.reasoning': LlmDeltaPayload & { source?: string; replaces_stage?: string }
+  metrics: Record<string, unknown>
+  'source.raw': Record<string, unknown>
   'turn.start': TurnStartPayload
   'llm.request': LlmRequestPayload
   'llm.delta': LlmDeltaPayload
@@ -948,6 +992,9 @@ export type EventType = keyof EventPayloadMap
  * 避免被误判为断线）；帧里 `data.type` 仍是 `error`，所以 reducer 看到的事件类型不变。
  */
 export const SESSION_EVENT_TYPES = [
+  'llm.reasoning',
+  'metrics',
+  'source.raw',
   'turn.start',
   'llm.request',
   'llm.delta',

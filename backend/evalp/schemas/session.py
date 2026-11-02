@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from evalp.runtime.events import AgentEvent
 from evalp.runtime.messages import Message, TurnOutput
+from evalp.schemas.middleware import MiddlewareSelection
 
 SessionMode = Literal["chat", "eval", "replay", "judge"]
 ReplayMode = Literal["anchored", "free"]
@@ -34,6 +35,7 @@ class SessionOut(BaseModel):
     last_seq: int = 0
     stats: dict[str, Any] = Field(default_factory=dict)
     variables: dict[str, Any] = Field(default_factory=dict)
+    adapter_snapshot: dict[str, Any] | None = None
     created_at: str
     updated_at: str
     agent_name: str | None = None
@@ -47,6 +49,8 @@ class TurnOut(BaseModel):
     pair_index: int | None = None
     status: TurnStatus
     input: Message
+    effective_input: Message | None = None
+    middleware_snapshot: dict[str, Any] | None = None
     output: TurnOutput | None = None
     usage: dict[str, Any] = Field(default_factory=dict)
     cost: float = 0.0
@@ -118,6 +122,7 @@ class TurnCreate(BaseModel):
     tool_mocks: dict[str, Any] | None = None
     pair_index: int | None = None
     wait: bool = False
+    middlewares: list[MiddlewareSelection] = Field(default_factory=list, max_length=1)
 
 
 class TurnAccepted(BaseModel):

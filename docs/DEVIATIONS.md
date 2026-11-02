@@ -489,3 +489,67 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
   版本 diff 的改名识别：固化引用里只有资产名，所以 `VersionService.diff` 用右侧新出现的资产的 `former_names` 对照左侧消失的名字，得到 `renames` 传给 `diff_specs`；
   左侧的旧名先换成新名（带 `renamed_from`）再按身份匹配，输出 `asset_changed`，`asset.renamed_from` 为旧名（内容没变也输出）。
 - MCP 新增 `get_conventions`（共 20 个工具），MCP 服务说明写明“发布、推送前先调用 get_conventions”。
+
+## 适配器统一接入 — 接入修订与运行快照（迁移 0006）
+
+按已确认的适配器接入方案，新增平台维护的适配器注册表，首个实现为 `hiagent@1.0.0`。
+创建 Agent 和编辑草稿时可配置 `adapter: {id, version, config, credential_ref}`；
+代码型新增 `transport: adapter`。没有 adapter 的旧 Spec 在规范化时删除空字段，保留历史哈希。
+
+- 已发布业务版本保持不可变。`adapter_revisions` 另存接入覆盖前后配置、指纹、原因及递增修订。
+  单个覆盖通过预期修订防止并发覆盖；批量覆盖逐项事务并返回失败原因。
+  恢复历史接入追加修订，不删除旧修订。新建草稿继承该版本当前有效接入。
+- `sessions.adapter_snapshot` 在创建会话时固定，后续轮读取该快照；上游会话定位也持久保存在快照内。
+  `eval_runs.adapter_snapshot` 在任务创建时固定，执行时传给会话；缓存键包含覆盖接入的指纹。
+  迁移把旧会话和旧任务固定为业务 Spec 原有接入，不根据后来覆盖倒推。
+- `adapter_credentials` 仅保存不可变引用和名称，密钥正文复用平台 SecretStore。
+  凭据更新须创建新引用，避免改变历史会话实际凭据。连接检查只检查配置和凭据可读取性，
+  不声称上游认证已验证，也不发起 LLM。
+- HiAgent 的发布 API 在运行层直接执行，用户不需要启动独立 HTTP 桥接进程。
+  SSE 保留真实消息、工具调用身份，原始帧脱敏保存。思考阶段先作为上游输出阶段记录，
+  不将阶段数冒充模型调用数；Trace 只按当前消息、应用、版本和 Span ID 补齐真实调用。
+  无法证明工具父级时保持未知，不按同名、文本或参数相似度推断。
+- 统一事件新增持久化 `llm.reasoning`、`metrics`、`source.raw`。
+  `llm.delta` 仍只实时推送，正文最终随回复或 Trace 保存。
+  Runner 按调用身份更新累计值，整轮用量和调用明细只取一个范围；
+  未提供 Token 保持缺失。查询、传输、上游整轮、LLM 累计和工具累计各自记录。
+  执行成功与指标完整性分离；断流未收到终态记录 `UPSTREAM_RESULT_UNKNOWN`，不自动重新提交。
+- UI 复用创建、草稿、版本列表和会话页；支持批量检查、显式覆盖、历史恢复、思考与指标来源。
+  REST 与 MCP 调用同一服务，新增注册表、连接检查、凭据、接入查询、批量覆盖与恢复工具。
+
+现有业务桥接中的严格配置门禁和业务 JSON 消费属于业务运行层；通用适配器不移植这些特定业务逻辑。
+新增可选 `config.business_bridge`：通过原 HTTP 协议保留业务参数、历史和输出处理，并在运行前核对固定
+`spec_hash`。兼容模式仍需封存桥接进程；直接发布 API 模式不受此依赖。MCP `get_version` 提供完整
+版本规范与资产修订读回，用于迁移前后核对。
+
+兼容运行器仍读取受保护本机凭据文件，
+尚未改为由平台 SecretStore 注入业务运行器。
+
+## 轮间中间件 — 保存实际输入与固定产物（迁移 0007）
+
+按用户确认的实施范围，普通会话新增按轮显式启用的 `json_artifact@1.0.0`。
+详细设计原先只保存 `turns.input`；现在增加可空 JSONText 字段 `effective_input` 与
+`middleware_snapshot`，旧轮次保持 NULL，不改变业务版本或资产哈希。
+
+- Runner 增加可选输入准备钩子，与 Adapter 共用取消和总超时预算。中间件轮次提前发布唯一
+  `turn.start`（原始输入），Adapter 的重复起始事件被忽略；原有无中间件事件行为保持不变。
+- 中间件使用 `span.start/end`，类别为 `middleware`，独立记录 `middleware_ms`。
+  根 Span 与 `GET /turns/{id}` 可读取实际输入。大起始事件保留小字段 `has_middleware`，
+  前端据此按需读取轮次详情，Trace 正确显示处理失败。
+- 解析并组装成功后，在同一数据库事务内保存实际输入和产物 Blob 独立引用，再交给 Adapter。
+  保存失败不调用 Agent。失败、取消与超时记录处理终态，失败轮次不进入历史；成功历史使用实际输入。
+  产物读取权限与现有 Blob 接口统一，会话 GC 释放轮次与事件各自的引用。
+- 默认来源是紧邻上一轮，不自动跳过失败。候选 ID 以来源和原签名 URL 固定。
+  新选择的 `expected_previous_turn_id` 检测查询后的来源变化；失败重试可保留显式早先来源。
+  多候选需要选择，两个 JSON Pointer 分别选回复链接和产物字段，不允许直接传任意下载 URL。
+- 平台 `artifacts` 配置精确域名白名单、1 MiB 下载、64 KiB 实际输入、15 秒读取上限。
+  空白名单禁止读取；校验每个重定向，不转发 Agent/环境代理凭据或响应 Cookie。
+  首期没有额外产物 SecretStore 凭据选项，也不静默截断内容。
+- 前端按轮选择、候选查询、停止、错误与恢复指令/配置，成功实际输入折叠展示。
+  发送配置不自动继承到下一轮；读取失败可显式恢复已有草稿，刷新后也可从保存的轮次恢复。
+- 配置型、HTTP、子进程和 HiAgent 直接接入沿用 `Message` 接口，直接 HiAgent 使用组合后的 `Query`，
+  本地历史不重复发送给上游。已有 `business_bridge` 业务 JSON 消费尚未完成兼容验收，首期明确禁用。
+- 首期不开放评测配置和中间件重放。重放所选轮次或必要锚定历史包含中间件时明确拒绝，
+  不丢失输入语义；历史与只读对比保持可用。
+
+验证使用 Fake 模型、受控 SDK Agent 与模拟产物/HiAgent HTTP 响应，不调用真实模型。

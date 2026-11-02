@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import time
 from collections.abc import AsyncIterator, Callable
@@ -39,9 +40,11 @@ from evalp.runtime.events import AgentEvent, ev
 from evalp.runtime.llm.ratelimit import PRIORITY_INTERACTIVE
 from evalp.runtime.messages import Message, TurnOutput
 from evalp.runtime.runner import Runner, TurnResult
+from evalp.schemas.middleware import MiddlewareSelection
 from evalp.schemas.session import SessionDetail, SessionOut, TurnError, TurnOut
 from evalp.services.agent import AgentService
 from evalp.services.event_sink import BLOB_KEY, EventSink, session_topic
+from evalp.services.middleware import MiddlewareService
 from evalp.services.version import ResolvedVersion, VersionService
 from evalp.spec.models import CodeSpec
 from evalp.store.models import Agent, AssetRevision, Event, Session, Turn, Version
@@ -89,6 +92,7 @@ class _Running:
     finalized: bool = False  # 轮次结果已写库（对外可见为已结束），只差 turn.end 落库后释放槽位
     shared: bool = False  # 允许与同会话的其他 shared 轮次并发（锚定重放）
     released: asyncio.Event = field(default_factory=asyncio.Event)  # turn.end 已落库、会话已可接受下一轮
+    middleware_snapshot: dict | None = None
 
 
 class _FailingAdapter(AgentAdapter):
@@ -145,6 +149,8 @@ def turn_out(t: Turn) -> TurnOut:
         pair_index=t.pair_index,
         status=t.status,  # type: ignore[arg-type]
         input=Message.model_validate(t.input),
+        effective_input=Message.model_validate(t.effective_input) if t.effective_input else None,
+        middleware_snapshot=t.middleware_snapshot,
         output=TurnOutput.model_validate(t.output) if t.output else None,
         usage=t.usage or {},
         cost=t.cost or 0.0,
@@ -183,6 +189,7 @@ def _session_out(s: Session, agent_name: str | None = None, version_seq: int | N
         last_seq=s.last_seq,
         stats=s.stats or {},
         variables=s.variables or {},
+        adapter_snapshot=s.adapter_snapshot,
         created_at=s.created_at,
         updated_at=s.updated_at,
         agent_name=agent_name,
@@ -240,6 +247,12 @@ class SessionService:
                 sess = await s.get(Session, t.session_id)
                 seq = sess.last_seq if sess else 0
                 t.status, t.error, t.finished_at = "error", error_to_text(error), now
+                if t.middleware_snapshot:
+                    snapshot = copy.deepcopy(t.middleware_snapshot)
+                    for step in snapshot.get("steps", []):
+                        if step.get("status") in ("pending", "running"):
+                            step.update(status="error", error=error)
+                    t.middleware_snapshot = snapshot
                 if sess is not None:
                     # 补写 error + turn.end，保持"每轮以 turn.end 结束"的约束
                     end = ev("turn.end", status="error", usage=t.usage, cost=t.cost, error=error)
@@ -277,6 +290,7 @@ class SessionService:
         variables: dict | None = None,
         source_session_id: str | None = None,
         replay_mode: str | None = None,
+        adapter_snapshot: dict[str, Any] | None = None,
     ) -> SessionOut:
         """创建会话。``version_id`` 必须是版本 id（agent+tag 先用 ``VersionService.resolve_ref`` 解析）。"""
         await self._ensure_recovered()
@@ -298,6 +312,12 @@ class SessionService:
             if source_session_id is not None and await s.get(Session, source_session_id) is None:
                 raise NotFound(f"来源会话不存在: {source_session_id}", {"id": source_session_id})
             now = now_iso()
+            from evalp.services.adapter import AdapterService
+
+            snapshot = (
+                adapter_snapshot if adapter_snapshot is not None
+                else await self.ctx.svc(AdapterService).snapshot(s, version)
+            )
             row = Session(
                 id=new_id("ses"),
                 agent_id=agent.id,
@@ -310,6 +330,7 @@ class SessionService:
                 last_seq=0,
                 stats=dict(EMPTY_STATS),
                 variables=dict(variables or {}),
+                adapter_snapshot=snapshot,
                 created_at=now,
                 updated_at=now,
             )
@@ -418,7 +439,7 @@ class SessionService:
             turns = (await s.execute(stmt)).scalars().all()
         out: list[Message] = []
         for t in turns:
-            out.append(Message.model_validate(t.input))
+            out.append(Message.model_validate(t.effective_input or t.input))
             if t.output:
                 o = TurnOutput.model_validate(t.output)
                 out.extend(o.messages or ([o.final] if o.final else []))
@@ -542,6 +563,7 @@ class SessionService:
         anchored_from_turn_id: str | None = None,
         concurrent: bool = False,
         wait: bool = True,
+        middlewares: list[MiddlewareSelection] | None = None,
     ) -> TurnOut:
         """执行一轮。
 
@@ -552,6 +574,8 @@ class SessionService:
         """
         await self._ensure_recovered()
         msg = self._coerce_input(input)
+        if middlewares and (concurrent or history_override is not None or anchored_from_turn_id):
+            raise ValidationFailed("轮间中间件暂不支持重放上下文或并发轮次")
         cur = self._running.get(session_id)
         if cur and not concurrent and all(c.finalized for c in cur):
             # 轮次在库里已经是结束状态（客户端可能刚轮询到），只差 turn.end 落库：稍等槽位释放而不是报忙
@@ -573,11 +597,19 @@ class SessionService:
                     raise NotFound(f"会话不存在: {session_id}", {"id": session_id})
                 session_vars = dict(sess.variables or {})
                 version_id = sess.version_id
+                adapter_snapshot = sess.adapter_snapshot
                 if anchored_from_turn_id and await s.get(Turn, anchored_from_turn_id) is None:
                     raise NotFound(
                         f"锚定的轮次不存在: {anchored_from_turn_id}", {"id": anchored_from_turn_id}
                     )
             resolved = await self.ctx.svc(VersionService).get_resolved(version_id)
+            # NULL 历史记录只允许原 Spec 中的绑定；绝不采用后续覆盖。
+            resolved.adapter_snapshot = adapter_snapshot or {
+                "revision": 0, "binding": resolved.spec.get("adapter"), "source": "legacy",
+            }
+            slot.middleware_snapshot = await self.ctx.svc(MiddlewareService).freeze(
+                sess, msg, middlewares or [], adapter_snapshot=resolved.adapter_snapshot,
+            )
             history = (
                 list(history_override) if history_override is not None else await self.get_history(session_id)
             )
@@ -594,6 +626,7 @@ class SessionService:
                     pair_index=pair_index,
                     status="running",
                     input=msg.model_dump(mode="json", exclude_none=True),
+                    middleware_snapshot=slot.middleware_snapshot,
                     usage={},
                     cost=0.0,
                     anchored_from_turn_id=anchored_from_turn_id,
@@ -673,6 +706,11 @@ class SessionService:
         async def emit(event: AgentEvent) -> None:
             if event.turn_id is None:  # sink 可能被同会话的并发轮次共用，必须显式标注轮次
                 event = event.with_turn(slot.turn_id)
+            if event.type == "turn.start" and slot.middleware_snapshot:
+                event = event.model_copy(update={"payload": {
+                    **event.payload, "middleware_snapshot": copy.deepcopy(slot.middleware_snapshot),
+                    "has_middleware": True,
+                }})
             await sink.emit(event)
             if event.type == "turn.end":
                 self._release(slot)  # turn.end 已发布并落库：此后该会话可以开始下一轮
@@ -681,6 +719,12 @@ class SessionService:
             nonlocal finalized
             await self._finalize(slot, result)
             finalized = slot.finalized = True
+
+        async def prepare_input() -> Message:
+            assert slot.middleware_snapshot is not None
+            return await self.ctx.svc(MiddlewareService).prepare(
+                rctx, msg, slot.middleware_snapshot, emit,
+            )
 
         try:
             timeout_s = 300.0
@@ -705,7 +749,10 @@ class SessionService:
                 cancel=slot.cancel,
                 priority=priority,
             )
-            slot.result = await Runner().run(adapter, rctx, history, msg, emit, before_end=before_end)
+            slot.result = await Runner().run(
+                adapter, rctx, history, msg, emit, before_end=before_end,
+                prepare_input=prepare_input if slot.middleware_snapshot else None,
+            )
         except BaseException as e:  # noqa: BLE001 - 兜底：保证轮次与会话状态不会停留在 running
             if not isinstance(e, asyncio.CancelledError):
                 log.exception("session.turn_crashed", turn_id=slot.turn_id, error=f"{type(e).__name__}: {e}")
@@ -731,6 +778,11 @@ class SessionService:
         async with self.ctx.db.write() as s:
             t = await s.get(Turn, slot.turn_id)
             if t is not None:
+                if slot.middleware_snapshot:
+                    for step in slot.middleware_snapshot["steps"]:
+                        if step["status"] in ("pending", "running"):
+                            step.update(status=result.status, error=result.error)
+                    t.middleware_snapshot = slot.middleware_snapshot
                 t.status = result.status
                 if result.output:
                     t.output = result.output.model_dump(mode="json", exclude_none=True)
@@ -933,6 +985,12 @@ class SessionService:
                 stmt = stmt.where(Event.session_id == session_id)
             if (await s.execute(stmt)).first() is not None:
                 return "event"
+            refs = select(Turn.middleware_snapshot).where(Turn.middleware_snapshot.is_not(None))
+            if session_id:
+                refs = refs.where(Turn.session_id == session_id)
+            for snapshot in (await s.execute(refs)).scalars():
+                if any(step.get("result_blob_hash") == blob_hash for step in snapshot.get("steps", [])):
+                    return "event"
             if (
                 await s.execute(select(AssetRevision.id).where(AssetRevision.blob_hash == blob_hash).limit(1))
             ).first() is not None:

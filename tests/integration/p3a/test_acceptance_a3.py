@@ -69,14 +69,22 @@ async def test_a3_subprocess_agent(world):
     assert_complete_trace(await world.events(s.id), t)
 
 
-async def _cancel_and_check(world, v, text, *, fake=None):
+async def _cancel_and_check(world, v, text, *, fake=None, ready=None):
     s = await world.session(v)
     turn = await world.sessions.run_turn(s.id, text, wait=False)
     for _ in range(250):
         if world.sessions.running_turn_id(s.id):
             break
         await asyncio.sleep(0.02)
-    await asyncio.sleep(0.4)  # 让 agent 真正开始（子进程需要启动时间）
+    if ready is None:
+        await asyncio.sleep(0.4)
+    else:
+        # 用实际启动证据等待，避免机器负载较高时取消早于孙进程创建。
+        for _ in range(250):
+            if ready():
+                break
+            await asyncio.sleep(0.02)
+        assert ready(), "agent 没有在等待窗口内启动"
     await world.sessions.cancel_turn(turn.id)
     t = await world.sessions.get_turn(turn.id)
     assert t.status == "cancelled" and t.error is None and t.finished_at
@@ -110,7 +118,9 @@ async def test_a3_cancel_subprocess_kills_tree(world, tmp_path):
 
     pidfile = tmp_path / "pids"
     v = await world.subprocess_version(env={"AGENT_PIDFILE": str(pidfile)})
-    await _cancel_and_check(world, v, "spawn:30")
+    await _cancel_and_check(
+        world, v, "spawn:30", ready=lambda: pidfile.is_file() and pidfile.stat().st_size > 0,
+    )
     parent, child = (int(x) for x in pidfile.read_text().split())
     for _ in range(100):
         if not psutil.pid_exists(parent) and not psutil.pid_exists(child):

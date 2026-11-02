@@ -5,7 +5,7 @@ import { uploadSkill, useCreateAsset, useCreateRevision } from '@/api/queries/as
 import type { Asset, SkillUpload } from '@/api/types'
 import { Button } from '@/components/ui/Button'
 import { Dialog } from '@/components/ui/Dialog'
-import { Field, Input } from '@/components/ui/Input'
+import { Field, Input, Textarea } from '@/components/ui/Input'
 import { formatApiError } from '@/lib/apiError'
 import { formatBytes } from '@/lib/format'
 import { toast } from '@/stores/toast'
@@ -17,6 +17,7 @@ export function SkillImportDialog({ asset, onClose, onCreated }: { asset?: Asset
   const zipRef = useRef<HTMLInputElement>(null)
   const folderRef = useRef<HTMLInputElement>(null)
   const [upload, setUpload] = useState<SkillUpload | null>(null)
+  const [description, setDescription] = useState('')
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -26,7 +27,9 @@ export function SkillImportDialog({ asset, onClose, onCreated }: { asset?: Asset
     setUpload(null)
     setError(null)
     try {
-      setUpload(await uploadSkill(files, folder))
+      const result = await uploadSkill(files, folder)
+      setUpload(result)
+      setDescription(result.description ?? '')
     } catch (e) {
       setError(formatApiError(e, 'Skill 导入失败').message)
     } finally {
@@ -41,7 +44,10 @@ export function SkillImportDialog({ asset, onClose, onCreated }: { asset?: Asset
       const body = { blob_upload_id: upload.blob_upload_id, content_type: 'application/zip', message: message.trim() || undefined }
       const result = asset
         ? await revise.mutateAsync({ id: asset.id, body })
-        : await create.mutateAsync({ ...body, kind: 'skill', name: upload.suggested_name })
+        : await create.mutateAsync({
+          ...body, kind: 'skill', name: upload.suggested_name,
+          ...(description.trim() !== (upload.description ?? '') ? { description: description.trim() } : {}),
+        })
       toast.success(result.existed ? `内容未变，当前为 r${result.revision.rev}` : `已导入 ${upload.display_name} · r${result.revision.rev}`)
       onClose()
       if (onCreated) onCreated(result.revision.id)
@@ -69,6 +75,9 @@ export function SkillImportDialog({ asset, onClose, onCreated }: { asset?: Asset
           <p className="text-sm font-semibold">{upload.display_name}</p>
           <p className="mt-1 text-xs text-muted-foreground">{upload.file_count} 个文件 · {formatBytes(upload.size)}</p>
         </div>}
+        {upload && <Field label="描述" htmlFor="skill-description" hint={asset ? '从本次文件包的 SKILL.md 读取。' : '已自动读取 SKILL.md 中的描述，可补充 Skill 的用途。'}>
+          <Textarea id="skill-description" value={description} readOnly={!!asset} onChange={(e) => setDescription(e.target.value)} placeholder="这个 Skill 用来做什么…" />
+        </Field>}
         <Field label="提交说明" htmlFor="skill-message"><Input id="skill-message" value={message} onChange={(e) => setMessage(e.target.value)} placeholder="例如：更新参考文档" /></Field>
         {error && <p role="alert" className="text-sm text-danger">{error}</p>}
       </div>

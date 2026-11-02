@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+from evalp.runtime.events import ev
+from evalp.services.event_sink import BLOB_KEY, EventSink
+from evalp.store.models import Event, Session, Turn
+from sqlalchemy import select
+
 from .conftest import API
 
 
@@ -104,6 +110,61 @@ async def test_history_compare(cw):
               "right": {"session_id": "ses_nope"}},
     )  # fmt: skip
     assert r.status_code == 404
+
+
+@pytest.mark.parametrize("blob", [False, True])
+async def test_recorded_history_alignment_reads_source_metrics_and_preserves_storage(cw, blob):
+    vs = await cw.setup_versions()
+    left, right = await cw.session(vs["P"]), await cw.session(vs["T1"])
+    await cw.sessions.run_turn(left.id, "对比")
+    await cw.sessions.run_turn(right.id, "录制")
+    async with cw.ctx.db.write() as s:
+        turns = (
+            (await s.execute(select(Turn).where(Turn.session_id.in_([left.id, right.id]))))
+            .scalars().all()
+        )
+        for turn in turns:
+            turn.latency_ms = 44170 if turn.session_id == left.id else 697
+            turn.ttft_ms = 38672 if turn.session_id == left.id else 602
+        recorded = next(t for t in turns if t.session_id == right.id)
+        recorded.usage = {
+            "prompt_tokens": 270074, "completion_tokens": 5808, "llm_calls": 11, "tool_calls": 15,
+        }
+        session = await s.get(Session, right.id)
+        seq = session.last_seq
+    sink = EventSink(cw.ctx, right.id, seq, turn_id=recorded.id)
+    await sink.emit(ev(
+        "log", source_mode="recorded", original_latency_ms=71235,
+        original_started_at="2026-10-27T09:43:59.524Z",
+        original_ended_at="2026-10-27T09:45:10.759729552Z",
+        message="录制来源" + ("x" * (cw.ctx.config.events.payload_inline_limit_kb * 1024) if blob else ""),
+    ))
+    await sink.close()
+    before = (await cw.client.get(f"{API}/sessions/{right.id}")).json()
+    async with cw.ctx.db.read() as s:
+        payload = (await s.execute(select(Event.payload).where(
+            Event.session_id == right.id, Event.seq == seq + 1,
+        ))).scalar_one()
+    assert (BLOB_KEY in payload) == blob
+    r = await cw.client.post(f"{API}/compare", json={
+        "kind": "session", "mode": "history",
+        "left": {"session_id": left.id}, "right": {"session_id": right.id},
+    })
+    assert r.status_code == 201, r.text
+    out = await cw.alignment(r.json()["id"])
+    metrics = out["turns"][0]["metrics"]
+    assert metrics["left"]["latency_ms"] == 44170 and metrics["left"]["ttft_ms"] == 38672
+    assert metrics["right"] == {
+        "latency_ms": 71235, "ttft_ms": None, "tokens": 275882,
+        "cost": before["turns"][0]["cost"], "llm_calls": 11, "tool_calls": 15,
+    }
+    assert await cw.alignment(r.json()["id"]) == out  # 缓存结果同样使用来源指标
+    assert (await cw.client.get(f"{API}/sessions/{right.id}")).json() == before
+    async with cw.ctx.db.read() as s:
+        after = (await s.execute(select(Event.payload).where(
+            Event.session_id == right.id, Event.seq == seq + 1,
+        ))).scalar_one()
+    assert after == payload
 
 
 async def test_pair_busy_returns_409(cw):

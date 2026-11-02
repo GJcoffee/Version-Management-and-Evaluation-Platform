@@ -1,7 +1,10 @@
 import { cn } from '@/lib/cn'
 import { formatCost, formatDuration, formatTokens } from '@/lib/format'
+import { useNow } from '@/lib/useNow'
 import type { TurnState } from '@/components/session'
-import { METRICS, metricDelta, metricValue, type MetricDef, type MetricKey, type Trend } from './compareUtils'
+import { METRICS, metricDelta, metricValue, type ComparisonBaseline, type MetricDef, type MetricKey, type Trend } from './compareUtils'
+
+const DEFAULT_BASELINE: ComparisonBaseline = { label: '左侧', targetLabel: '右侧' }
 
 function fmt(key: MetricKey, v: number | null): string {
   if (v === null) return '-'
@@ -24,7 +27,7 @@ function fmtDelta(key: MetricKey, d: number): string {
   switch (key) {
     case 'latency':
     case 'ttft':
-      return `${sign}${formatDuration(abs)}`
+      return `${d === 0 ? '±' : d < 0 ? '减少' : '增加'}${formatDuration(abs)}`
     case 'tokens':
       return `${sign}${formatTokens(abs)}`
     case 'cost':
@@ -41,21 +44,31 @@ const TREND_CLASS: Record<Trend, string> = {
   same: 'text-muted-foreground',
 }
 
-function MetricCell({ def, left, right, settled }: { def: MetricDef; left: TurnState | undefined; right: TurnState | undefined; settled: boolean }) {
-  const l = metricValue(left, def.key)
-  const r = metricValue(right, def.key)
+function MetricCell({ def, left, right, settled, now }: {
+  def: MetricDef
+  left: TurnState | undefined
+  right: TurnState | undefined
+  settled: boolean
+  now: number
+}) {
+  const l = metricValue(left, def.key, now)
+  const r = metricValue(right, def.key, now)
   const d = settled ? metricDelta(l, r, def.lowerIsBetter) : null
+  const timing = def.key === 'latency' || def.key === 'ttft'
   return (
     <div className="min-w-0" data-metric={def.key} data-trend={d?.trend}>
       <div className="text-[11px] text-muted-foreground">{def.label}</div>
       <div className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5 font-mono text-xs tabular-nums">
-        <span data-side="left">{fmt(def.key, l)}</span>
+        <span data-side="left" data-role="baseline">{fmt(def.key, l)}</span>
         <span className="text-muted-foreground">→</span>
-        <span data-side="right">{fmt(def.key, r)}</span>
+        <span data-side="right" data-role="target">{fmt(def.key, r)}</span>
         {d && (
           <span className={cn('rounded px-1 py-0.5 text-[11px]', TREND_CLASS[d.trend])} data-testid="metric-delta">
             {fmtDelta(def.key, d.delta)}
-            {d.ratio !== null && d.trend !== 'same' && def.lowerIsBetter ? ` (${d.ratio > 0 ? '+' : ''}${(d.ratio * 100).toFixed(0)}%)` : ''}
+            {d.ratio !== null && d.trend !== 'same' && def.lowerIsBetter
+              ? timing ? ` (${Math.abs(d.ratio * 100).toFixed(0)}%)`
+                : ` (${d.ratio > 0 ? '+' : ''}${(d.ratio * 100).toFixed(0)}%)`
+              : ''}
           </span>
         )}
       </div>
@@ -63,19 +76,31 @@ function MetricCell({ def, left, right, settled }: { def: MetricDef; left: TurnS
   )
 }
 
-/** 行底部的两侧指标对照：左 → 右，差值着色（耗时 / TTFT / tokens / 成本：右侧更低为绿、更高为红） */
-export function MetricsCompare({ left, right }: { left: TurnState | undefined; right: TurnState | undefined }) {
+/** 行底部的指标按基线 → 对比版本展示，差值和百分比均相对基线计算。 */
+export function MetricsCompare({ left, right, baseline = DEFAULT_BASELINE }: {
+  left: TurnState | undefined
+  right: TurnState | undefined
+  baseline?: ComparisonBaseline
+}) {
+  const running = !!left && !left.ended || !!right && !right.ended
+  const now = useNow(running, 500)
   if (!left && !right) return null
   const settled = !!left?.ended && !!right?.ended
   return (
     <div
-      className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-md bg-muted/40 px-3 py-2 sm:grid-cols-3 lg:grid-cols-6"
+      className="rounded-md bg-muted/40 px-3 py-2"
       data-testid="metrics-compare"
       data-settled={settled || undefined}
+      data-baseline="left"
     >
-      {METRICS.map((def) => (
-        <MetricCell key={def.key} def={def} left={left} right={right} settled={settled} />
-      ))}
+      <div className="mb-1.5 text-[11px] text-muted-foreground" data-testid="metric-baseline">
+        相对 {baseline.label} 基线 · {baseline.label} → {baseline.targetLabel}
+      </div>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 lg:grid-cols-6">
+        {METRICS.map((def) => (
+          <MetricCell key={def.key} def={def} left={left} right={right} settled={settled} now={now} />
+        ))}
+      </div>
     </div>
   )
 }

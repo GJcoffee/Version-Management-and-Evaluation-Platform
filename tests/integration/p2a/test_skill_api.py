@@ -1,6 +1,6 @@
 # Synthetic fixtures authored by hand; no recorded agent data.
 import pytest
-from evalp.store.models import AssetRevision
+from evalp.store.models import Asset, AssetRevision, VersionAssetRef
 from evalp.utils.skill_package import package_entries
 
 from .conftest import API
@@ -95,6 +95,100 @@ async def test_legacy_name_is_available_without_rewriting_historical_blob(api, c
     assert (await client.get(f"{API}/assets/revisions/{rid}/skill/tree")).status_code == 400
     raw = await client.get(f"{API}/assets/revisions/{rid}/raw")
     assert raw.content == '{"Name": "虚构旧名称"}'.encode()
+
+
+async def test_description_upload_search_edit_and_revision_history(client):
+    def package(description):
+        source = f"---\nname: demo\ndescription: {description}\n---\n".encode()
+        return package_entries([("demo/SKILL.md", source)])
+
+    first_data = package("生成虚构图片")
+    response = await client.post(f"{API}/assets/skill/upload", files=[("files", ("demo.zip", first_data))])
+    upload = response.json()
+    assert upload["description"] == "生成虚构图片"
+    first = await import_package(client, first_data)
+    second = await import_package(client, package("处理虚构视频"))
+    aid = first["asset"]["id"]
+    assert second["asset"]["id"] == aid
+    assert second["asset"]["description"] == "处理虚构视频"
+    found = (await client.get(f"{API}/assets", params={"kind": "skill", "q": "虚构视频"})).json()["items"]
+    assert found[0]["id"] == aid
+    missing = (await client.get(f"{API}/assets", params={"kind": "skill", "q": "虚构图片"})).json()["items"]
+    assert missing == []
+    old = (await client.get(f"{API}/assets/revisions/{first['revision']['id']}")).json()
+    assert old["meta"]["description"] == "生成虚构图片"
+    edited = await client.patch(f"{API}/assets/{aid}", json={"description": "人工补充用途"})
+    assert edited.status_code == 200 and edited.json()["description"] == "人工补充用途"
+    assert edited.json()["latest_rev"] == 2
+    assert (await client.get(f"{API}/assets", params={"q": "人工补充"})).json()["items"][0]["id"] == aid
+    assert (await client.get(f"{API}/assets/revisions/{first['revision']['id']}/raw")).content == first_data
+
+
+@pytest.mark.parametrize("packaged", [True, False])
+async def test_existing_description_search_and_history(api, client, ctx, packaged):
+    if packaged:
+        source = b"# Updated notes\n\n---\nname: demo\ndescription: unique-purpose\n---\n"
+        data = package_entries([("demo/SKILL.md", source)])
+        created = await import_package(client, data)
+    else:
+        data = b'{"Name":"demo","Description":"unique-purpose"}'
+        created = await api.asset("skill", "demo", data.decode())
+    rid, aid = created["revision"]["id"], created["asset"]["id"]
+    historical_meta = {"origin": "snapshot", **({"format": "skill_package"} if packaged else {})}
+    async with ctx.db.write() as session:
+        row = await session.get(AssetRevision, rid)
+        row.meta = historical_meta
+    await api.asset("skill", "newer-unrelated", '{"Name":"unrelated"}')
+    for _ in range(2):
+        response = await client.get(f"{API}/assets", params={"q": "unique-purpose", "limit": 1})
+        assert response.status_code == 200, response.text
+        items = response.json()["items"]
+        assert len(items) == 1 and items[0]["id"] == aid
+        assert items[0]["description"] == "unique-purpose"
+        assert response.json()["next_cursor"] is None
+        detail = (await client.get(f"{API}/assets/revisions/{rid}")).json()
+        assert detail["meta"]["description"] == "unique-purpose"
+    async with ctx.db.read() as session:
+        row = await session.get(AssetRevision, rid)
+        assert row.meta == historical_meta
+    assert (await client.get(f"{API}/assets/revisions/{rid}/raw")).content == data
+
+
+@pytest.mark.parametrize("packaged", [True, False])
+async def test_agent_skill_list_description_uses_pinned_revision(api, client, ctx, packaged):
+    async def create(description):
+        if not packaged:
+            return await api.asset("skill", "demo", f'{{"Name":"demo","Description":"{description}"}}')
+        source = f"---\nname: demo\ndescription: {description}\n---\n".encode()
+        data = package_entries([("demo/SKILL.md", source)])
+        return await import_package(client, data)
+
+    old = await create("旧版用途")
+    latest = await create("新版用途")
+    agent = await api.agent("demo-agent", kind="code")
+    v1 = (await api.publish(agent["draft"]))["version"]
+    spec = {**agent["draft"]["spec"], "params": {"phase": 2}}
+    saved = (await api.save(agent["draft"], spec))["draft"]
+    v2 = (await api.publish(saved))["version"]
+    meta = {"origin": "snapshot", **({"format": "skill_package"} if packaged else {})}
+    async with ctx.db.write() as session:
+        asset = await session.get(Asset, old["asset"]["id"])
+        asset.description = "当前资产说明，不应泄漏到历史版本"
+        for version, created in [(v1, old), (v2, latest)]:
+            revision = await session.get(AssetRevision, created["revision"]["id"])
+            revision.meta = meta
+            session.add(VersionAssetRef(
+                version_id=version["id"], asset_revision_id=revision.id, spec_path="snapshot.skills.demo",
+            ))
+    for version, description, rev in [(v1, "旧版用途", 1), (v2, "新版用途", 2)]:
+        response = await client.get(f"{API}/versions/{version['id']}/assets")
+        assert response.status_code == 200, response.text
+        item = response.json()["items"][0]
+        assert item["description"] == description and item["rev"] == rev
+    async with ctx.db.read() as session:
+        for created in (old, latest):
+            revision = await session.get(AssetRevision, created["revision"]["id"])
+            assert revision.meta == meta
 
 
 @pytest.mark.parametrize("data", [b"PKbroken", b'{"name":"only metadata"}'])

@@ -81,6 +81,39 @@ def test_legacy_metadata_is_not_fabricated_into_files():
     assert result.meta == {"format": "metadata", "display_name": "虚构旧名称"}
 
 
+@pytest.mark.parametrize("prefix,newline", [
+    ("", "\n"), ("\ufeff", "\r\n"), ("# 更新说明\n先添加一段说明。\n\n", "\n"),
+])
+def test_description_preserves_multiline_yaml_and_original_bytes(prefix, newline):
+    source = prefix + newline.join([
+        "---", "name: demo", "description: |-",
+        "  生成测试图片 --- 保留标点。", "  支持多行描述。", "---", "# 正文", "",
+    ])
+    raw = source.encode()
+    package = SkillPackage(package_entries([("demo/SKILL.md", raw)]))
+    assert package.description == "生成测试图片 --- 保留标点。\n支持多行描述。"
+    assert package.metadata()["description"] == package.description
+    assert package.read(package.default_path) == raw
+
+
+@pytest.mark.parametrize("header", ["description: [one, two]", "description: 123", "broken: ["])
+def test_non_text_or_invalid_description_is_not_fabricated(header):
+    package = SkillPackage(package_entries([("SKILL.md", f"---\n{header}\n---\n# 正文".encode())]))
+    assert package.description is None
+
+
+def test_legacy_description_supports_source_field_casing():
+    for key in ("description", "Description"):
+        result = validate_content("skill", ('{"Name":"demo","' + key + '":"  原始用途  "}').encode())
+        assert result.meta["description"] == "原始用途"
+
+
+def test_frontmatter_with_only_snapshot_fields_is_preserved():
+    package = SkillPackage(package_entries([("SKILL.md", b"---\nid: ' '\n---\n# test")]))
+    assert package.frontmatter == {"id": " "}
+    assert package.description is None
+
+
 def test_expanded_size_and_entry_limits(monkeypatch):
     import evalp.utils.skill_package as mod
 

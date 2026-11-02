@@ -49,8 +49,8 @@ __all__ = ["REPLAY_CONCURRENCY", "CompareService"]
 
 REPLAY_CONCURRENCY = 4  # 全部重放合计最多同时执行的轮次数
 ALIGN_CACHE_SIZE = 64
-# 对齐只需要这几类事件
-_ALIGN_EVENT_TYPES = ("llm.response", "tool.call", "span.start", "message.assistant")
+# 步骤签名与录制轮次的原始指标来源
+_ALIGN_EVENT_TYPES = ("llm.response", "tool.call", "span.start", "message.assistant", "log")
 TITLE_MAX = 60
 INTERRUPTED_MSG = "服务重启或异常退出，重放被中断"
 
@@ -433,6 +433,16 @@ class CompareService:
         if not selected:
             raise ValidationFailed(
                 "原会话没有可重放的轮次", {"errors": [{"path": "turns", "message": "为空"}]}
+            )
+
+        relevant = [
+            t for t in src_turns
+            if t.idx in selected or (mode == "anchored" and t.status == "ok" and t.idx < max(selected))
+        ]
+        if any(t.middleware_snapshot for t in relevant):
+            raise ValidationFailed(
+                "所选轮次或其必要历史含轮间中间件，首期暂不支持重放；可查看历史或只读对比",
+                code="MIDDLEWARE_REPLAY_UNSUPPORTED",
             )
 
         version_id = await self.ctx.svc(VersionService).resolve_ref(target_ref)

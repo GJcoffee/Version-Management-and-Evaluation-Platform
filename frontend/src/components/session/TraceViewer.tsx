@@ -21,6 +21,7 @@ import { formatDuration } from '@/lib/format'
 import { useNow } from '@/lib/useNow'
 import { BlobJson } from './BlobView'
 import { isHighlighted } from './sessionState'
+import { exactSeconds, upstreamTiming } from './upstreamTiming'
 import {
   TRACE_KINDS,
   TRACE_KIND_LABEL,
@@ -42,6 +43,8 @@ export interface TraceViewerProps {
   /** 轮次起止时间（ISO）；缺省时按步骤自动计算。运行中 endedAt 为空，瀑布图右端随时间延伸 */
   startedAt?: string | null
   endedAt?: string | null
+  /** 轮次总耗时，与指标条一致；瀑布图可包含外围 Span，范围可能稍大。 */
+  durationMs?: number | null
   /** 轮次仍在运行：瀑布图持续刷新 */
   running?: boolean
   /** 受控的选中步骤（节点 id，即 step_id）；不传则内部管理 */
@@ -76,6 +79,7 @@ export function TraceViewer({
   sessionId,
   startedAt,
   endedAt,
+  durationMs,
   running,
   selectedStepId,
   onSelectStep,
@@ -90,6 +94,7 @@ export function TraceViewer({
   }
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set())
   const [kinds, setKinds] = useState<ReadonlySet<TraceKind>>(new Set())
+  const upstream = upstreamTiming(flattenTree(steps).flatMap((row) => row.node.events))
   const [query, setQuery] = useState('')
 
   const all = useMemo(() => {
@@ -187,8 +192,9 @@ export function TraceViewer({
               </button>
             )
           })}
-          <span className="ml-auto font-mono text-[11px] text-muted-foreground">
-            {all.length} 步 · {formatDuration(timeline.totalMs)}
+          <span className="ml-auto font-mono text-[11px] text-muted-foreground"
+            title={upstream ? '时间轴包含本地查询及传输；HiAgent值仅为远端整轮运行耗时' : '本轮总耗时'} data-testid="trace-duration">
+            {all.length} 步 · {upstream ? `本地端到端 ${exactSeconds(durationMs ?? timeline.totalMs)} · HiAgent ${exactSeconds(upstream.runMs)}` : formatDuration(durationMs ?? timeline.totalMs)}
           </span>
         </div>
       </div>
@@ -318,6 +324,7 @@ export function TraceViewer({
 }
 
 const EVENT_LABEL: Record<string, string> = {
+  'llm.reasoning': '思考',
   'llm.request': '请求',
   'llm.response': '响应',
   'tool.call': '调用',
@@ -375,6 +382,16 @@ export function StepDetail({
             ))}
           </dl>
         )}
+        {node.events.some((e) => e.type === 'llm.reasoning') && (
+          <div className="mb-3 rounded border border-border bg-muted/40 p-2">
+            <p className="mb-1 text-xs font-medium">上游思考</p>
+            <p className="whitespace-pre-wrap text-xs">{node.events
+              .filter((e) => e.type === 'llm.reasoning')
+              .map((e) => e.type === 'llm.reasoning' ? e.payload.text ?? '' : '').join('')}</p>
+          </div>
+        )}
+        {node.kind === 'llm' && !node.events.some((e) => e.type === 'llm.reasoning') &&
+          <p className="mb-2 text-xs text-muted-foreground">思考内容未提供</p>}
         {node.events.length > 1 && (
           <div className="mb-2 flex gap-1" role="tablist">
             {node.events.map((e, i) => (

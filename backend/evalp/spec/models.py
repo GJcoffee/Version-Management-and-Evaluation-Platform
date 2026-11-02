@@ -282,6 +282,15 @@ class SnapshotSpec(_Model):
 # ---------------------------------------------------------------- 顶层
 
 
+class AdapterBinding(_Model):
+    """版本固定的接入配置；凭据只保存引用。"""
+
+    id: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    config: dict[str, Any] = Field(default_factory=dict)
+    credential_ref: str = Field(min_length=1)
+
+
 class _SpecBase(_Model):
     """公共字段。``name`` / ``description`` / ``notes`` 仅用于显示，不参与哈希。"""
 
@@ -291,6 +300,7 @@ class _SpecBase(_Model):
     name: str | None = Field(None, description="显示用，不参与哈希")
     description: str | None = Field(None, description="显示用，不参与哈希")
     notes: str | None = Field(None, description="备注，不参与哈希")
+    adapter: AdapterBinding | None = None
 
 
 class ConfigSpec(_SpecBase):
@@ -308,7 +318,7 @@ class CodeSpec(_SpecBase):
     """代码型 agent（``kind: code``）。"""
 
     kind: Literal["code"] = "code"
-    transport: Literal["http", "subprocess"]
+    transport: Literal["http", "subprocess", "adapter"]
     http: HttpTransport | None = None
     subprocess: SubprocessTransport | None = None
     source: SourceSpec = Field(default_factory=SourceSpec)
@@ -330,10 +340,12 @@ class CodeSpec(_SpecBase):
             if self.http is None:
                 raise ValueError("transport=http 时必须提供 http 配置")
             self.subprocess = None
-        else:
+        elif self.transport == "subprocess":
             if self.subprocess is None:
                 raise ValueError("transport=subprocess 时必须提供 subprocess 配置")
             self.http = None
+        elif self.adapter is None:
+            raise ValueError("transport=adapter 时必须提供 adapter 配置")
         return self
 
 

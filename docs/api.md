@@ -659,6 +659,71 @@ CSV 需要 `column_map`（`{字段名: 列名}`）；字段名可用 `case_key /
 取消执行中的轮次，等它收尾后返回（`status="cancelled"`，没有 `error`；子进程型 agent 的整个进程树会被终止，HTTP 型会收到 `/evalp/cancel` 并断开连接）。
 轮次已结束时原样返回，不报错。
 
+### GET /middlewares 与轮间 JSON 处理
+
+`GET /middlewares` 返回 `{"middlewares": [{id, version, name, input_modes, config_schema}]}`。
+首期只有 `json_artifact@1.0.0`，支持普通对话会话的文本输入。
+
+`GET /sessions/{id}/turns/{source_turn_id}/artifact-candidates?url_pointer=/jsonUrl` 只解析来源轮次
+已保存的成功最终回复，不下载产物。返回
+`{"source_turn_id": "...", "candidates": [{"id": "...", "url": "...", "location": "/jsonUrl"}]}`。
+来源必须属于该会话；无后缀链接可通过 `url_pointer` 指定，多个候选须明确选择。
+
+`POST /sessions/{id}/turns` 新增可选 `middlewares`，首期最多一个：
+
+```json
+{
+  "input": "不添加对白",
+  "middlewares": [{
+    "id": "json_artifact",
+    "version": "1.0.0",
+    "source_turn_id": "trn_previous",
+    "expected_previous_turn_id": "trn_previous",
+    "config": {
+      "url_pointer": "/jsonUrl",
+      "selected_candidate_id": null,
+      "content_pointer": "/story/scenes"
+    }
+  }]
+}
+```
+
+`source_turn_id` 缺省为紧邻上一轮，要求成功且有最终回复；不跳过失败轮次。
+新选择携带 `expected_previous_turn_id`，候选查询后上一轮变化返回 409 `ARTIFACT_SOURCE_CHANGED`。
+失败重试可明确保留较早的 `source_turn_id` 并省略预期上一轮。未知处理器/版本、非文本输入、
+评测/重放上下文与 `business_bridge` 接入会拒绝配置。省略中间件或传空列表保持旧行为。
+
+`TurnOut` 增加可空的 `effective_input: Message` 与 `middleware_snapshot: {schema_version, steps}`。
+步骤记录请求配置、固定来源、`pending|running|ok|error|cancelled|timeout`、`duration_ms`、
+`source_url`、`raw_sha256`、`result_blob_hash` 和错误。`GET /turns/{id}` 可单独读取完整轮次记录。
+`input` 与 `turn.start.input` 保留原始指令；中间件在同一取消/超时预算内运行，
+保存实际输入和独立 Blob 引用成功后才调用 Adapter。成功轮次的后续历史优先使用 `effective_input`。
+
+Trace 复用 `span.start/end`，`attrs.category="middleware"`；根 Span 的结束内容含实际输入和结果 Blob。
+大 `turn.start` 存根保留 `has_middleware=true`，刷新后可读取轮次详情。
+`usage.middleware_ms` 单独记录处理耗时；端到端与首输出耗时包含输入准备，不增加 LLM/工具调用数。
+失败会形成完整终态，且不调用 Agent。错误码为 `ARTIFACT_SOURCE_INVALID`、`ARTIFACT_NOT_FOUND`、
+`ARTIFACT_AMBIGUOUS`、`ARTIFACT_FETCH_FAILED`、`ARTIFACT_INVALID_JSON`、
+`ARTIFACT_FIELD_NOT_FOUND`、`ARTIFACT_TOO_LARGE`；总超时仍为 `TIMEOUT`。
+
+读取前在平台数据目录的 `config.toml` 配置：
+
+```toml
+[artifacts]
+allowed_hosts = "artifacts.example.com,cdn.example.com"
+max_download_bytes = 1048576
+max_input_bytes = 65536
+timeout_s = 15
+```
+
+或设置 `EVALP_ARTIFACTS_ALLOWED_HOSTS`。域名精确匹配，空值禁止下载；仅 HTTP(S) 的 80/443 端口，
+每次重定向均校验域名，不转发 Agent 凭据、响应 Cookie 或环境代理凭据。上限按解压后下载字节与
+UTF-8 输入字节计算，不能静默截断。首期不支持额外产物凭据配置。
+
+包含中间件的所选轮次，或锚定重放必需的成功历史，返回 400 `MIDDLEWARE_REPLAY_UNSUPPORTED`。
+历史查看与只读对比可继续使用，评测尚不开放中间件配置。HiAgent 直接接入将实际输入作为本轮
+`Query`，沿用上游会话；业务桥接的组合输入消费尚未验证，首期禁用此接入的中间件。
+
 ### GET /sessions/{id}/stream（SSE）
 先回放库里 `seq > after_seq` 的事件，再订阅实时事件；回放与实时之间不会重复也不会丢失。`after_seq` 与请求头 `Last-Event-ID` 同时给出时取较大者，断线重连时浏览器会自动带上它。
 帧格式：
@@ -679,7 +744,10 @@ data: {"status":"idle","last_seq":12}
 空闲的会话回放完立即收到 `idle`。每 15 秒有一次 `: ping` 心跳注释帧。订阅者消费太慢（积压超过 1000 条）会被断开且没有 `idle` 帧——带 `Last-Event-ID` 重连即可从库里补齐。
 
 ### GET /blobs/{hash}[?session_id=]
-读取被事件引用（`{"$blob": hash}`）的大 payload（`application/json`），或资产修订的内容（作为附件下载）。其他 blob 一律 404，避免枚举任意内容。
+读取被事件引用（`{"$blob": hash}`）的大 payload、中间件快照引用的产物（`application/json`），
+或资产修订的内容（作为附件下载）。`session_id` 限定事件与中间件引用所属会话。
+产物 Blob 保存原始 UTF-8 文本、解析结果、选中字段与原内容哈希，事件与轮次引用分别登记并在清理时释放。
+其他 blob 一律 404，避免枚举任意内容。
 
 ### POST /versions/{ref}/adapter-check → CheckReport
 对一个版本跑 Adapter 协议合规自检（`ref` 同"版本引用"）。不写库、不产生会话，但会真实调用 agent（配置型会真实调用 LLM，产生少量费用）；耗时一般几秒到十几秒。

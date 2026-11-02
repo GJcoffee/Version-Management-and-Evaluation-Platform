@@ -102,6 +102,7 @@ async def upload_skill(
         suggested = (suggested[:50].rstrip("-") or "skill") + "-" + digest
     return SkillUploadOut(
         blob_upload_id=h, size=len(data), display_name=package.display_name,
+        description=package.description,
         suggested_name=suggested, file_count=package.metadata()["file_count"],
     )
 

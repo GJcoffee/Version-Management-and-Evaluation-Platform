@@ -6,7 +6,7 @@ import { useCompares } from '@/api/queries/compare'
 import { Badge } from '@/components/ui/Badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { RelativeTime } from '@/components/ui/RelativeTime'
+import { DateTime } from '@/components/ui/DateTime'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { MODE_TAG } from './compareUtils'
 
@@ -21,7 +21,7 @@ function CompareItem({ g }: { g: CompareGroup }) {
         <span className="hidden shrink-0 font-mono text-xs text-muted-foreground sm:inline">
           {side(g.left)} ↔ {side(g.right)}
         </span>
-        <RelativeTime value={g.created_at} className="w-20 shrink-0 text-right text-xs text-muted-foreground" />
+        <DateTime value={g.created_at} className="shrink-0 text-right text-xs text-muted-foreground" />
       </Link>
     </li>
   )

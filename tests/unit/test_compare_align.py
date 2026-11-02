@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from evalp.compare.align import (
     AlignTurn,
     Step,
@@ -121,3 +122,51 @@ def test_align_pair_one_side_missing():
     assert out["left_turn_id"] is None and out["right_turn_id"] == "r"
     assert [s["op"] for s in out["steps"]] == ["insert"]
     assert out["metrics"]["left"] is None
+
+
+@pytest.mark.parametrize("mapping", [False, True])
+def test_recorded_metrics_use_source_duration_without_mutating_imported_values(mapping):
+    payload = {
+        "message": "录制来源",
+        "source_mode": "recorded",
+        "original_latency_ms": 71_235,
+        "original_started_at": "2026-10-27T09:43:59.524Z",
+        "original_ended_at": "2026-10-27T09:45:10.759729552Z",
+    }
+    source = {"type": "log", "payload": payload} if mapping else ev("log", **payload)
+    turn = AlignTurn(
+        "r", 0, latency_ms=697, ttft_ms=602,
+        usage={"prompt_tokens": 270074, "completion_tokens": 5808, "llm_calls": 11, "tool_calls": 15},
+        events=[source],
+    )
+    metrics = align_pair(0, AlignTurn("l", 0, latency_ms=44170, ttft_ms=38672), turn)["metrics"]
+    assert metrics["left"]["latency_ms"] == 44170 and metrics["left"]["ttft_ms"] == 38672
+    assert metrics["right"] == {
+        "latency_ms": 71235, "ttft_ms": None, "tokens": 275882,
+        "cost": 0, "llm_calls": 11, "tool_calls": 15,
+    }
+    assert turn.latency_ms == 697 and turn.ttft_ms == 602
+    assert payload["original_latency_ms"] == 71235
+    assert extract_steps([source]) == []
+
+
+@pytest.mark.parametrize("ttft", [None, -1, float("nan"), float("inf"), "602", True, 0, 38672])
+def test_recorded_original_timing_fallbacks(ttft):
+    turn = AlignTurn("r", 0, latency_ms=697, ttft_ms=602, events=[ev(
+        "log", message="录制来源", source_mode="recorded", original_latency_ms=-1, original_ttft_ms=ttft,
+        original_started_at="2026-10-27T09:43:59.524Z",
+        original_ended_at="2026-10-27T09:45:10.759729552Z",
+    )])
+    metrics = turn_metrics(turn)
+    assert metrics["latency_ms"] == 71235
+    assert metrics["ttft_ms"] == (ttft if type(ttft) is int and ttft >= 0 else None)
+    turn.events = [ev("log", message="录制来源", source_mode="recorded", original_started_at="bad")]
+    assert turn_metrics(turn)["ttft_ms"] is None  # 缺少原始总时间仍不回退到导入 TTFT
+    turn.events = [
+        ev("log", message="普通日志", source_mode="live", original_latency_ms=999, original_ttft_ms=999)
+    ]
+    assert turn_metrics(turn)["latency_ms"] == 697 and turn_metrics(turn)["ttft_ms"] == 602
+    turn.events = [
+        ev("log", message="录制来源", source_mode="recorded", original_latency_ms=0, original_ttft_ms=0)
+    ]
+    assert turn_metrics(turn)["latency_ms"] == 0 and turn_metrics(turn)["ttft_ms"] == 0

@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from difflib import SequenceMatcher
+from math import isfinite
 from typing import Any
 
 from evalp.runtime.events import AgentEvent, step_signature
@@ -135,14 +137,47 @@ def json_diff(left: Any, right: Any, path: str = "") -> list[dict[str, Any]]:
 # ---------------------------------------------------------------- 指标 / 轮次
 
 
+def _nonnegative_ms(value: Any) -> int | float | None:
+    return value if type(value) in (int, float) and isfinite(value) and value >= 0 else None
+
+
+def _turn_timing(t: AlignTurn) -> tuple[int | float | None, int | float | None]:
+    """录制对比使用来源总耗时；缺少原始 TTFT 时不拿导入耗时替代。"""
+    latency, ttft = t.latency_ms, t.ttft_ms
+    recorded = False
+    for event in t.events:
+        kind = event.get("type") if isinstance(event, Mapping) else event.type
+        payload = (event.get("payload") or {}) if isinstance(event, Mapping) else event.payload
+        if kind != "log" or payload.get("source_mode") != "recorded":
+            continue
+        if not recorded:
+            ttft = _nonnegative_ms(payload.get("original_ttft_ms"))
+            recorded = True
+        original = _nonnegative_ms(payload.get("original_latency_ms"))
+        if original is None:
+            try:
+                start = datetime.fromisoformat(payload["original_started_at"])
+                end = datetime.fromisoformat(payload["original_ended_at"])
+                # 事件时间精度为毫秒，舍去源录制更细的精度，与前端保持一致。
+                original = _nonnegative_ms(
+                    int(end.timestamp() * 1000) - int(start.timestamp() * 1000)
+                )
+            except (KeyError, TypeError, ValueError, OverflowError, OSError):
+                pass
+        if original is not None:
+            return original, ttft
+    return latency, ttft
+
+
 def turn_metrics(t: AlignTurn | None) -> dict[str, Any] | None:
     """一轮的指标；该侧没有这一轮时为 None。"""
     if t is None:
         return None
     u = t.usage or {}
+    latency, ttft = _turn_timing(t)
     return {
-        "latency_ms": t.latency_ms,
-        "ttft_ms": t.ttft_ms,
+        "latency_ms": latency,
+        "ttft_ms": ttft,
         "tokens": int(u.get("prompt_tokens", 0) or 0) + int(u.get("completion_tokens", 0) or 0),
         "cost": t.cost or 0.0,
         "llm_calls": int(u.get("llm_calls", 0) or 0),

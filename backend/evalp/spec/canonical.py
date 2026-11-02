@@ -62,6 +62,8 @@ def canonicalize(spec: ConfigSpec | CodeSpec | dict[str, Any]) -> CanonicalSpec:
     data = dump_spec(model)
     for key in EXCLUDED_KEYS:
         data.pop(key, None)
+    if data.get("adapter") is None:
+        data.pop("adapter", None)  # 保持未接入适配器的历史 Spec 哈希稳定
     if data.get("snapshot") is None:
         data.pop("snapshot", None)  # 未声明快照时不出现，保持没有该字段的旧版本哈希不变
     elif not data["snapshot"]["map"]:

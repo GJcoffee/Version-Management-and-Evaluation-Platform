@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Columns2, FlaskConical, GitCompare, History, FilePlus2, MessageSquarePlus, Tag, X } from 'lucide-react'
 import { ApiError } from '@/api/client'
+import { VersionBindingDialog } from '@/components/VersionBindingDialog'
 import { useCreateCompare } from '@/api/queries/compare'
 import { useCreateSession } from '@/api/queries/sessions'
 import { useAddTag, useRemoveTag, useVersionToDraft } from '@/api/queries/versions'
@@ -45,6 +46,7 @@ export function VersionsTab({
 }) {
   const navigate = useNavigate()
   const [selected, setSelected] = useState<string[]>([])
+  const [bindingIds, setBindingIds] = useState<string[] | null>(null)
   const [tagging, setTagging] = useState<VersionSummary | null>(null)
   const [toDraft, setToDraft] = useState<VersionSummary | null>(null)
   const [untag, setUntag] = useState<{ v: VersionSummary; tag: string } | null>(null)
@@ -85,7 +87,7 @@ export function VersionsTab({
   }
 
   const toggle = (id: string) =>
-    setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : cur.length >= 2 ? [cur[1], id] : [...cur, id]))
+    setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]))
 
   const compare = () => {
     const [a, b] = selected.map((id) => versions.find((v) => v.id === id)!)
@@ -101,8 +103,10 @@ export function VersionsTab({
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <p className="text-xs text-muted-foreground">勾选两个版本可对比差异（已选 {selected.length}/2）</p>
+        <p className="text-xs text-muted-foreground">勾选两个版本可对比，也可批量修改调用接入（已选 {selected.length}）</p>
         <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" disabled={!selected.length}
+            onClick={() => setBindingIds(selected)}>批量修改接入</Button>
           <Button size="sm" variant="outline" disabled={selected.length !== 2} onClick={compare}>
             <GitCompare className="h-3.5 w-3.5" />
             对比所选版本
@@ -177,6 +181,7 @@ export function VersionsTab({
               </TableCell>
               <TableCell>
                 <div className="flex justify-end gap-1">
+                  <Button size="sm" variant="ghost" onClick={() => setBindingIds([v.id])}>调用接入</Button>
                   <Button
                     size="sm"
                     variant="outline"
@@ -215,6 +220,7 @@ export function VersionsTab({
       )}
 
       {evalFor && <NewEvalDialog agentId={agent.id} defaultVersionIds={[evalFor.id]} onClose={() => setEvalFor(null)} />}
+      {bindingIds && <VersionBindingDialog ids={bindingIds} onClose={() => setBindingIds(null)} />}
       {tagging && <AddTagDialog version={tagging} onClose={() => setTagging(null)} />}
       {toDraft && (
         <ToDraftDialog

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import { useProviders } from '@/api/queries/providers'
+import type { AdapterBinding } from '@/api/queries/adapters'
+import { AdapterBindingFields } from '@/components/AdapterBindingFields'
 import type { SpecSchema } from '@/api/types'
 import { AssetRefListEditor, AssetRefPicker } from '@/components/AssetRefPicker'
 import { Field, Textarea } from '@/components/ui/Input'
@@ -33,6 +35,8 @@ export function SpecForm({ spec, kind, schema, onEdit, disabled }: SpecFormProps
   }
   return (
     <div className="space-y-3" data-testid="spec-form">
+      <AdapterBindingFields value={(spec.adapter as AdapterBinding) ?? null}
+        disabled={disabled} onChange={(binding) => onEdit([[['adapter'], binding ?? undefined]])} />
       {kind === 'config' ? <ConfigForm ctx={ctx} /> : <CodeForm ctx={ctx} />}
     </div>
   )
@@ -378,6 +382,7 @@ function CodeForm({ ctx }: { ctx: FormCtx }) {
           options={[
             { value: 'http', label: 'http（evalp-agent/1 协议）' },
             { value: 'subprocess', label: 'subprocess（子进程，stdin/stdout）' },
+            { value: 'adapter', label: '由平台托管适配器' },
           ]}
           onChange={(v) => ctx.set(['transport'], v)}
         />
@@ -409,7 +414,7 @@ function CodeForm({ ctx }: { ctx: FormCtx }) {
               />
             </Field>
           </div>
-        ) : (
+        ) : transport === 'subprocess' ? (
           <div className="space-y-3">
             <Field label="command" required htmlFor="sp-command" hint="每行一个参数，例如 python / -m / my_agent.entry">
               <Textarea
@@ -444,7 +449,7 @@ function CodeForm({ ctx }: { ctx: FormCtx }) {
               />
             </Field>
           </div>
-        )}
+        ) : <p className="text-xs text-muted-foreground">使用上方固定的适配器与连接配置</p>}
       </Section>
 
       <Section title="代码来源" description="source">
@@ -540,4 +545,3 @@ export function JsonObjectField({
     </div>
   )
 }
-

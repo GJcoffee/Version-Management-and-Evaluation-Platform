@@ -2,11 +2,15 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
+import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { EvalCompareOut, EvalStatsOut } from '@/api/evalTypes'
+import type { EvalCompareOut, EvalItemDetailOut, EvalStatsOut } from '@/api/evalTypes'
+import { mockApi } from '@/test/mockApi'
+import { CompareCaseDrawer } from './CompareCaseDrawer'
 import { CompareSummary, WarningBar } from './CompareSummary'
 import { EvalProgressBar } from './EvalStatus'
 import { EvaluatorEditor } from './EvaluatorEditor'
+import { ItemDetailBody } from './ItemDetail'
 import { MetricCards } from './MetricCards'
 import type { EvaluatorForm } from './evalUtils'
 
@@ -81,6 +85,47 @@ describe('CompareSummary', () => {
 })
 
 afterEach(() => vi.unstubAllGlobals())
+
+describe('评测详情的结构化期望', () => {
+  const expected = { outputType: 'confirm', only_missing_parameter: 'dialogue' }
+  const rubric = { criteria: ['完整', '准确'] }
+  const item: EvalItemDetailOut = {
+    id: 'evi_json', run_id: 'evr_json', case_id: 'cas_json', case_key: 'json-case', repeat_idx: 0,
+    input_preview: '测试问题', output_preview: null, expected, tags: [], status: 'done',
+    passed: null, score: null, cached: false, attempts: 1, error: null, latency_ms: 0,
+    cost: 0, usage: null, session_id: null, scores: [], output: null, turns: [],
+    case_detail: { input: { turns: ['测试问题'] }, expected, rubric },
+  }
+
+  it('结果详情展示 JSON expected / rubric，并保留字符串和缺失提示', () => {
+    const { rerender } = render(<ItemDetailBody item={item} showConversation={false} />)
+    expect(screen.getByText('期望').parentElement?.querySelector('div')?.textContent).toBe(JSON.stringify(expected, null, 2))
+    expect(screen.getByText('评分标准 rubric').parentElement?.querySelector('div')?.textContent).toBe(JSON.stringify(rubric, null, 2))
+    rerender(<ItemDetailBody item={{ ...item, expected: '普通期望', case_detail: { rubric: '普通标准' } }} showConversation={false} />)
+    expect(screen.getByText('普通期望')).toBeInTheDocument()
+    expect(screen.getByText('普通标准')).toBeInTheDocument()
+    rerender(<ItemDetailBody item={{ ...item, expected: null, case_detail: {} }} showConversation={false} />)
+    expect(screen.getByText('（用例没有 expected）')).toBeInTheDocument()
+    expect(screen.queryByText('评分标准 rubric')).toBeNull()
+  })
+
+  it('评测对比抽屉也可以展示对象 expected', async () => {
+    const api = mockApi({ 'GET /api/v1/evals/evr_json/items/evi_json': item })
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <CompareCaseDrawer
+            item={{ case_key: 'json-case', class: 'missing', tags: [], delta: null, left: { score: null, pass_rate: null, item_ids: ['evi_json'] }, right: null }}
+            left={{ id: 'evr_json', version_seq: 1, version_id: 'ver_1' }} right={null} onClose={() => {}}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(await screen.findByText('测试问题')).toBeInTheDocument()
+    expect(screen.getByText('期望').parentElement?.querySelector('div.whitespace-pre-wrap')?.textContent).toBe(JSON.stringify(expected, null, 2))
+    expect(api.calls.every((c) => c.method === 'GET')).toBe(true)
+  })
+})
 
 function qc(ui: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })

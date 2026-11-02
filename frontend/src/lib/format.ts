@@ -2,6 +2,13 @@
 
 const EMPTY = '-'
 
+/** 用例 expected / rubric 可为任意 JSON；文本保持原样，详情可缩进展示结构。 */
+export function formatDatasetValue(value: unknown, pretty = false): string {
+  if (value === null || value === undefined) return EMPTY
+  if (typeof value === 'string') return value
+  return JSON.stringify(value, null, pretty ? 2 : undefined) ?? EMPTY
+}
+
 function isEmpty(v: number | null | undefined): v is null | undefined {
   return v === null || v === undefined || Number.isNaN(v)
 }
@@ -37,7 +44,7 @@ export function formatDuration(ms: number | null | undefined): string {
   if (totalSec < 3600) return `${Math.floor(totalSec / 60)}m${totalSec % 60}s`
   const h = Math.floor(totalSec / 3600)
   const m = Math.floor((totalSec % 3600) / 60)
-  return `${h}h${m}m`
+  return `${h}h${m}m${totalSec % 60}s`
 }
 
 /** 字节数：1536 -> "1.5 KB" */

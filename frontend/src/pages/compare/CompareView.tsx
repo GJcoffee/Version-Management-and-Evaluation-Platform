@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { MessagesSquare } from 'lucide-react'
+import { ChevronsDownUp, ChevronsUpDown, MessagesSquare } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import type { CompareGroup, CompareSend, CompareUpdate } from '@/api/compareTypes'
 import { compareKeys, useAlignment, useSendCompareTurn, useUpdateCompare } from '@/api/queries/compare'
@@ -8,10 +8,11 @@ import { cancelTurn } from '@/api/queries/sessions'
 import { CompareHeader, type SideSummary } from '@/components/compare/CompareHeader'
 import { CompareRowView, type Side, type TraceTarget } from '@/components/compare/CompareRowView'
 import { TraceDrawer } from '@/components/compare/TraceDrawer'
-import { alignmentHighlights, buildRows, type CompareRow, type SeededFork, type SeededPair } from '@/components/compare/compareUtils'
+import { alignmentHighlights, buildRows, comparisonBaseline, type CompareRow, type SeededFork, type SeededPair } from '@/components/compare/compareUtils'
 import { liveAlignTurn } from '@/components/compare/incrementalAlign'
 import { MessageInput, totalMetrics, useSessionStream, type TurnState } from '@/components/session'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { Button } from '@/components/ui/Button'
 import { cn } from '@/lib/cn'
 import { safeGet, safeSet } from '@/lib/safeStorage'
 import { toast } from '@/stores/toast'
@@ -46,6 +47,7 @@ function streamSig(turns: readonly TurnState[]): string {
 export function CompareView({ group }: { group: CompareGroup }) {
   const qc = useQueryClient()
   const mode = group.mode
+  const baseline = useMemo(() => comparisonBaseline({ left: group.left, right: group.right }), [group.left, group.right])
   const left = useSessionStream(group.left.session_id)
   const right = useSessionStream(group.right.session_id)
   const sendPair = useSendCompareTurn(group.id)
@@ -74,6 +76,24 @@ export function CompareView({ group }: { group: CompareGroup }) {
   const baseRows = useMemo(() => buildRows(alignment.data, seeded, seededForks), [alignment.data, seeded, seededForks])
   const leftById = useMemo(() => new Map(left.turns.map((t) => [t.id, t])), [left.turns])
   const rightById = useMemo(() => new Map(right.turns.map((t) => [t.id, t])), [right.turns])
+  const leftOrdinals = useMemo(() => new Map(left.turns.map((t, i) => [t.id, i + 1])), [left.turns])
+  const rightOrdinals = useMemo(() => new Map(right.turns.map((t, i) => [t.id, i + 1])), [right.turns])
+
+  // 按侧和轮次保存折叠状态；新到达的轮次默认展开，折叠不改变 Trace 选择。
+  const [collapsedTurns, setCollapsedTurns] = useState<ReadonlySet<string>>(() => new Set())
+  const toggleTurn = useCallback((side: Side, turnId: string) => {
+    setCollapsedTurns((prev) => {
+      const next = new Set(prev)
+      const key = `${side}:${turnId}`
+      if (!next.delete(key)) next.add(key)
+      return next
+    })
+  }, [])
+  const collapseAll = () => setCollapsedTurns(new Set([
+    ...left.turns.map((t) => `left:${t.id}`),
+    ...right.turns.map((t) => `right:${t.id}`),
+  ]))
+  const expandAll = () => setCollapsedTurns(new Set())
 
   // 运行中的行用浏览器里根据已收到的事件算出的增量对齐（随输出实时更新）；两侧都结束后以服务端结果为准。
   // 任一侧的轮次还没从 SSE 还原出来（加载中）时也沿用服务端结果。
@@ -241,6 +261,19 @@ export function CompareView({ group }: { group: CompareGroup }) {
         onUpdate={onUpdate}
       />
 
+      {rows.length > 0 && (
+        <div className="flex shrink-0 items-center justify-end gap-1 border-b border-border px-4 py-1" data-testid="compare-fold-toolbar">
+          <Button size="sm" variant="ghost" onClick={collapseAll}>
+            <ChevronsDownUp className="h-3.5 w-3.5" />
+            全部折叠
+          </Button>
+          <Button size="sm" variant="ghost" onClick={expandAll}>
+            <ChevronsUpDown className="h-3.5 w-3.5" />
+            全部展开
+          </Button>
+        </div>
+      )}
+
       <div className="relative min-h-0 flex-1">
         <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-y-auto px-4 py-4" data-testid="compare-rows">
           {rows.length === 0 ? (
@@ -260,6 +293,17 @@ export function CompareView({ group }: { group: CompareGroup }) {
                   mode={mode}
                   left={row.leftTurnId ? leftById.get(row.leftTurnId) : undefined}
                   right={row.rightTurnId ? rightById.get(row.rightTurnId) : undefined}
+                  leftFold={row.leftTurnId ? {
+                    ordinal: leftOrdinals.get(row.leftTurnId) ?? (ordinals[i] || 1),
+                    collapsed: collapsedTurns.has(`left:${row.leftTurnId}`),
+                    onToggle: () => toggleTurn('left', row.leftTurnId!),
+                  } : undefined}
+                  rightFold={row.rightTurnId ? {
+                    ordinal: rightOrdinals.get(row.rightTurnId) ?? (ordinals[i] || 1),
+                    collapsed: collapsedTurns.has(`right:${row.rightTurnId}`),
+                    onToggle: () => toggleTurn('right', row.rightTurnId!),
+                  } : undefined}
+                  baseline={baseline}
                   leftSessionId={group.left.session_id}
                   rightSessionId={group.right.session_id}
                   replayActive={replayActive}

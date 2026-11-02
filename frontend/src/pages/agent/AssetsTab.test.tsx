@@ -51,7 +51,7 @@ const asset = (kind: VersionAssetItem['kind'], name: string, over: Partial<Versi
 })
 
 const ITEMS_V2 = [
-  asset('skill', 'crawl-engine', { rev: 4, previous_rev: 3, changed_in_seq: 2, changed_in_version_id: 'ver_2' }),
+  asset('skill', 'crawl-engine', { rev: 4, previous_rev: 3, changed_in_seq: 2, changed_in_version_id: 'ver_2', description: '新版用途：整理虚构文本为分镜。' }),
   asset('mcp', 'search'),
   asset('kb_config', 'bot-knowledge-base'),
   asset('database', 'bot-database'),
@@ -63,7 +63,7 @@ const ITEMS_V2 = [
 function setup(kind: Agent['kind'], versions = [ver(2, ['prod']), ver(1)]) {
   const api = mockApi({
     'GET /api/v1/versions/ver_2/assets': { version: versions[0], items: ITEMS_V2 },
-    'GET /api/v1/versions/ver_1/assets': { version: ver(1), items: [asset('skill', 'crawl-engine', { rev: 3 })] },
+    'GET /api/v1/versions/ver_1/assets': { version: ver(1), items: [asset('skill', 'crawl-engine', { rev: 3, description: '旧版用途：整理虚构文本。' })] },
   })
   const onEditDraft = vi.fn()
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -88,6 +88,8 @@ describe('AssetsTab', () => {
     expect(within(skill).getByText('v2')).toBeInTheDocument()
     expect(within(skill).getByText('r3 → r4')).toBeInTheDocument()
     expect(within(skill).getByText('只读')).toBeInTheDocument()
+    expect(within(skill).getByRole('columnheader', { name: '描述' })).toBeInTheDocument()
+    expect(within(skill).getByText('新版用途：整理虚构文本为分镜。')).toBeInTheDocument()
     for (const key of ['prompt', 'mcp', 'knowledge', 'database', 'app_config', 'other']) {
       expect(screen.getByTestId(`asset-group-${key}`)).toBeInTheDocument()
     }
@@ -120,6 +122,7 @@ describe('AssetsTab', () => {
     const identity = screen.getByTestId('asset-identity')
     expect(identity).toHaveTextContent('crawl-engine')
     expect(identity).toHaveTextContent('ID sk_123')
+    expect(within(screen.getByTestId('asset-group-skill')).getByText('暂无描述')).toBeInTheDocument()
   })
 
   it('切换版本后显示该版本绑定的资产', async () => {
@@ -128,6 +131,8 @@ describe('AssetsTab', () => {
     await userEvent.selectOptions(screen.getByLabelText('选择版本'), 'ver_1')
     await waitFor(() => expect(screen.queryByTestId('asset-group-mcp')).not.toBeInTheDocument())
     expect(within(screen.getByTestId('asset-group-skill')).getByText('r3')).toBeInTheDocument()
+    expect(within(screen.getByTestId('asset-group-skill')).getByText('旧版用途：整理虚构文本。')).toBeInTheDocument()
+    expect(screen.queryByText('新版用途：整理虚构文本为分镜。')).not.toBeInTheDocument()
   })
 
   it('配置型 agent 保留编辑入口', async () => {

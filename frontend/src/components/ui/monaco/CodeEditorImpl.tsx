@@ -79,6 +79,8 @@ export default function CodeEditorImpl({
         automaticLayout: true,
         tabSize: 2,
         renderLineHighlight: readOnly ? 'none' : 'line',
+        // 提示词中的中文标点是正常文本，不显示“易混淆字符”的黄色边框。
+        unicodeHighlight: { ambiguousCharacters: false },
         scrollbar: { alwaysConsumeMouseWheel: false },
       }}
     />

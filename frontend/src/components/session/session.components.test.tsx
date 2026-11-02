@@ -135,6 +135,130 @@ describe('ChatPane', () => {
   })
 })
 
+describe('ChatPane：最终回复去重', () => {
+  const result = '{"outputType":"confirm","message":"订单已确认"}'
+  // 代码型 agent 在同一个 LLM 步骤中调用工具，随后同时记录模型响应和最终消息。
+  function events(finalContent = result) {
+    return [
+      mk('turn.start', { input: { role: 'user', content: '查订单' }, history_len: 0 }, { seq: 1 }),
+      mk('llm.request', { provider: 'fake', model: 'fake-model', params: {}, messages: [], tools: [] }, { seq: 2, step: 's1' }),
+      ...[0, 1, 2].flatMap((i) => [
+        mk('tool.call', { call_id: `c${i}`, name: `query_${i}`, arguments: { order_id: 'A001' } }, { seq: 3 + i * 2, step: `s${i + 2}`, parent: 's1' }),
+        mk('tool.result', { call_id: `c${i}`, name: `query_${i}`, output: { status: '已确认' }, is_error: false, latency_ms: 50, mocked: true }, { seq: 4 + i * 2, step: `s${i + 2}`, parent: 's1' }),
+      ]),
+      mk('llm.response', { content: result, tool_calls: [], finish_reason: 'stop', usage: { prompt_tokens: 20, completion_tokens: 5 }, cost: 0.001 }, { seq: 9, step: 's1' }),
+      mk('message.assistant', { message: { role: 'assistant', content: finalContent } }, { seq: 10 }),
+      mk('turn.end', { status: 'completed', output: { final: { role: 'assistant', content: finalContent }, messages: [] }, usage: { prompt_tokens: 20, completion_tokens: 5, llm_calls: 1, tool_calls: 3 }, cost: 0.001, latency_ms: 33948, ttft_ms: null }, { seq: 11 }),
+    ]
+  }
+
+  it('模型响应与最终消息相同时，正文在工具后展示一次，保留工具、Trace 与指标', async () => {
+    const s = buildSessionState(events())
+    const onSelectStep = vi.fn()
+    render(wrap(<>
+      <ChatPane turns={s.turns} onSelectStep={onSelectStep} />
+      <TraceViewer steps={s.turns[0].steps} />
+    </>))
+    const chat = screen.getByTestId('chat-pane')
+    expect(within(chat).getAllByText(result)).toHaveLength(1)
+    const messages = within(chat).getAllByTestId('assistant-message')
+    expect(within(messages[0]).queryByText(result)).not.toBeInTheDocument()
+    expect(messages[1]).toHaveAttribute('data-final', 'true')
+    const cards = within(messages[0]).getAllByTestId('tool-card')
+    expect(cards).toHaveLength(3)
+    await userEvent.click(within(cards[0]).getByRole('button', { name: /query_0/ }))
+    expect(within(cards[0]).getByText('参数')).toBeInTheDocument()
+    expect(cards[0]).toHaveTextContent('已确认')
+    expect(onSelectStep).toHaveBeenCalledWith('trn_1', 's2')
+    expect(screen.getByTestId('turn-metrics')).toHaveTextContent('LLM ×1')
+    expect(screen.getByTestId('turn-metrics').querySelector('[data-metric="tool_calls"]')).toHaveTextContent('×3')
+    expect(screen.getByTestId('turn-metrics').querySelector('[data-metric="latency"]')).toHaveTextContent('33.9s')
+    expect(screen.getByTestId('turn-metrics')).toHaveTextContent('¥0.0010')
+    expect(s.turns[0].messages.map((m) => m.content)).toEqual([result, result])
+    expect(s.turns[0].events).toHaveLength(11)
+    await userEvent.click(screen.getAllByTestId('trace-row').find((r) => r.dataset.step === 's1')!)
+    await userEvent.click(within(screen.getByTestId('step-detail')).getByRole('tab', { name: '响应' }))
+    expect(screen.getByTestId('step-payload')).toHaveAttribute('data-event', 'llm.response')
+    expect(screen.getByTestId('step-payload')).toHaveTextContent('outputType')
+  })
+
+  it('实时响应到最终消息再到轮次结束，正文始终显示一次', () => {
+    const evs = events()
+    const { rerender } = render(wrap(<ChatPane turns={buildSessionState(evs.slice(0, 9)).turns} />))
+    expect(screen.getAllByText(result)).toHaveLength(1)
+    rerender(wrap(<ChatPane turns={buildSessionState(evs.slice(0, 10)).turns} />))
+    expect(screen.getAllByText(result)).toHaveLength(1)
+    rerender(wrap(<ChatPane turns={buildSessionState(evs).turns} />))
+    expect(screen.getAllByText(result)).toHaveLength(1)
+    expect(screen.getAllByTestId('tool-card')).toHaveLength(3)
+  })
+
+  it('缺少最终消息事件时，turn.end 补出的相同正文也只展示一次', () => {
+    const s = buildSessionState(events().filter((e) => e.type !== 'message.assistant'))
+    render(wrap(<ChatPane turns={s.turns} />))
+    expect(screen.getAllByText(result)).toHaveLength(1)
+    expect(screen.getAllByTestId('tool-card')).toHaveLength(3)
+  })
+
+  it.each(['最终结果不同', `${result} `])('不同的正文不隐藏（%s）', (finalContent) => {
+    const s = buildSessionState(events(finalContent))
+    const { container } = render(wrap(<ChatPane turns={s.turns} />))
+    const texts = [...container.querySelectorAll('.md-body')].map((e) => e.textContent)
+    expect(texts).toHaveLength(2)
+    expect(texts[0]).toBe(result)
+    expect(texts[1]).toBe(finalContent.trimEnd())
+  })
+
+  it('独立模型步骤的相同输出保留，仅合并紧邻最终消息的镜像', () => {
+    const evs = events()
+    const second = [
+      mk('llm.request', { provider: 'fake', model: 'fake-model', params: {}, messages: [], tools: [] }, { step: 's5' }),
+      mk('tool.call', { call_id: 'c3', name: 'query_3', arguments: {} }, { step: 's6', parent: 's5' }),
+      mk('tool.result', { call_id: 'c3', name: 'query_3', output: 'ok', is_error: false }, { step: 's6', parent: 's5' }),
+      mk('llm.response', { content: result, tool_calls: [], finish_reason: 'stop' }, { step: 's5' }),
+    ]
+    const s = buildSessionState([...evs.slice(0, 9), ...second, ...evs.slice(9)].map((e, i) => ({ ...e, seq: i + 1 })))
+    render(wrap(<ChatPane turns={s.turns} />))
+    expect(screen.getAllByText(result)).toHaveLength(2)
+    expect(screen.getAllByTestId('tool-card')).toHaveLength(4)
+  })
+
+  it('最终正文是尚未加载的 blob 时，保留模型正文及加载入口', () => {
+    const s = buildSessionState(events().map((e) => e.type === 'message.assistant'
+      ? mk('message.assistant', { $blob: 'a'.repeat(64) }, { seq: e.seq })
+      : e))
+    render(wrap(<ChatPane turns={s.turns} sessionId="ses_1" />))
+    expect(screen.getByText(result)).toBeInTheDocument()
+    expect(screen.getByTestId('load-blob')).toBeInTheDocument()
+  })
+
+  it('模型正文的 blob 尚未加载时，不凭占位内容隐藏加载入口', () => {
+    const s = buildSessionState(events())
+    s.turns[0].messages[0].contentBlob = 'b'.repeat(64)
+    render(wrap(<ChatPane turns={s.turns} sessionId="ses_1" />))
+    expect(screen.getAllByText(result)).toHaveLength(2)
+    expect(screen.getByTestId('load-blob')).toBeInTheDocument()
+  })
+
+  it('模型正文 blob 加载后确认与最终消息相同，才隐藏镜像正文', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ content: result }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const s = buildSessionState(events())
+      s.turns[0].messages[0].contentBlob = 'c'.repeat(64)
+      render(wrap(<ChatPane turns={s.turns} sessionId="ses_1" />))
+      expect(screen.getAllByText(result)).toHaveLength(2)
+      await userEvent.click(screen.getByTestId('load-blob'))
+      await waitFor(() => expect(screen.getAllByText(result)).toHaveLength(1))
+      expect(screen.getAllByTestId('tool-card')).toHaveLength(3)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
 describe('ChatPane：边界情况', () => {
   it('用户输入被转存为 blob：显示加载按钮，加载后显示内容', async () => {
     const fetchMock = vi.fn().mockResolvedValue(

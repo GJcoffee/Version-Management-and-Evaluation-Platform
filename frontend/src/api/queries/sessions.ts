@@ -9,6 +9,7 @@ import type {
   Turn,
   TurnAccepted,
   TurnCreate,
+  ArtifactCandidates,
 } from '../types'
 
 export const sessionKeys = {
@@ -107,6 +108,25 @@ export function useCancelTurn() {
   return useMutation({
     mutationFn: (turnId: string) => cancelTurn(turnId),
     onSettled: () => qc.invalidateQueries({ queryKey: sessionKeys.all }),
+  })
+}
+
+export function useTurn(turnId: string | undefined, enabled = true) {
+  return useQuery({
+    queryKey: ['turn', turnId],
+    queryFn: () => api.get<Turn>(`/turns/${turnId}`),
+    enabled: !!turnId && enabled,
+    refetchInterval: (query) => query.state.data?.status === 'running' ? 500 : false,
+  })
+}
+
+export function useArtifactCandidates(sessionId: string | undefined, sourceId: string | undefined, pointer: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ['artifact-candidates', sessionId, sourceId, pointer],
+    queryFn: () => api.get<ArtifactCandidates>(`/sessions/${sessionId}/turns/${sourceId}/artifact-candidates`,
+      { query: { url_pointer: pointer || undefined } }),
+    enabled: !!sessionId && !!sourceId && enabled,
+    retry: false,
   })
 }
 

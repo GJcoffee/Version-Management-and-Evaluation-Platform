@@ -86,6 +86,15 @@ def build_adapter(version: ResolvedVersion, app: AppContext) -> AgentAdapter:
     from evalp.runtime.adapters.http_adapter import HttpAdapter
     from evalp.runtime.adapters.subprocess_adapter import SubprocessAdapter
 
+    binding = (
+        version.adapter_snapshot.get("binding") if version.adapter_snapshot is not None
+        else version.spec.get("adapter")
+    )
+    if binding:
+        from evalp.runtime.adapters.hiagent_adapter import HiAgentAdapter
+        from evalp.runtime.adapters.registry import validate_binding
+
+        return HiAgentAdapter(validate_binding(binding), app)
     spec = version.spec_model()
     if isinstance(spec, ConfigSpec):
         return ConfigAdapter(spec, app)

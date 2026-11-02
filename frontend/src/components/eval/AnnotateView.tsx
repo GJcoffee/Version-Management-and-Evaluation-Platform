@@ -10,6 +10,7 @@ import { Input, Textarea } from '@/components/ui/Input'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { formatApiError } from '@/lib/apiError'
 import { cn } from '@/lib/cn'
+import { formatDatasetValue } from '@/lib/format'
 import { safeGet, safeSet } from '@/lib/safeStorage'
 import { toast } from '@/stores/toast'
 import { MediaText } from '@/components/session'
@@ -321,8 +322,8 @@ export function AnnotateView({ run }: { run: EvalRunDetailOut }) {
                 <Block title="输出" testId="annotate-output">
                   <AnnotateOutput text={detail.data?.output ?? current.output_preview} />
                 </Block>
-                {current.expected && <Block title="期望">{current.expected}</Block>}
-                {detail.data?.case_detail?.rubric && <Block title="评分标准 rubric">{detail.data.case_detail.rubric}</Block>}
+                {current.expected != null && <Block title="期望">{formatDatasetValue(current.expected, true)}</Block>}
+                {detail.data?.case_detail?.rubric != null && <Block title="评分标准 rubric">{formatDatasetValue(detail.data.case_detail.rubric, true)}</Block>}
                 <section className="space-y-1.5">
                   <h3 className="text-xs font-semibold text-muted-foreground">执行轨迹（含工具调用）</h3>
                   <div className="h-[24rem] overflow-hidden rounded-md border border-border" data-testid="annotate-trace">

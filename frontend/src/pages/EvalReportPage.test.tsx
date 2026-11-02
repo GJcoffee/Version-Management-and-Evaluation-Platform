@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EvalRunDetailOut, EvalStatsOut } from '@/api/evalTypes'
 import { initialEvalStreamState, type EvalStreamState } from '@/components/eval/useEvalStream'
+import { toast } from '@/stores/toast'
 import { mockApi } from '@/test/mockApi'
 import EvalReportPage from './EvalReportPage'
 
@@ -28,7 +29,11 @@ beforeEach(() => {
   streamState = initialEvalStreamState
   reopen.mockClear()
 })
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.clearAllMocks()
+  vi.unstubAllGlobals()
+})
 
 const stats = (over: Partial<EvalStatsOut> = {}): EvalStatsOut => ({
   cases: 10,
@@ -205,5 +210,67 @@ describe('EvalReportPage：人工评审入口', () => {
     await screen.findByTestId('eval-report')
     expect(screen.queryByTestId('open-annotate')).not.toBeInTheDocument()
     expect(screen.queryByTestId('pending-human')).not.toBeInTheDocument()
+  })
+})
+
+describe('EvalReportPage：导出', () => {
+  it('从报告页下载 CSV，导出请求忽略当前筛选', async () => {
+    const create = vi.fn(() => 'blob:eval')
+    vi.stubGlobal('URL', Object.assign(class extends URL {}, { createObjectURL: create, revokeObjectURL: vi.fn() }))
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const api = setup(run(), { 'GET /api/v1/evals/evr_1/items': { items: [], next_cursor: null } })
+    await userEvent.click(await screen.findByTestId('show-flaky'))
+    await userEvent.click(screen.getByTestId('tag-row-p1'))
+    await userEvent.click(screen.getByTestId('export-eval'))
+    expect(screen.getByRole('dialog')).toHaveTextContent('不受当前筛选和分页影响')
+    await userEvent.click(screen.getByTestId('export-eval-csv'))
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(api.find('GET', /\/items\?/)[0].url).toBe('/api/v1/evals/evr_1/items?limit=200')
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('读取失败显示错误并恢复按钮，可以重试', async () => {
+    setup(run(), {
+      'GET /api/v1/evals/evr_1/items': { __status: 500, body: { error: { code: 'EXPORT_FAILED', message: '读取失败' } } },
+    })
+    await userEvent.click(await screen.findByTestId('export-eval'))
+    await userEvent.click(screen.getByTestId('export-eval-json'))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('导出失败', { description: '读取失败' }))
+    expect(screen.getByTestId('export-eval-json')).toBeEnabled()
+    expect(screen.getByTestId('export-eval-csv')).toBeEnabled()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('运行中的评测允许导出，并说明最终结果需结束后导出', async () => {
+    setup(run({ status: 'running', stats: null, finished_at: null }))
+    await userEvent.click(await screen.findByTestId('export-eval'))
+    expect(screen.getByRole('dialog')).toHaveTextContent('最终结果请在结束后导出')
+    expect(screen.getByTestId('export-eval-json')).toBeEnabled()
+  })
+
+  it('取消正在读取的导出会中止请求，重新打开后可以再次选择格式', async () => {
+    const api = setup(run())
+    let signal: AbortSignal | null | undefined
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/items?')) {
+        signal = init?.signal
+        return new Promise<Response>((_, reject) => {
+          signal?.addEventListener('abort', () => reject(new DOMException('取消', 'AbortError')), { once: true })
+        })
+      }
+      return api.fetchMock(input, init)
+    }))
+    await userEvent.click(await screen.findByTestId('export-eval'))
+    await userEvent.click(screen.getByTestId('export-eval-json'))
+    expect(await screen.findByText(/正在读取完整结果/)).toHaveTextContent('0 / 30')
+    await waitFor(() => expect(signal).toBeDefined())
+    await userEvent.click(screen.getByRole('button', { name: '取消导出' }))
+    expect(signal?.aborted).toBe(true)
+    expect(toast.error).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    await userEvent.click(screen.getByTestId('export-eval'))
+    expect(screen.getByTestId('export-eval-csv')).toBeEnabled()
+    expect(screen.queryByRole('status')).toBeNull()
   })
 })

@@ -1,6 +1,6 @@
 import DiffMatchPatch from 'diff-match-patch'
-import type { AlignFork, AlignTurn, Alignment, CompareMode, ReplayMode } from '@/api/compareTypes'
-import { highlightKey, type TurnState } from '@/components/session'
+import type { AlignFork, AlignTurn, Alignment, CompareGroup, CompareMode, ReplayMode } from '@/api/compareTypes'
+import { highlightKey, turnTiming, turnTtftMs, type TurnState } from '@/components/session'
 
 // ───────────────────────────── 行模型 ─────────────────────────────
 
@@ -186,6 +186,20 @@ export function describeArgsDiff(t: AlignTurn): string[] {
 
 // ───────────────────────────── 指标对照 ─────────────────────────────
 
+export interface ComparisonBaseline {
+  label: string
+  targetLabel: string
+}
+
+/** 左侧始终是基线，版本号只用于展示标签。 */
+export function comparisonBaseline(group: Pick<CompareGroup, 'left' | 'right'>): ComparisonBaseline {
+  const label = (key: 'left' | 'right') => {
+    const seq = group[key].version_seq
+    return seq !== null && seq !== undefined ? `v${seq}` : key === 'left' ? '左侧' : '右侧'
+  }
+  return { label: label('left'), targetLabel: label('right') }
+}
+
 export type MetricKey = 'latency' | 'ttft' | 'tokens' | 'cost' | 'llm_calls' | 'tool_calls'
 
 export interface MetricDef {
@@ -204,14 +218,14 @@ export const METRICS: MetricDef[] = [
   { key: 'tool_calls', label: '工具调用', lowerIsBetter: false },
 ]
 
-export function metricValue(t: TurnState | undefined, key: MetricKey): number | null {
+export function metricValue(t: TurnState | undefined, key: MetricKey, now?: number): number | null {
   if (!t) return null
   const m = t.metrics
   switch (key) {
     case 'latency':
-      return m.latencyMs
+      return turnTiming(t, now).durationMs
     case 'ttft':
-      return m.ttftMs
+      return turnTtftMs(t)
     case 'tokens':
       return m.totalTokens
     case 'cost':
@@ -226,18 +240,18 @@ export function metricValue(t: TurnState | undefined, key: MetricKey): number | 
 export type Trend = 'better' | 'worse' | 'neutral' | 'same'
 
 export interface MetricDelta {
-  /** right - left */
+  /** 对比版本 - 基线 */
   delta: number
-  /** 相对左侧的变化比例；左侧为 0 时为 null */
+  /** 相对基线的变化比例；基线为 0 时为 null */
   ratio: number | null
   trend: Trend
 }
 
-/** 右侧相对左侧的差值与趋势：任一侧缺失返回 null */
-export function metricDelta(left: number | null, right: number | null, lowerIsBetter: boolean): MetricDelta | null {
-  if (left === null || right === null) return null
-  const delta = right - left
-  const ratio = left !== 0 ? delta / Math.abs(left) : null
+/** 对比版本相对基线的差值与趋势：任一侧缺失返回 null。 */
+export function metricDelta(baseline: number | null, target: number | null, lowerIsBetter: boolean): MetricDelta | null {
+  if (baseline === null || target === null) return null
+  const delta = target - baseline
+  const ratio = baseline !== 0 ? delta / Math.abs(baseline) : null
   if (Math.abs(delta) < 1e-12) return { delta: 0, ratio: 0, trend: 'same' }
   if (!lowerIsBetter) return { delta, ratio, trend: 'neutral' }
   return { delta, ratio, trend: delta < 0 ? 'better' : 'worse' }

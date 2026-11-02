@@ -18,11 +18,37 @@ export function JsonViewer({ value, defaultExpandDepth = 1, className }: JsonVie
   )
 }
 
+function StringValue({ value }: { value: string }) {
+  const readable = value.length > 160 || /[\r\n]/.test(value)
+  const [raw, setRaw] = useState(readable)
+  if (!readable) return <span className="whitespace-pre-wrap break-all text-success">{JSON.stringify(value)}</span>
+  return (
+    <span className="inline-block max-w-full align-top">
+      <span className="mb-1 flex gap-1 font-sans" role="group" aria-label="字符串显示方式">
+        {([true, false] as const).map((mode) => (
+          <button
+            key={String(mode)}
+            type="button"
+            aria-pressed={raw === mode}
+            className={cn('rounded px-1.5 text-[10px]', raw === mode ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent')}
+            onClick={() => setRaw(mode)}
+          >
+            {mode ? '原文' : 'JSON'}
+          </button>
+        ))}
+      </span>
+      <span className="block whitespace-pre-wrap break-words text-success" data-string-view={raw ? 'raw' : 'json'}>
+        {raw ? value : JSON.stringify(value)}
+      </span>
+    </span>
+  )
+}
+
 function Primitive({ value }: { value: unknown }) {
   if (value === null) return <span className="text-muted-foreground">null</span>
   switch (typeof value) {
     case 'string':
-      return <span className="whitespace-pre-wrap break-all text-success">{JSON.stringify(value)}</span>
+      return <StringValue value={value} />
     case 'number':
       return <span className="text-primary">{String(value)}</span>
     case 'boolean':

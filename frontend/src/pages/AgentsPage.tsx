@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import type { AdapterBinding } from '@/api/queries/adapters'
+import { AdapterBindingFields } from '@/components/AdapterBindingFields'
 import { Link, useNavigate } from 'react-router-dom'
 import { Archive, ArchiveRestore, Bot, Plus, Search } from 'lucide-react'
 import { ApiError } from '@/api/client'
@@ -208,6 +210,7 @@ function CreateAgentDialogInner({ onOpenChange }: { onOpenChange: (v: boolean) =
   const [name, setName] = useState('')
   const [kind, setKind] = useState<AgentKind>('config')
   const [description, setDescription] = useState('')
+  const [binding, setBinding] = useState<AdapterBinding | null>(null)
   const [touched, setTouched] = useState(false)
 
   const nameError = !name.trim() ? '请填写名称' : !AGENT_NAME_RE.test(name.trim()) ? '只能包含字母（含中文）、数字、_ . -，最长 64，不能有空格和冒号' : null
@@ -216,7 +219,10 @@ function CreateAgentDialogInner({ onOpenChange }: { onOpenChange: (v: boolean) =
     setTouched(true)
     if (nameError) return
     try {
-      const r = await create.mutateAsync({ name: name.trim(), kind, description: description.trim() || undefined })
+      const r = await create.mutateAsync({
+        name: name.trim(), kind: binding ? 'code' : kind, description: description.trim() || undefined,
+        spec: binding ? { kind: 'code', transport: 'adapter', adapter: binding, source: { capture_git: false } } : undefined,
+      })
       toast.success(`已创建 ${r.agent.name}`)
       onOpenChange(false)
       navigate(`/agents/${r.agent.id}/draft/${r.draft.id}`)
@@ -261,6 +267,7 @@ function CreateAgentDialogInner({ onOpenChange }: { onOpenChange: (v: boolean) =
         <Field label="描述" htmlFor="ag-desc">
           <Textarea id="ag-desc" rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
+        <AdapterBindingFields value={binding} onChange={setBinding} />
         <button type="submit" className="hidden" />
       </form>
     </Dialog>

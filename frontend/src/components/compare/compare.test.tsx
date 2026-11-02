@@ -1,19 +1,22 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { AlignTurn, Alignment } from '@/api/compareTypes'
-import { buildSessionState } from '@/components/session'
-import { toolTurnEvents } from '@/components/session/testEvents'
+import { buildSessionState, totalMetrics, TurnMetricsBar } from '@/components/session'
+import { T0, recordedTurnEvents, toolTurnEvents } from '@/components/session/testEvents'
 import { AlignmentPanel } from './AlignmentPanel'
 import { CompareRowView } from './CompareRowView'
+import { MetricsCompare } from './MetricsCompare'
 import {
   alignmentHighlights,
   buildRows,
   charDiff,
+  comparisonBaseline,
   describeArgsDiff,
   metricDelta,
+  metricValue,
   rowHighlights,
   summarizeSteps,
 } from './compareUtils'
@@ -138,6 +141,98 @@ describe('metricDelta', () => {
     expect(metricDelta(1, 2, false)?.trend).toBe('neutral')
     expect(metricDelta(3, 3, true)?.trend).toBe('same')
     expect(metricDelta(null, 3, true)).toBeNull()
+  })
+})
+
+describe('左侧对比基线', () => {
+  const side = (seq: number | null) => ({
+    version_seq: seq, version_id: `ver_${seq}`, session_id: `ses_${seq}`, agent_name: 'bot',
+  })
+
+  it('版本号只作标签，不会因为 v1 在右侧就改变基线', () => {
+    expect(comparisonBaseline({ left: side(5), right: side(1) })).toEqual({ label: 'v5', targetLabel: 'v1' })
+    expect(comparisonBaseline({ left: side(1), right: side(5) })).toEqual({ label: 'v1', targetLabel: 'v5' })
+    expect(comparisonBaseline({ left: side(null), right: side(1) })).toEqual({ label: '左侧', targetLabel: 'v1' })
+  })
+
+  it('任意版本和同版本均保持左侧基线，未知版本不显示无效版本号', () => {
+    expect(comparisonBaseline({ left: side(5), right: side(9) })).toEqual({ label: 'v5', targetLabel: 'v9' })
+    expect(comparisonBaseline({ left: side(1), right: side(1) })).toEqual({ label: 'v1', targetLabel: 'v1' })
+    expect(comparisonBaseline({ left: side(null), right: side(null) })).toEqual({ label: '左侧', targetLabel: '右侧' })
+  })
+})
+
+describe('MetricsCompare 的时间口径', () => {
+  it('按左侧基线的原始耗时计算节省时间，未知 TTFT 不生成差值', () => {
+    const live = buildSessionState(toolTurnEvents()).turns[0]
+    const left = { ...live, metrics: { ...live.metrics, latencyMs: 44_170, ttftMs: 38_672,
+      promptTokens: 115_281, completionTokens: 2589, totalTokens: 117_870, llmCalls: 1, toolCalls: 8 } }
+    const events = recordedTurnEvents('trn_R').map((e) => e.type === 'turn.end'
+      ? { ...e, payload: { ...e.payload, latency_ms: 697, ttft_ms: 602,
+        usage: { prompt_tokens: 270_074, completion_tokens: 5808, llm_calls: 11, tool_calls: 15 } } }
+      : e)
+    const right = buildSessionState(events).turns[0]
+    const before = JSON.stringify(right)
+    render(<><TurnMetricsBar turn={right} testId="right-metrics" /><MetricsCompare
+      left={right}
+      right={left}
+      baseline={{ label: 'v1', targetLabel: 'v5' }}
+    /></>)
+    const cmp = screen.getByTestId('metrics-compare')
+    expect(cmp).toHaveAttribute('data-baseline', 'left')
+    expect(within(cmp).getByTestId('metric-baseline')).toHaveTextContent('相对 v1 基线 · v1 → v5')
+    const duration = cmp.querySelector('[data-metric="latency"]')!
+    expect(duration.querySelector('[data-role="baseline"]')).toHaveTextContent('1m11s')
+    expect(duration.querySelector('[data-role="target"]')).toHaveTextContent('44.2s')
+    expect(duration).toHaveAttribute('data-trend', 'better')
+    expect(within(duration as HTMLElement).getByTestId('metric-delta')).toHaveTextContent('减少27.1s (38%)')
+    const ttft = cmp.querySelector('[data-metric="ttft"]')!
+    expect(ttft.querySelector('[data-role="target"]')).toHaveTextContent('38.7s')
+    expect(ttft.querySelector('[data-role="baseline"]')).toHaveTextContent('-')
+    expect(ttft.querySelector('[data-testid="metric-delta"]')).toBeNull()
+    expect(cmp.querySelector('[data-metric="tokens"] [data-testid="metric-delta"]')).toHaveTextContent('-158k (-57%)')
+    expect(cmp.querySelector('[data-metric="llm_calls"] [data-testid="metric-delta"]')).toHaveTextContent('-10')
+    expect(cmp.querySelector('[data-metric="tool_calls"] [data-testid="metric-delta"]')).toHaveTextContent('-7')
+    const bar = screen.getByTestId('right-metrics')
+    expect(bar.querySelector('[data-metric="latency"]')).toHaveTextContent('1m11s')
+    expect(bar.querySelector('[data-metric="ttft"]')).toHaveTextContent('-')
+    expect(metricValue(right, 'latency')).toBe(totalMetrics([right]).latencyMs)
+    expect(metricValue(right, 'tokens')).toBe(275_882)
+    expect(metricValue(right, 'llm_calls')).toBe(11)
+    expect(metricValue(right, 'tool_calls')).toBe(15)
+    expect(right.metrics.latencyMs).toBe(697)
+    expect(right.metrics.ttftMs).toBe(602)
+    expect(JSON.stringify(right)).toBe(before)
+  })
+
+  it('比基线更慢时显示增加时间，基线为零时不计算百分比', () => {
+    const turn = buildSessionState(toolTurnEvents()).turns[0]
+    const base = { ...turn, metrics: { ...turn.metrics, latencyMs: 0 } }
+    render(<MetricsCompare left={base} right={turn} baseline={{ label: 'v1', targetLabel: 'v2' }} />)
+    const duration = screen.getByTestId('metrics-compare').querySelector('[data-metric="latency"]')!
+    expect(duration).toHaveAttribute('data-trend', 'worse')
+    expect(within(duration as HTMLElement).getByTestId('metric-delta')).toHaveTextContent('增加575ms')
+    expect(within(duration as HTMLElement).getByTestId('metric-delta')).not.toHaveTextContent('%')
+  })
+
+  it('运行中耗时持续累计，双侧完成前不计算趋势', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(T0 + 1000)
+    const running = buildSessionState(toolTurnEvents().slice(0, 4)).turns[0]
+    const done = buildSessionState(toolTurnEvents()).turns[0]
+    const { unmount } = render(<MetricsCompare left={done} right={running} />)
+    try {
+      const cmp = screen.getByTestId('metrics-compare')
+      const duration = cmp.querySelector('[data-metric="latency"]')!
+      expect(duration.querySelector('[data-side="right"]')).toHaveTextContent('1.0s')
+      act(() => vi.advanceTimersByTime(1000))
+      expect(duration.querySelector('[data-side="right"]')).toHaveTextContent('2.0s')
+      expect(cmp.querySelector('[data-testid="metric-delta"]')).toBeNull()
+      expect(metricValue({ ...done, metrics: { ...done.metrics, latencyMs: 0 } }, 'latency')).toBe(0)
+    } finally {
+      unmount()
+      vi.useRealTimers()
+    }
   })
 })
 

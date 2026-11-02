@@ -28,6 +28,9 @@ EventType = Literal[
     "turn.start",
     "llm.request",
     "llm.delta",
+    "llm.reasoning",
+    "metrics",
+    "source.raw",
     "llm.response",
     "tool.call",
     "tool.result",
@@ -75,8 +78,8 @@ class LlmDeltaPayload(_Payload):
 
 
 class UsagePayload(_Payload):
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
     estimated: bool = False
 
 
@@ -144,6 +147,9 @@ PAYLOAD_MODELS: dict[str, type[_Payload]] = {
     "turn.start": TurnStartPayload,
     "llm.request": LlmRequestPayload,
     "llm.delta": LlmDeltaPayload,
+    "llm.reasoning": LlmDeltaPayload,
+    "metrics": _Payload,
+    "source.raw": _Payload,
     "llm.response": LlmResponsePayload,
     "tool.call": ToolCallPayload,
     "tool.result": ToolResultPayload,

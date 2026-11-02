@@ -17,7 +17,7 @@ from evalp.runtime.messages import Message, ToolCall
 def test_persisted_types_exclude_only_delta():
     assert "llm.delta" not in PERSISTED_TYPES
     assert PERSISTED_TYPES == ALL_TYPES - {"llm.delta"}
-    assert len(ALL_TYPES) == 12
+    assert len(ALL_TYPES) == 15
 
 
 def test_ev_turn_start_serializes_message():
@@ -67,6 +67,9 @@ def test_ev_all_types_roundtrip():
         ev("message.assistant", message=msg),
         ev("error", code="TIMEOUT", message="超时", retriable=True),
         ev("turn.end", status="completed", output={"final": {}}, usage={}, cost=0.0, latency_ms=1, ttft_ms=1),
+        ev("llm.reasoning", step_id="s1", text="上游思考"),
+        ev("metrics", scope="turn", observation_status="partial"),
+        ev("source.raw", source="test", frame={"event": "message"}),
     ]
     assert {e.type for e in events} | {"turn.start", "tool.call", "llm.delta"} == set(ALL_TYPES)
     resp = events[1].payload

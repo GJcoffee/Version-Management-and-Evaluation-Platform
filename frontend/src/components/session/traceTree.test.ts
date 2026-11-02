@@ -8,7 +8,7 @@ import {
   walkTree,
   type TraceNode,
 } from './traceTree'
-import { T0, mk, toolTurnEvents } from './testEvents'
+import { T0, mk, recordedTurnEvents, toolTurnEvents } from './testEvents'
 
 const events = toolTurnEvents()
 
@@ -110,6 +110,45 @@ describe('flattenTree：折叠、筛选与搜索', () => {
     const tool = roots[0].children[0]
     expect(nodeMatches(tool, { query: '已发货' })).toBe(true)
     expect(nodeMatches(tool, { query: 'query_order', kinds: new Set(['llm']) })).toBe(false)
+  })
+})
+
+describe('录制 Trace 原始时间轴', () => {
+  it('Span 使用原始起止时间，LLM 大 payload 从原始子 Span 恢复，最终回复位于原始结束', () => {
+    const events = recordedTurnEvents()
+    const roots = buildStepTree(events)
+    const list: TraceNode[] = []
+    walkTree(roots, (node) => list.push(node))
+    const origin = T0 - 86_400_000
+    expect(list.find((node) => node.id === 'root')).toMatchObject({
+      startMs: origin, endMs: origin + 71_760, durationMs: 71_760,
+    })
+    expect(list.find((node) => node.id === 'http')).toMatchObject({
+      startMs: origin + 1010, endMs: origin + 5900, durationMs: 4890,
+    })
+    expect(list.find((node) => node.id === 's1')).toMatchObject({
+      startMs: origin + 1010, endMs: origin + 6010, durationMs: 5000,
+    })
+    expect(list.find((node) => node.kind === 'final')?.startMs).toBe(origin + 71_235)
+    const timeline = computeTimeline(list, { originMs: origin, endMs: origin + 71_235 })
+    expect(timeline.totalMs).toBe(71_760)
+    expect(timeline.bars.get('http')?.offsetMs).toBe(1010)
+    expect(events[3].ts).toBe(new Date(T0 + 200).toISOString())
+  })
+
+  it('原始 attrs 覆盖回放时间，未标记录制来源的 Trace 不改变', () => {
+    const attrs = { original_started_at: new Date(T0 - 10_000).toISOString(),
+      original_ended_at: new Date(T0 - 5_000).toISOString() }
+    const events = [
+      mk('llm.request', { model: 'm', original_attrs: attrs }, { seq: 2, step: 's1' }),
+      mk('llm.response', { latency_ms: 5000, original_attrs: attrs }, { seq: 3, step: 's1', at: 600 }),
+    ]
+    expect(buildStepTree(events)[0].startMs).toBe(T0)
+    const source = mk('log', { source_mode: 'recorded', original_started_at: attrs.original_started_at,
+      original_ended_at: attrs.original_ended_at, original_latency_ms: 5000 }, { seq: 1 })
+    expect(buildStepTree([source, ...events]).find((node) => node.id === 's1')).toMatchObject({
+      startMs: T0 - 10_000, endMs: T0 - 5_000, durationMs: 5000,
+    })
   })
 })
 

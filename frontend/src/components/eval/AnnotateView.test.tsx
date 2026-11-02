@@ -97,6 +97,29 @@ function setup(r = run(), items = [item('evi_1', 'c001'), item('evi_2', 'c002')]
 }
 
 describe('AnnotateView', () => {
+  it('JSON expected 和 rubric 在人工评审中完整显示', async () => {
+    const expected = { outputType: 'confirm' }
+    const rubric = [{ criterion: '准确' }]
+    const api = mockApi({
+      'GET /api/v1/evals/evr_1/items': { items: [item('evi_1', 'c001', { expected })], next_cursor: null },
+      'GET /api/v1/evals/evr_1/items/evi_1': {
+        ...detail('evi_1', 'c001'), expected, case_detail: { input: { turns: ['测试问题'] }, rubric },
+      },
+    })
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <AnnotateView run={run()} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    await screen.findByTestId('annotate-case')
+    await waitFor(() => expect(screen.getByTestId('annotate-input')).toHaveTextContent('测试问题'))
+    expect(screen.getByText('期望').parentElement?.querySelector('div')?.textContent).toBe(JSON.stringify(expected, null, 2))
+    expect(screen.getByText('评分标准 rubric').parentElement?.querySelector('div')?.textContent).toBe(JSON.stringify(rubric, null, 2))
+    expect(api.calls.every((c) => c.method === 'GET')).toBe(true)
+  })
+
   it('显示当前用例的输入 / 输出 / 评分标准 / 轨迹，以及进度', async () => {
     const api = setup()
     expect(await screen.findByTestId('annotate-case')).toHaveTextContent('c001')

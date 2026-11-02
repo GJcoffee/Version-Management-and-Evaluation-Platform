@@ -104,6 +104,7 @@ class UploadOut(BaseModel):
 
 class SkillUploadOut(UploadOut):
     display_name: str
+    description: str | None = None
     suggested_name: str
     file_count: int
 

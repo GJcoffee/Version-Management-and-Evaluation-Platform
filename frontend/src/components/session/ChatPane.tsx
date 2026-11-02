@@ -11,6 +11,7 @@ import type { Message, TurnStatus } from '@/api/types'
 import { isHighlighted, messageText, turnInputSummary, type AssistantMessageView, type TurnState } from './sessionState'
 import { ToolCallCard } from './ToolCallCard'
 import { TurnMetricsBar } from './TurnMetricsBar'
+import { MiddlewareTurnDetails } from './MiddlewareTurnDetails'
 
 /** 轮次数超过该值时启用虚拟滚动（几百轮的长会话）；短会话保持完整渲染，行为与以前完全一致 */
 export const VIRTUALIZE_THRESHOLD = 60
@@ -289,7 +290,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatP
 
 export interface TurnViewProps {
   turn: TurnState
-  /** 传入后在顶部显示可折叠的标题行；不传（例如双栏对比里）则不显示标题行、也不可折叠 */
+  /** 传入后在顶部显示可折叠的标题行；会话页和双栏对比共用。 */
   fold?: TurnFold
   sessionId?: string
   selected?: boolean
@@ -367,11 +368,15 @@ export function TurnView({ turn, fold, sessionId, selected, onSelectTurn, onOpen
       {!fold?.collapsed && (
         <>
           <UserMessage turn={turn} sessionId={sessionId} />
+          {turn.middlewareSnapshot && (
+            <MiddlewareTurnDetails turnId={turn.id} sessionId={sessionId} initial={turn.middlewareSnapshot} />
+          )}
 
-          {turn.messages.map((m) => (
+          {turn.messages.map((m, i) => (
             <AssistantMessage
               key={m.key}
               message={m}
+              nextMessage={turn.messages[i + 1]}
               turn={turn}
               sessionId={sessionId}
               highlightSteps={highlightSteps}
@@ -449,12 +454,14 @@ function Avatar({ icon }: { icon: ReactNode }) {
 
 function AssistantMessage({
   message: m,
+  nextMessage,
   turn,
   sessionId,
   highlightSteps,
   onSelectStep,
 }: {
   message: AssistantMessageView
+  nextMessage?: AssistantMessageView
   turn: TurnState
   sessionId?: string
   highlightSteps?: ReadonlySet<string>
@@ -462,36 +469,46 @@ function AssistantMessage({
 }) {
   const blob = useLazyBlobs(m.contentBlob ? { $blob: m.contentBlob } : null, sessionId)
   const loaded = blob.resolved as { content?: string | null; message?: { content?: string } } | null
-  const content = m.contentBlob ? (loaded?.content ?? loaded?.message?.content ?? m.content) : m.content
-  const hasText = content.trim().length > 0 || (m.streaming && m.toolCalls.length === 0) || !!m.contentBlob
+  const loadedContent = loaded?.content ?? loaded?.message?.content
+  const content = m.contentBlob ? (loadedContent ?? m.content) : m.content
+  // 代码型 agent 可能把最后一次模型响应再次记录为最终消息。只隐藏紧邻最终消息的相同正文，
+  // 工具卡片仍保留在最终回复之前；独立模型步骤、流式输出及未加载的 blob 不合并，Trace 不受影响。
+  const repeatedFinal = !m.final && !m.streaming && (!m.contentBlob || (blob.pending === 0 && typeof loadedContent === 'string'))
+    && nextMessage?.final && !nextMessage.streaming && !nextMessage.contentBlob
+    && content.trim().length > 0 && content === nextMessage.content
+  const hasText = !repeatedFinal && (content.trim().length > 0 || (m.streaming && m.toolCalls.length === 0) || !!m.contentBlob)
   const highlighted = isHighlighted(highlightSteps, turn.id, m.stepId)
   // 没有文字也没有工具调用（例如模型调用失败的那一步）：不画空气泡
   if (!hasText && m.toolCalls.length === 0) return null
+
+  // 出错 / 取消等轮次可能没有最终消息事件，已结束轮次的末条结果仍应展示在工具轨迹之后。
+  const afterTools = turn.ended && !nextMessage && m.toolCalls.length > 0
+  const textBubble = hasText && (
+    <div
+      className={cn(
+        'rounded-2xl rounded-tl-sm bg-muted px-3 py-2',
+        highlighted && 'ring-2 ring-warning/70 ring-offset-1 ring-offset-background',
+        turn.status === 'error' && m.final && 'bg-danger/10',
+      )}
+      title={m.llm?.model ? `模型：${m.llm.model}` : undefined}
+    >
+      {m.contentBlob && (
+        <BlobLoadBar pending={blob.pending} loading={blob.loading} error={blob.error} onLoad={blob.load} label="回复内容较大，已转存" />
+      )}
+      <Markdown streaming={m.streaming}>{content}</Markdown>
+      {m.partial && (
+        <p className="mt-1.5 text-xs text-muted-foreground" data-testid="partial-mark">
+          {turn.status === 'cancelled' ? '已取消，以上为已生成的部分内容' : '执行中断，以上为已生成的部分内容'}
+        </p>
+      )}
+    </div>
+  )
 
   return (
     <div className="flex gap-2" data-testid="assistant-message" data-final={m.final || undefined} data-step={m.stepId ?? undefined}>
       <Avatar icon={<Bot className="h-3.5 w-3.5" />} />
       <div className="min-w-0 flex-1 space-y-2">
-        {hasText && (
-          <div
-            className={cn(
-              'rounded-2xl rounded-tl-sm bg-muted px-3 py-2',
-              highlighted && 'ring-2 ring-warning/70 ring-offset-1 ring-offset-background',
-              turn.status === 'error' && m.final && 'bg-danger/10',
-            )}
-            title={m.llm?.model ? `模型：${m.llm.model}` : undefined}
-          >
-            {m.contentBlob && (
-              <BlobLoadBar pending={blob.pending} loading={blob.loading} error={blob.error} onLoad={blob.load} label="回复内容较大，已转存" />
-            )}
-            <Markdown streaming={m.streaming}>{content}</Markdown>
-            {m.partial && (
-              <p className="mt-1.5 text-xs text-muted-foreground" data-testid="partial-mark">
-                {turn.status === 'cancelled' ? '已取消，以上为已生成的部分内容' : '执行中断，以上为已生成的部分内容'}
-              </p>
-            )}
-          </div>
-        )}
+        {!afterTools && textBubble}
         {m.toolCalls.length > 0 && (
           <div className="space-y-1.5">
             {m.toolCalls.map((c) => (
@@ -505,6 +522,7 @@ function AssistantMessage({
             ))}
           </div>
         )}
+        {afterTools && textBubble}
       </div>
     </div>
   )

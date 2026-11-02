@@ -245,7 +245,12 @@ class EvalService:
         plans: list[dict[str, Any]] = []
         for rv in versions:
             keys = {
-                (c.id, r): cache_key_of(rv.spec_hash, c.case_hash, r, body.seed)
+                (c.id, r): cache_key_of(
+                    rv.spec_hash + (
+                        ":" + rv.adapter_snapshot.get("fingerprint", "")
+                        if rv.adapter_snapshot and rv.adapter_snapshot.get("revision", 0) > 0 else ""
+                    ), c.case_hash, r, body.seed
+                )
                 for c in cases
                 for r in range(body.repeats)
             }
@@ -270,6 +275,7 @@ class EvalService:
                     batch_id=batch_id,
                     agent_id=rv.agent_id,
                     version_id=rv.id,
+                    adapter_snapshot=rv.adapter_snapshot,
                     dataset_rev_id=rev_id,
                     case_filter=body.case_filter.model_dump(),
                     evaluators=evaluators,
@@ -1065,6 +1071,9 @@ class EvalService:
             sess = await sessions.create(
                 version_id=run.version_id,
                 mode="eval",
+                adapter_snapshot=run.adapter_snapshot or {
+                    "revision": 0, "binding": None, "source": "legacy",
+                },
                 title=f"{case_row.case_key} #{item.repeat_idx}",
                 variables=md.get("variables") or {},
             )

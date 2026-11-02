@@ -129,6 +129,26 @@ class VersionTag(Base):
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class AdapterRevision(Base):
+    __tablename__ = "adapter_revisions"
+    __table_args__ = (PrimaryKeyConstraint("version_id", "revision"),)
+
+    version_id: Mapped[str] = mapped_column(Text, ForeignKey("versions.id"), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot: Mapped[dict[str, Any]] = _json_col()
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class AdapterCredential(Base):
+    __tablename__ = "adapter_credentials"
+
+    ref: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    adapter_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class VersionAssetRef(Base):
     __tablename__ = "version_asset_refs"
     __table_args__ = (
@@ -238,6 +258,7 @@ class Session(Base):
     last_seq: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"), default=0)
     stats: Mapped[dict[str, Any]] = _json_col("{}")  # 累计 tokens / cost / turns
     variables: Mapped[dict[str, Any]] = _json_col("{}")  # 会话级变量（迁移 0002）
+    adapter_snapshot: Mapped[dict[str, Any] | None] = _json_col(nullable=True)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -252,6 +273,8 @@ class Turn(Base):
     pair_index: Mapped[int | None] = mapped_column(Integer)  # 双栏对比时两侧轮次共享
     status: Mapped[str] = mapped_column(Text, nullable=False)  # running | ok | error | cancelled | timeout
     input: Mapped[Any] = _json_col()  # Message
+    effective_input: Mapped[Any] = _json_col(nullable=True)
+    middleware_snapshot: Mapped[Any] = _json_col(nullable=True)
     output: Mapped[Any] = _json_col(nullable=True)  # {final: Message, messages: [Message]}
     usage: Mapped[dict[str, Any]] = _json_col("{}")
     cost: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0"), default=0.0)
@@ -301,6 +324,7 @@ class EvalRun(Base):
     batch_id: Mapped[str] = mapped_column(Text, ForeignKey("eval_batches.id"), nullable=False)
     agent_id: Mapped[str] = mapped_column(Text, ForeignKey("agents.id"), nullable=False)
     version_id: Mapped[str] = mapped_column(Text, ForeignKey("versions.id"), nullable=False)
+    adapter_snapshot: Mapped[dict[str, Any] | None] = _json_col(nullable=True)
     dataset_rev_id: Mapped[str] = mapped_column(Text, ForeignKey("asset_revisions.id"), nullable=False)
     case_filter: Mapped[dict[str, Any]] = _json_col("{}")  # {tags:[], case_keys:[]}
     evaluators: Mapped[Any] = _json_col()  # 评估器配置数组（见 8.5）

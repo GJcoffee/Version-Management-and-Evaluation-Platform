@@ -200,6 +200,7 @@ class VersionAssetItem(BaseModel):
     asset_revision_id: str
     spec_paths: list[str] = Field(description="Spec 中引用它的位置（身份键路径）")
     display_name: str | None = Field(None, description="来源平台上的原始名称（可含中文）")
+    description: str | None = Field(None, description="资产用途；Skill 按该版本所用修订读取")
     source_id: str | None = Field(None, description="来源平台上的稳定 ID")
     origin: str | None = Field(None, description="修订的来源；snapshot 表示来自 agent 快照（只读）")
     changed_in_seq: int = Field(description="该修订最近一次变化发生在哪个版本（连续使用同一修订的最早版本）")

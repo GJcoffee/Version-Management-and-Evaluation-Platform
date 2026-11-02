@@ -9,7 +9,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Input } from '@/components/ui/Input'
-import { RelativeTime } from '@/components/ui/RelativeTime'
+import { DateTime } from '@/components/ui/DateTime'
 import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
@@ -117,7 +117,7 @@ export function SessionsTab({ agentId }: { agentId: string }) {
                 <TableCell className="text-right font-mono text-xs tabular-nums">{formatTokens(sessionTokens(s))}</TableCell>
                 <TableCell className="text-right font-mono text-xs tabular-nums">{formatCost(s.stats.cost ?? 0)}</TableCell>
                 <TableCell className="text-xs text-muted-foreground">
-                  <RelativeTime value={s.updated_at} />
+                  <DateTime value={s.updated_at} />
                 </TableCell>
               </TableRow>
             ))}

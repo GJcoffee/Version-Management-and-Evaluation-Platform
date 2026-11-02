@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { Download, FilePlus2, GitCompare, RotateCcw, Trash2 } from 'lucide-react'
+import { Download, FilePlus2, GitCompare, Pencil, RotateCcw, Trash2 } from 'lucide-react'
 import { ApiError } from '@/api/client'
-import { useAsset, useAssetRevisions, useDeleteAsset, useRestoreAsset, useRevision } from '@/api/queries/assets'
+import { useAsset, useAssetRevisions, useDeleteAsset, useRestoreAsset, useRevision, useUpdateAsset } from '@/api/queries/assets'
 import type { Asset, AssetRevision } from '@/api/types'
 import { AssetIdentity } from '@/components/AssetIdentity'
 import { Badge } from '@/components/ui/Badge'
@@ -12,6 +12,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog } from '@/components/ui/Dialog'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { IdText } from '@/components/ui/IdText'
+import { Field, Textarea } from '@/components/ui/Input'
 import { RelativeTime } from '@/components/ui/RelativeTime'
 import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
@@ -56,6 +57,7 @@ function AssetDetail({ asset }: { asset: Asset }) {
   const [importOpen, setImportOpen] = useState(false)
   const [softOpen, setSoftOpen] = useState(false)
   const [hardOpen, setHardOpen] = useState(false)
+  const [descriptionOpen, setDescriptionOpen] = useState(false)
   const del = useDeleteAsset()
   const restore = useRestoreAsset()
 
@@ -70,6 +72,10 @@ function AssetDetail({ asset }: { asset: Asset }) {
   const content = useRevision(isDataset ? null : activeId)
   const deleted = !!asset.deleted_at
   const readonly = isSnapshotAsset(asset)
+  const revisionDescription = (content.data ?? active)?.meta.description
+  const skillDescription = !readonly && activeId === asset.latest?.id && asset.description !== null
+    ? asset.description
+    : typeof revisionDescription === 'string' ? revisionDescription : null
 
   const toggleCompare = (rev: AssetRevision) => {
     const cur = [pair.left, pair.right].filter((x): x is string => !!x)
@@ -110,7 +116,7 @@ function AssetDetail({ asset }: { asset: Asset }) {
               曾用名：<span className="font-mono">{asset.former_names.join('、')}</span>（改名后修订历史保留）
             </p>
           )}
-          {asset.description && <p className="mt-1 text-sm text-muted-foreground">{asset.description}</p>}
+          {asset.kind !== 'skill' && asset.description && <p className="mt-1 text-sm text-muted-foreground">{asset.description}</p>}
           {readonly && (
             <p className="mt-1 text-sm text-muted-foreground" data-testid="readonly-note">
               {SNAPSHOT_READONLY_NOTE}
@@ -142,6 +148,20 @@ function AssetDetail({ asset }: { asset: Asset }) {
           </div>
         )}
       </div>
+
+      {asset.kind === 'skill' && (
+        <div className="space-y-1 rounded-md border border-border px-4 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-xs font-medium text-muted-foreground">描述</h2>
+            {!readonly && !deleted && (
+              <Button variant="ghost" size="sm" onClick={() => setDescriptionOpen(true)}>
+                <Pencil className="h-3.5 w-3.5" />编辑描述
+              </Button>
+            )}
+          </div>
+          <p className="whitespace-pre-wrap break-words text-sm" data-testid="skill-description">{skillDescription || '暂无描述'}</p>
+        </div>
+      )}
 
       {deleted && (
         <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm">
@@ -230,7 +250,7 @@ function AssetDetail({ asset }: { asset: Asset }) {
                       hash <IdText value={active.blob_hash} />
                     </span>
                     {Object.entries(active.meta)
-                      .filter(([k, v]) => !['schema_warnings', 'column_map', 'display_name', 'default_path', 'format'].includes(k) && v !== null && typeof v !== 'object')
+                      .filter(([k, v]) => !['schema_warnings', 'column_map', 'display_name', 'description', 'default_path', 'format'].includes(k) && v !== null && typeof v !== 'object')
                       .map(([k, v]) => (
                         <span key={k}>
                           {k}: <span className="font-mono text-foreground">{String(v)}</span>
@@ -326,6 +346,7 @@ function AssetDetail({ asset }: { asset: Asset }) {
           }}
         />
       )}
+      {descriptionOpen && <EditDescriptionDialog asset={asset} onClose={() => setDescriptionOpen(false)} />}
       <DatasetImportDialog
         open={importOpen}
         onOpenChange={setImportOpen}
@@ -390,6 +411,31 @@ function RevSelect({
         ))}
       </Select>
     </label>
+  )
+}
+
+function EditDescriptionDialog({ asset, onClose }: { asset: Asset; onClose: () => void }) {
+  const update = useUpdateAsset()
+  const [description, setDescription] = useState(asset.description ?? '')
+  const [error, setError] = useState<string | null>(null)
+  const save = async () => {
+    setError(null)
+    try {
+      await update.mutateAsync({ id: asset.id, description: description.trim() })
+      toast.success('描述已更新')
+      onClose()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : '更新描述失败')
+    }
+  }
+  return (
+    <Dialog open onOpenChange={(v) => !v && !update.isPending && onClose()} title="编辑 Skill 描述"
+      footer={<><Button variant="outline" disabled={update.isPending} onClick={onClose}>取消</Button><Button loading={update.isPending} onClick={save}>保存</Button></>}>
+      <Field label="描述" htmlFor="edit-skill-description" hint="填写这个 Skill 的用途，方便在资产库中查找。">
+        <Textarea id="edit-skill-description" rows={4} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="这个 Skill 用来做什么…" />
+      </Field>
+      {error && <p role="alert" className="mt-2 text-sm text-danger">{error}</p>}
+    </Dialog>
   )
 }
 

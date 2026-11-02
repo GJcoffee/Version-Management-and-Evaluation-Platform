@@ -95,3 +95,30 @@ describe('CompareSessionDialog：候选会话默认不含重放会话', () => {
     expect(api.find('GET', /\/sessions\?/).some((c) => decodeURIComponent(c.url).includes('mode=chat,replay'))).toBe(true)
   })
 })
+
+describe('CompareSessionDialog：选中的会话是左侧基线', () => {
+  it.each([1, 9])('选中 v%s 会话都放在左侧，当前会话放在右侧', async (versionSeq) => {
+    const selected = { ...sess('ses_selected', 'chat', '选中的基线'), version_seq: versionSeq, version_id: `ver_${versionSeq}` }
+    const api = mockApi({
+      'GET /api/v1/sessions': {
+        items: [session, sess('ses_first', 'chat', '其他候选'), selected],
+        next_cursor: null,
+      },
+      'POST /api/v1/compare': { id: 'cmp_created' },
+    })
+    const close = vi.fn()
+    wrap(<CompareSessionDialog session={session} onClose={close} />)
+    const select = await screen.findByTestId('compare-other')
+    expect(select.querySelector('option[value="ses_1"]')).toBeNull()
+    await userEvent.selectOptions(select, 'ses_selected')
+    expect(screen.getByText(/选中的会话在左侧，当前会话在右侧/)).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('compare-session-submit'))
+    await waitFor(() => expect(api.find('POST', /\/compare$/)).toHaveLength(1))
+    expect(api.find('POST', /\/compare$/)[0].body).toEqual({
+      kind: 'session', mode: 'history',
+      left: { session_id: 'ses_selected' },
+      right: { session_id: 'ses_1' },
+    })
+    expect(close).toHaveBeenCalledOnce()
+  })
+})

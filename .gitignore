@@ -52,3 +52,39 @@ evals/
 *.sse
 *.log
 screenshots/
+
+# Private evidence, database snapshots, and local execution output
+.private/
+.screenshots/
+.secrets/
+.data/
+test-results/
+playwright-report/
+*.db
+*.db-*
+*.db.*
+*.sqlite*
+*.bak
+*.backup
+*.dump
+
+# Authentication exports and private key bundles
+*credential*.json
+*cookies*.json
+cookies*.yaml
+cookies*.yml
+token
+token.json
+tokens.json
+*.p12
+*.pfx
+*.keystore
+*.kdbx
+id_rsa
+id_ecdsa
+id_ed25519
+
+# These specific files contain real Agent business inputs and outputs.
+# Platform plans, development records, and synthetic test fixtures stay versioned.
+/docs/v50-轮间中间件测试数据.json
+/docs/v50-轮间中间件真实测试记录.md

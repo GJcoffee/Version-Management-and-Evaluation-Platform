@@ -77,3 +77,23 @@ export function toolTurnEvents(turn = 'trn_1', start = 1): EventEnvelope[] {
     ),
   ]
 }
+
+/** 导入执行 71s 的录制轮次只需回放 600ms；LLM 大请求的存根丢失原始 attrs。 */
+export function recordedTurnEvents(turn = 'trn_1', start = 1, originalOffset = 0): EventEnvelope[] {
+  const original = (offset: number) => new Date(T0 - 86_400_000 + originalOffset + offset).toISOString()
+  const attrs = (from: number, to: number) => ({ original_started_at: original(from), original_ended_at: original(to) })
+  const events = [
+    mk('turn.start', { input: { role: 'user', content: '录制输入' }, history_len: 0 }, { turn }),
+    mk('log', { level: 'info', message: '录制来源', source_mode: 'recorded',
+      original_started_at: original(0), original_ended_at: original(71_235), original_latency_ms: 71_235 }, { turn }),
+    mk('span.start', { name: 'UserInput', attrs: attrs(0, 71_760) }, { turn, step: 'root' }),
+    mk('llm.request', { $blob: 'c'.repeat(64), provider: 'fake', model: 'fake-model' }, { turn, step: 's1', parent: 'root' }),
+    mk('llm.response', { content: '录制回复', tool_calls: [], latency_ms: 5_000 }, { turn, step: 's1', parent: 'root' }),
+    mk('span.start', { name: 'POST /v1/chat/completions', attrs: attrs(1_010, 5_900) }, { turn, step: 'http', parent: 's1' }),
+    mk('span.end', { name: 'POST /v1/chat/completions', attrs: attrs(1_010, 5_900), latency_ms: 0 }, { turn, step: 'http', parent: 's1' }),
+    mk('span.end', { name: 'UserInput', attrs: attrs(0, 71_760), latency_ms: 0 }, { turn, step: 'root' }),
+    mk('message.assistant', { message: { role: 'assistant', content: '录制回复' } }, { turn }),
+    mk('turn.end', { status: 'completed', output: null, usage: null, cost: 0, latency_ms: 600, ttft_ms: null }, { turn }),
+  ]
+  return events.map((event, i) => ({ ...event, seq: start + i, ts: new Date(T0 + i * 600 / 9).toISOString() }))
+}

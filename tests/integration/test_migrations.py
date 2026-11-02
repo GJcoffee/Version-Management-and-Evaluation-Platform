@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import warnings
 
@@ -12,6 +13,7 @@ TABLES = {
     "providers", "agents", "drafts", "versions", "version_tags", "version_asset_refs", "blobs", "assets",
     "asset_revisions", "eval_cases", "sessions", "turns", "events", "eval_batches", "eval_runs",
     "eval_items", "eval_scores", "compare_groups", "jobs", "settings",
+    "adapter_revisions", "adapter_credentials",
 }  # fmt: skip
 
 
@@ -58,8 +60,32 @@ def test_orm_metadata_covers_design_tables():
 def test_idempotent(migrated):
     run_migrations(migrated)  # 再次执行不报错
     con = sqlite3.connect(migrated)
-    assert con.execute("select version_num from alembic_version").fetchall() == [("0005",)]
+    assert con.execute("select version_num from alembic_version").fetchall() == [("0007",)]
     con.close()
+
+
+def test_0006_freezes_legacy_session_binding_without_changing_spec(tmp_path):
+    path = tmp_path / "legacy.db"
+    run_migrations(path, "0005")
+    original = {"kind": "code", "transport": "http", "http": {"base_url": "http://old"}}
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "insert into agents(id,name,kind,created_at,updated_at) values('a','old','code','t','t')"
+        )
+        conn.execute(
+            "insert into versions(id,agent_id,seq,spec_hash,spec,created_via,created_at)"
+            " values('v','a',1,'original',?,'api','t')", (json.dumps(original),),
+        )
+        conn.execute(
+            "insert into sessions(id,agent_id,version_id,mode,created_at,updated_at)"
+            " values('s','a','v','chat','t','t')",
+        )
+    run_migrations(path)
+    with sqlite3.connect(path) as conn:
+        snapshot = json.loads(conn.execute("select adapter_snapshot from sessions").fetchone()[0])
+        assert snapshot == {"revision": 0, "binding": None, "source": "legacy"}
+        row = conn.execute("select spec_hash,spec from versions").fetchone()
+        assert row[0] == "original" and json.loads(row[1]) == original
 
 
 def test_indexes_and_without_rowid(migrated):
@@ -132,6 +158,9 @@ def test_0002_preserves_data_and_adds_columns(tmp_path):
     con.execute("PRAGMA foreign_keys=ON")
     assert con.execute("select variables from sessions where id='s1'").fetchone() == ("{}",)
     assert con.execute("select anchored_from_turn_id from turns where id='t1'").fetchone() == (None,)
+    assert con.execute(
+        "select effective_input,middleware_snapshot from turns where id='t1'"
+    ).fetchone() == (None, None)
     # 外键生效：不能指向不存在的轮次；可以指向存在的轮次
     con.execute(
         "insert into turns(id,session_id,idx,status,input,started_at,anchored_from_turn_id) "

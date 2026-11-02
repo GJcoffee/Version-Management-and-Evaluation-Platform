@@ -106,7 +106,7 @@ export default function AssetsPage() {
               <TableRow className="hover:bg-transparent">
                 <TableHead>名称</TableHead>
                 <TableHead>当前修订</TableHead>
-                <TableHead>摘要</TableHead>
+                <TableHead>{kind === 'skill' ? '描述' : '摘要'}</TableHead>
                 <TableHead>大小</TableHead>
                 <TableHead>最近修订</TableHead>
               </TableRow>
@@ -129,10 +129,14 @@ export default function AssetsPage() {
                         只读
                       </Badge>
                     )}
-                    {a.description && <p className="mt-0.5 max-w-md truncate text-xs text-muted-foreground">{a.description}</p>}
+                    {kind !== 'skill' && a.description && <p className="mt-0.5 max-w-md truncate text-xs text-muted-foreground">{a.description}</p>}
                   </TableCell>
                   <TableCell className="font-mono text-xs">r{a.latest_rev}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{describe(a) ?? '-'}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {kind === 'skill'
+                      ? <p className="line-clamp-2 min-w-64 max-w-lg whitespace-pre-line" title={a.description || undefined}>{a.description || '暂无描述'}</p>
+                      : describe(a) ?? '-'}
+                  </TableCell>
                   <TableCell className="text-xs text-muted-foreground">{a.latest ? formatBytes(a.latest.size) : '-'}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     <RelativeTime value={a.latest?.created_at ?? a.created_at} />

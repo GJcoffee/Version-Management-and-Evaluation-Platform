@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import stat
 import zipfile
 import zlib
@@ -19,13 +20,38 @@ PREVIEW_LIMIT = 5 * 1024 * 1024
 
 
 def legacy_skill_metadata(data: bytes) -> dict[str, Any]:
-    """旧导出只有配置时，只提取名称；不伪造文件。"""
+    """旧导出只有配置时，提取名称和描述；不伪造文件。"""
     try:
         value = json.loads(data)
     except (ValueError, UnicodeDecodeError):
         value = None
     name = (value.get("name") or value.get("Name")) if isinstance(value, dict) else None
-    return {"format": "metadata", **({"display_name": name} if isinstance(name, str) and name else {})}
+    description = (
+        value.get("description") or value.get("Description")
+    ) if isinstance(value, dict) else None
+    return {
+        "format": "metadata",
+        **({"display_name": name} if isinstance(name, str) and name else {}),
+        **(
+            {"description": description.strip()}
+            if isinstance(description, str) and description.strip() else {}
+        ),
+    }
+
+
+def _frontmatter(source: str) -> dict[str, Any]:
+    """读取独立分隔行内的 YAML，兼容在原始头部前追加更新说明的文件。"""
+    delimiters = list(re.finditer(r"(?m)^---[ \t]*\r?$", source))
+    for start, end in zip(delimiters, delimiters[1:], strict=False):
+        try:
+            value = yaml.safe_load(source[start.end():end.start()])
+        except yaml.YAMLError:
+            continue
+        if isinstance(value, dict) and (
+            start.start() == 0 or any(key in value for key in ("name", "description"))
+        ):
+            return value
+    return {}
 
 
 def open_package(data: bytes) -> SkillPackage | None:
@@ -106,17 +132,17 @@ class SkillPackage:
             if self.entries[self.default_path].file_size <= PREVIEW_LIMIT:
                 try:
                     source = self.read(self.default_path).decode("utf-8-sig")
-                    if source.startswith("---\n") or source.startswith("---\r\n"):
-                        header = source.split("---", 2)[1]
-                        frontmatter = yaml.safe_load(header)
-                        if isinstance(frontmatter, dict):
-                            self.frontmatter = frontmatter
-                        original_name = self.frontmatter.get("name")
-                        if isinstance(original_name, str) and original_name:
-                            name = original_name
-                except (UnicodeDecodeError, yaml.YAMLError):
+                    self.frontmatter = _frontmatter(source)
+                    original_name = self.frontmatter.get("name")
+                    if isinstance(original_name, str) and original_name:
+                        name = original_name
+                except UnicodeDecodeError:
                     pass
             self.display_name = name
+            description = self.frontmatter.get("description")
+            self.description = (
+                description.strip() if isinstance(description, str) and description.strip() else None
+            )
         except (zipfile.BadZipFile, NotImplementedError, RuntimeError, EOFError, zlib.error) as exc:
             raise ValueError(f"Skill 压缩包无法读取: {exc}") from None
 
@@ -124,6 +150,7 @@ class SkillPackage:
         return {
             "format": "skill_package",
             "display_name": self.display_name,
+            "description": self.description,
             "file_count": sum(n["type"] == "file" for n in self.nodes.values()),
             "default_path": self.default_path,
         }

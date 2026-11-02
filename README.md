@@ -140,6 +140,11 @@ python scripts/loadtest_eval.py --profile /tmp/x.prof   # 用 cProfile 包住服
 - 视口宽度 ≤800px 时，侧边栏收成图标栏，双栏对比上下堆叠，会话页的 Trace 面板改为从底部弹出的抽屉（默认收起，点「Trace」或某一轮下方的「查看 Trace」打开）。
 - 超过 60 轮的会话，对话区使用虚拟滚动，只渲染可视区附近的轮次；自动贴底、流式输出、「回到底部」的行为不变。
 - API token 与 `secrets.enc` 只允许当前用户读写：POSIX 为 `chmod 600`，Windows 通过系统自带的 `icacls` 去掉继承权限、只授予当前用户。
+- `.gitignore` 与 `.dockerignore` 排除本地凭据、平台数据目录、数据库及备份、业务导出、截图和运行日志；
+  `.env.example`、`.env.sample` 可保留无真实凭据的示例配置。Git 忽略规则不移除已跟踪文件，上传前仍需检查差异。
+- 平台技术方案、接口文档、研发记录、单元与集成测试及合成测试夹具纳入仓库。
+  包含真实 Agent 业务配置、会话输入输出、产物及凭据的文件保存在本地私有目录，
+  不纳入 Git 和 Docker 打包。Docker 对 `docs/` 的排除仅用于精简镜像，不影响 Git 上传文档。
 
 ## 文档
 
@@ -147,6 +152,7 @@ python scripts/loadtest_eval.py --profile /tmp/x.prof   # 用 cProfile 包住服
 |---|---|
 | [docs/01-概要设计.md](docs/01-概要设计.md) | 目标、架构、领域模型、关键流程 |
 | [docs/02-详细设计.md](docs/02-详细设计.md) | 表结构、算法、协议、接口细节 |
+| [docs/03-轮间中间件方案.md](docs/03-轮间中间件方案.md) | 轮间产物解析、输入注入及实施核验 |
 | [docs/api.md](docs/api.md) | REST 接口（以实现为准） |
 | [docs/contract-eval.md](docs/contract-eval.md) | 评测与对比接口契约 |
 | [docs/DEVIATIONS.md](docs/DEVIATIONS.md) | 实现与设计的偏离记录 |

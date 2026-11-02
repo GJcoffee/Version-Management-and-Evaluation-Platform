@@ -10,6 +10,7 @@ import type {
   Usage,
 } from '@/api/types'
 import { buildStepTree, type TraceNode } from './traceTree'
+import { turnTiming } from './turnTiming'
 
 /**
  * 会话事件流 -> 结构化状态（轮次 -> 消息 -> 步骤树）。reducer 是纯函数，不依赖 React / 网络。
@@ -108,6 +109,7 @@ export interface TurnState {
   input: Message | null
   /** turn.start 被转存为 blob（用户输入很大）时的哈希；完整 payload 是 `{input, history_len}` */
   inputBlob: string | null
+  middlewareSnapshot?: import('@/api/types').MiddlewareSnapshot
   historyLen: number
   messages: AssistantMessageView[]
   /** 步骤树（根节点列表），用于 TraceViewer */
@@ -327,6 +329,8 @@ function applyEventToTurn(turn: TurnState, ev: EventEnvelope): TurnState {
         input: ev.payload.input ?? t.input,
         inputBlob: ev.payload.input === undefined ? blobOf(ev.payload) : null,
         historyLen: ev.payload.history_len ?? 0,
+        middlewareSnapshot: ev.payload.middleware_snapshot ??
+          (ev.payload.has_middleware ? { schema_version: 1, steps: [] } : undefined),
         startedAt: ev.ts,
       }
       break
@@ -716,17 +720,21 @@ export function totalMetrics(turns: readonly TurnState[]): TotalMetrics {
     acc.cost += t.metrics.cost
     acc.llmCalls += t.metrics.llmCalls
     acc.toolCalls += t.metrics.toolCalls
-    acc.latencyMs += t.metrics.latencyMs ?? 0
+    if (t.ended) acc.latencyMs += turnTiming(t).durationMs ?? 0
   }
   return acc
 }
 
 /** 首轮开始到末轮结束的时间跨度（毫秒）；末轮还在运行时为 null */
 export function sessionSpanMs(turns: readonly TurnState[]): number | null {
-  const start = turns[0]?.startedAt
-  const end = turns[turns.length - 1]?.endedAt
+  const first = turns[0]
+  const last = turns[turns.length - 1]
+  if (!first || !last?.ended) return null
+  const start = turnTiming(first).startedAt
+  const end = turnTiming(last).endedAt
   if (!start || !end) return null
-  return Math.max(0, Date.parse(end) - Date.parse(start))
+  const span = Date.parse(end) - Date.parse(start)
+  return Number.isFinite(span) ? Math.max(0, span) : null
 }
 
 /**

@@ -132,6 +132,13 @@ async def _purge_eval_sessions(db: Database, blobs: BlobStore, result: GCResult,
             for payload in payloads:
                 if isinstance(payload, dict) and isinstance(payload.get("$blob"), str):
                     hashes[payload["$blob"]] = hashes.get(payload["$blob"], 0) + 1
+            snapshots = (
+                await s.execute(select(Turn.middleware_snapshot).where(Turn.session_id.in_(ids)))
+            ).scalars()
+            for snapshot in snapshots:
+                for step in (snapshot or {}).get("steps", []):
+                    if h := step.get("result_blob_hash"):
+                        hashes[h] = hashes.get(h, 0) + 1
             for h, n in hashes.items():
                 try:
                     await blobs.decref(h, n, session=s)

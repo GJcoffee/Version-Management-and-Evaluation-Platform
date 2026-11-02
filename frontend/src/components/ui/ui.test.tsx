@@ -82,6 +82,25 @@ describe('JsonViewer', () => {
     await userEvent.click(screen.getByRole('button', { name: /"nested"/ }))
     expect(screen.getByText('"deep"')).toBeInTheDocument()
   })
+
+  it('多行提示词默认显示原文，切换 JSON 后才显示转义，引号和反斜杠不被改写', async () => {
+    const prompt = '你是"MINISO创意总监"。\n保留路径 C:\\prompts\\draft 和字面量 \\n。\n<script>原文</script>'
+    const { container } = render(<JsonViewer value={{ prompt }} />)
+    const original = container.querySelector('[data-string-view="raw"]')
+    expect(original?.textContent).toBe(prompt)
+    expect(original).toHaveClass('whitespace-pre-wrap')
+    expect(container.querySelector('script')).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: 'JSON' }))
+    expect(container.querySelector('[data-string-view="json"]')?.textContent).toBe(JSON.stringify(prompt))
+    await userEvent.click(screen.getByRole('button', { name: '原文' }))
+    expect(container.querySelector('[data-string-view="raw"]')?.textContent).toBe(prompt)
+  })
+
+  it('没有换行的长提示词也默认显示原文', () => {
+    const prompt = '包含"标点"的提示词。'.repeat(20)
+    const { container } = render(<JsonViewer value={prompt} />)
+    expect(container.querySelector('[data-string-view="raw"]')?.textContent).toBe(prompt)
+  })
 })
 
 describe('Tabs', () => {

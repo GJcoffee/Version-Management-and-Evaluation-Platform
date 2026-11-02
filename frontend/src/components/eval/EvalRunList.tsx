@@ -6,7 +6,7 @@ import type { EvalRunOut } from '@/api/evalTypes'
 import { useEvals } from '@/api/queries/evals'
 import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { RelativeTime } from '@/components/ui/RelativeTime'
+import { DateTime } from '@/components/ui/DateTime'
 import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
@@ -131,7 +131,7 @@ export function EvalRunList({ agentId, actions, emptyAction }: { agentId?: strin
                 <TableCell className="text-right font-mono text-xs tabular-nums">{passRateText(r)}</TableCell>
                 <TableCell className="text-right font-mono text-xs tabular-nums">{r.stats ? formatCost(r.stats.cost) : '-'}</TableCell>
                 <TableCell className="text-xs text-muted-foreground">
-                  <RelativeTime value={r.created_at} />
+                  <DateTime value={r.created_at} />
                 </TableCell>
               </TableRow>
             ))}

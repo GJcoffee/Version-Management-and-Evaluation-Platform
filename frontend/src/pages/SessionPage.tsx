@@ -3,7 +3,8 @@ import { Link, useParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { ChevronLeft, ChevronRight, PanelRightClose, PanelRightOpen, Variable, WifiOff } from 'lucide-react'
 import { ApiError } from '@/api/client'
-import { sessionKeys, useCancelTurn, useRenameSession, useSendTurn, useSession } from '@/api/queries/sessions'
+import { sessionKeys, useCancelTurn, useRenameSession, useSendTurn, useSession, useTurn } from '@/api/queries/sessions'
+import type { MiddlewareSelection } from '@/api/types'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Select } from '@/components/ui/Select'
@@ -17,6 +18,7 @@ import {
   sessionSpanMs,
   totalMetrics,
   turnInputSummary,
+  turnTiming,
   useSessionStream,
   type ChatPaneHandle,
 } from '@/components/session'
@@ -27,6 +29,7 @@ import { useIsNarrow } from '@/lib/useMediaQuery'
 import { toast } from '@/stores/toast'
 import { MODE_LABEL, sessionTitle, versionLabel } from './session/sessionUtils'
 import { SessionStatusBadge } from './session/SessionList'
+import { exactSeconds, upstreamTiming, upstreamTotalMs } from '@/components/session/upstreamTiming'
 
 const TRACE_KEY = 'evalp.session.trace-open'
 const TRACE_WIDE_KEY = 'evalp.session.trace-wide'
@@ -131,9 +134,17 @@ function SessionView({ sessionId }: { sessionId: string }) {
     chatRef.current!.scrollToTurn(turnId)
   }
 
-  const onSend = async (text: string, opts: { variables?: Record<string, string> }) => {
+  const [middlewareAttemptId, setMiddlewareAttemptId] = useState<string>()
+  const attempt = useTurn(middlewareAttemptId)
+  const failedFromHistory = useTurn(lastTurn?.id, !!lastTurn?.ended && !!lastTurn?.middlewareSnapshot)
+  const restoreTurn = [attempt.data, failedFromHistory.data].find((turn) =>
+    turn && turn.status !== 'running' && !turn.effective_input && turn.middleware_snapshot)
+  const bridge = !!session.adapter_snapshot?.binding?.config?.business_bridge
+
+  const onSend = async (text: string, opts: { variables?: Record<string, string>; middlewares?: MiddlewareSelection[] }) => {
     try {
-      const r = await sendTurn.mutateAsync({ input: text, variables: opts.variables })
+      const r = await sendTurn.mutateAsync({ input: text, variables: opts.variables, middlewares: opts.middlewares })
+      setMiddlewareAttemptId(opts.middlewares?.length ? r.turn_id : undefined)
       setPinnedTurnId(null)
       setSelectedStep(null)
       setAwaitingTurnId(r.turn_id)
@@ -167,7 +178,10 @@ function SessionView({ sessionId }: { sessionId: string }) {
     // 会话统计里没有用时：回放期间不显示
     latencyMs: hasTurns ? totals.latencyMs : null,
   }
+  const upstreamMs = upstreamTotalMs(stream.turns)
+  const hasUpstream = stream.turns.some((turn) => upstreamTiming(turn.events) !== null)
   const spanMs = sessionSpanMs(stream.turns)
+  const traceTiming = traceTurn ? turnTiming(traceTurn) : null
   const varCount = Object.keys(session.variables ?? {}).length
 
   return (
@@ -194,6 +208,11 @@ function SessionView({ sessionId }: { sessionId: string }) {
             {versionLabel(session)}
           </Link>
           <Badge variant="outline">{MODE_LABEL[session.mode]}</Badge>
+          {session.adapter_snapshot?.binding && <Badge variant="outline"
+            title={JSON.stringify(session.adapter_snapshot)}>
+            {session.adapter_snapshot.binding.id}@{session.adapter_snapshot.binding.version}
+            {' · 接入修订 '}{session.adapter_snapshot.revision}
+          </Badge>}
           {session.replay_mode && <Badge variant="outline">{session.replay_mode === 'anchored' ? '锚定重放' : '自由重放'}</Badge>}
           <SessionStatusBadge status={running ? 'running' : session.status} />
           {varCount > 0 && (
@@ -215,8 +234,13 @@ function SessionView({ sessionId }: { sessionId: string }) {
             title={`各轮用时之和${spanMs === null ? '（进行中的轮次不计）' : `；首轮开始到末轮结束共 ${formatDuration(spanMs)}`}`}
             data-testid="session-latency"
           >
-            总用时 {formatDuration(metrics.latencyMs)}
+            {hasUpstream ? `本地端到端 ${metrics.latencyMs === null ? '—' : exactSeconds(metrics.latencyMs)}` : `总用时 ${formatDuration(metrics.latencyMs)}`}
           </span>
+          {upstreamMs !== null && (
+            <span title="各轮HiAgent原始Trace运行耗时之和，不含本地外围开销" data-testid="session-upstream-latency">
+              HiAgent {exactSeconds(upstreamMs)}
+            </span>
+          )}
           <span title="累计成本">{formatCost(metrics.cost)}</span>
           <span title="LLM 调用 / 工具调用">
             LLM ×{metrics.llm} · 工具 ×{metrics.tools}
@@ -270,6 +294,9 @@ function SessionView({ sessionId }: { sessionId: string }) {
               stopping={cancel.isPending}
               onSend={onSend}
               onStop={onStop}
+              middlewareSessionId={session.mode === 'chat' && !bridge ? sessionId : undefined}
+              sourceTurnId={lastTurn?.status === 'ok' ? lastTurn.id : undefined}
+              restoreTurn={restoreTurn}
               autoFocus
             />
           </div>
@@ -349,8 +376,9 @@ function SessionView({ sessionId }: { sessionId: string }) {
                 steps={traceTurn.steps}
                 turnId={traceTurn.id}
                 sessionId={sessionId}
-                startedAt={traceTurn.startedAt}
-                endedAt={traceTurn.endedAt}
+                startedAt={traceTiming?.startedAt}
+                endedAt={traceTiming?.endedAt}
+                durationMs={traceTiming?.durationMs}
                 running={!traceTurn.ended}
                 selectedStepId={selectedStep}
                 onSelectStep={setSelectedStep}

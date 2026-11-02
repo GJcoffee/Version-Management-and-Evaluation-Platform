@@ -59,6 +59,7 @@ class ResolvedVersion:
     spec_hash: str
     spec: dict[str, Any]
     source: dict[str, Any]
+    adapter_snapshot: dict[str, Any] | None = None
 
     def spec_model(self) -> ConfigSpec | CodeSpec:
         """把 spec 解析为 ConfigSpec / CodeSpec（引用位置是 ResolvedRef 模型）。"""
@@ -115,6 +116,9 @@ class VersionService:
                 raise NotFound(f"版本不存在: {version_id}", {"id": version_id})
             a = await s.get(Agent, v.agent_id)
             assert a is not None
+            from evalp.services.adapter import AdapterService
+
+            snapshot = await self.ctx.svc(AdapterService).snapshot(s, v)
             return ResolvedVersion(
                 id=v.id,
                 agent_id=a.id,
@@ -124,6 +128,7 @@ class VersionService:
                 spec_hash=v.spec_hash,
                 spec=v.spec,
                 source=v.source or {},
+                adapter_snapshot=snapshot,
             )
 
         if session is not None:
@@ -229,6 +234,14 @@ class VersionService:
                     kind=asset.kind,
                     name=asset.name,
                     display_name=asset.display_name or (rev.meta or {}).get("display_name"),
+                    description=(
+                        (rev.meta or {}).get("description")
+                        if asset.kind == "skill" and (
+                            rev.rev != asset.latest_rev or (rev.meta or {}).get("origin") == "snapshot"
+                            or asset.description is None
+                        )
+                        else asset.description
+                    ),
                     source_id=asset.source_id,
                     rev=rev.rev,
                     asset_revision_id=rev.id,
@@ -311,6 +324,13 @@ class VersionService:
         async with self.ctx.db.write() as s:
             v = await self.resolve_ref_orm(s, version_ref)
             spec = unresolve(v.spec)
+            from evalp.services.adapter import AdapterService
+
+            snapshot = await self.ctx.svc(AdapterService).snapshot(s, v)
+            if snapshot["binding"] is not None:
+                spec["adapter"] = snapshot["binding"]
+            else:
+                spec.pop("adapter", None)
             draft = (
                 await s.execute(select(Draft).where(Draft.agent_id == v.agent_id, Draft.name == draft_name))
             ).scalar_one_or_none()

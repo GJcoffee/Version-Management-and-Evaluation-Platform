@@ -105,6 +105,7 @@ export function AssetsTab({
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   <TableHead>名称</TableHead>
+                  {group.key === 'skill' && <TableHead>描述</TableHead>}
                   <TableHead className="w-24">所用修订</TableHead>
                   <TableHead className="w-56">最近一次变化</TableHead>
                 </TableRow>
@@ -128,6 +129,11 @@ export function AssetsTab({
                         </Badge>
                       )}
                     </TableCell>
+                    {group.key === 'skill' && (
+                      <TableCell className="text-xs text-muted-foreground">
+                        <p className="min-w-48 max-w-lg whitespace-pre-wrap break-words">{i.description || '暂无描述'}</p>
+                      </TableCell>
+                    )}
                     <TableCell className="font-mono text-xs">r{i.rev}</TableCell>
                     <TableCell className="text-xs">
                       <span className="font-mono font-semibold">v{i.changed_in_seq}</span>

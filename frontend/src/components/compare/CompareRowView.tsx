@@ -1,10 +1,10 @@
 import { memo } from 'react'
 import { Hourglass, Loader2, Minus } from 'lucide-react'
 import type { CompareMode } from '@/api/compareTypes'
-import { TurnView, type TurnState } from '@/components/session'
+import { TurnView, type TurnFold, type TurnState } from '@/components/session'
 import { cn } from '@/lib/cn'
 import { AlignmentPanel } from './AlignmentPanel'
-import type { CompareRow } from './compareUtils'
+import type { CompareRow, ComparisonBaseline } from './compareUtils'
 import { MetricsCompare } from './MetricsCompare'
 
 export type Side = 'left' | 'right'
@@ -24,6 +24,7 @@ interface CellProps {
   replayActive: boolean
   highlight: ReadonlySet<string> | undefined
   selected: boolean
+  fold?: TurnFold
   /** 这一行是单侧消息（分叉） */
   fork?: boolean
   onOpenTrace: (side: Side, turnId: string, stepId?: string) => void
@@ -41,12 +42,13 @@ function Placeholder({ icon, text, testid }: { icon: React.ReactNode; text: stri
   )
 }
 
-function Cell({ side, turnId, turn, sessionId, mode, replayActive, highlight, selected, fork, onOpenTrace }: CellProps) {
+function Cell({ side, turnId, turn, sessionId, mode, replayActive, highlight, selected, fold, fork, onOpenTrace }: CellProps) {
   let body
   if (turn) {
     body = (
       <TurnView
         turn={turn}
+        fold={fold}
         sessionId={sessionId}
         selected={selected}
         onSelectTurn={(id) => onOpenTrace(side, id)}
@@ -81,6 +83,9 @@ export interface CompareRowViewProps {
   mode: CompareMode
   left: TurnState | undefined
   right: TurnState | undefined
+  leftFold?: TurnFold
+  rightFold?: TurnFold
+  baseline?: ComparisonBaseline
   leftSessionId: string
   rightSessionId: string
   replayActive: boolean
@@ -94,8 +99,9 @@ export interface CompareRowViewProps {
 /** 同一个 pair 的一行：左右两轮（高度对齐）+ 指标对照 + （对齐视图）步骤对齐摘要与文本 diff */
 export const CompareRowView = memo(function CompareRowView(p: CompareRowViewProps) {
   const { left, right } = p
+  const collapsed = !!(left || right) && (!left || !!p.leftFold?.collapsed) && (!right || !!p.rightFold?.collapsed)
   return (
-    <section className="space-y-2" data-testid="compare-row" data-pair={p.row.pair} data-fork={p.row.fork}>
+    <section className="space-y-2" data-testid="compare-row" data-pair={p.row.pair} data-fork={p.row.fork} data-collapsed={collapsed || undefined}>
       <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
         {p.row.fork ? (
           <span className="rounded bg-warning/15 px-1.5 py-0.5 text-warning" data-testid="fork-label">
@@ -111,6 +117,7 @@ export const CompareRowView = memo(function CompareRowView(p: CompareRowViewProp
           side="left"
           turnId={p.row.leftTurnId}
           turn={left}
+          fold={p.leftFold}
           sessionId={p.leftSessionId}
           mode={p.mode}
           replayActive={p.replayActive}
@@ -123,6 +130,7 @@ export const CompareRowView = memo(function CompareRowView(p: CompareRowViewProp
           side="right"
           turnId={p.row.rightTurnId}
           turn={right}
+          fold={p.rightFold}
           sessionId={p.rightSessionId}
           mode={p.mode}
           replayActive={p.replayActive}
@@ -132,8 +140,8 @@ export const CompareRowView = memo(function CompareRowView(p: CompareRowViewProp
           onOpenTrace={p.onOpenTrace}
         />
       </div>
-      {!p.row.fork && <MetricsCompare left={left} right={right} />}
-      {p.alignOn && !p.row.fork && <AlignmentPanel align={p.row.align} />}
+      {!p.row.fork && <MetricsCompare left={left} right={right} baseline={p.baseline} />}
+      {p.alignOn && !p.row.fork && !collapsed && <AlignmentPanel align={p.row.align} />}
     </section>
   )
 })

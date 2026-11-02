@@ -90,6 +90,13 @@ async def validate_spec(
         report.stage = "schema"
         return report
     report.spec = spec
+    if spec.adapter is not None:
+        from evalp.services.adapter import AdapterService
+
+        try:
+            await ctx.svc(AdapterService).validate(spec.adapter)
+        except ValidationFailed as exc:
+            report.error("adapter", exc.message)
 
     result = await resolve_spec(s, spec)
     report.resolved, report.refs = result.resolved, result.refs

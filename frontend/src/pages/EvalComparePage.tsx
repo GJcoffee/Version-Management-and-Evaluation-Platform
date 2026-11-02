@@ -22,7 +22,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { RelativeTime } from '@/components/ui/RelativeTime'
+import { DateTime } from '@/components/ui/DateTime'
 import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
@@ -78,7 +78,7 @@ function RunInfo({ id, label }: { id: string | undefined; label: string }) {
               <span>
                 成本 <span className="font-mono text-foreground">{r.stats ? formatCost(r.stats.cost) : '-'}</span>
               </span>
-              <RelativeTime value={r.created_at} />
+              <DateTime value={r.created_at} />
             </div>
           </>
         )}

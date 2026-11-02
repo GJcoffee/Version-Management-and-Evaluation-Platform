@@ -39,6 +39,7 @@ log = get_logger(__name__)
 
 EmitFn = Callable[[AgentEvent], Awaitable[None]]
 BeforeEndFn = Callable[["TurnResult"], Awaitable[None]]
+PrepareInputFn = Callable[[], Awaitable[Message]]
 
 _END_TO_STATUS = {"completed": "ok", "error": "error", "cancelled": "cancelled", "timeout": "timeout"}
 _STATUS_TO_END = {v: k for k, v in _END_TO_STATUS.items()}
@@ -98,6 +99,10 @@ class _State:
     dropped: int = 0
     deltas: dict[str, str] = field(default_factory=dict)  # step_id -> 尚未被 llm.response 取代的流出文本
     notes: list[str] = field(default_factory=list)
+    responses: dict[str, dict[str, Any]] = field(default_factory=dict)
+    tools: set[str] = field(default_factory=set)
+    metrics: dict[str, Any] = field(default_factory=dict)
+    middleware_ms: int | None = None
 
     def mark_first_output(self) -> None:
         if self.ttft_ms is None:
@@ -116,6 +121,7 @@ class Runner:
         emit: EmitFn,
         *,
         before_end: BeforeEndFn | None = None,
+        prepare_input: PrepareInputFn | None = None,
     ) -> TurnResult:
         """执行一轮并通过 ``emit`` 输出全部事件（含最后的 ``turn.end``）。
 
@@ -125,7 +131,9 @@ class Runner:
         """
         state = _State(t0=time.monotonic(), history_len=len(history))
         budget = ctx.deadline - state.t0
-        consumer = asyncio.create_task(self._consume(adapter, ctx, history, user_input, emit, state))
+        consumer = asyncio.create_task(
+            self._consume(adapter, ctx, history, user_input, emit, state, prepare_input)
+        )
         waiter = asyncio.create_task(ctx.cancel.wait())
         try:
             await asyncio.wait({consumer, waiter}, return_when=asyncio.FIRST_COMPLETED)
@@ -154,13 +162,29 @@ class Runner:
         user_input: Message,
         emit: EmitFn,
         state: _State,
+        prepare_input: PrepareInputFn | None = None,
     ) -> None:
         remaining = ctx.deadline - time.monotonic()
         limit = None if remaining == float("inf") else max(remaining, 0.0)
         timer = asyncio.timeout(limit)
-        agen = adapter.run_turn(ctx, history, user_input)
+        agen = None
         try:
             async with timer:
+                if ctx.cancel.is_set():
+                    state.outcome = "cancelled"
+                    return
+                effective_input = user_input
+                if prepare_input is not None:
+                    await self._ensure_started(ctx, user_input, emit, state)
+                    started = time.monotonic()
+                    try:
+                        effective_input = await prepare_input()
+                    finally:
+                        state.middleware_ms = int((time.monotonic() - started) * 1000)
+                if ctx.cancel.is_set():
+                    state.outcome = "cancelled"
+                    return
+                agen = adapter.run_turn(ctx, history, effective_input)
                 async for raw in agen:
                     if not isinstance(raw, AgentEvent):
                         raise TypeError(f"Adapter 产出了非 AgentEvent 对象: {type(raw).__name__}")
@@ -176,7 +200,8 @@ class Runner:
         finally:
             # 取消（CancelledError）与超时都会走到这里：关闭事件流，让 Adapter 的 finally 清理资源
             with contextlib.suppress(Exception):
-                await agen.aclose()  # type: ignore[attr-defined]
+                if agen is not None:
+                    await agen.aclose()  # type: ignore[attr-defined]
 
     async def _ensure_started(
         self, ctx: RunContext, user_input: Message, emit: EmitFn, state: _State
@@ -219,14 +244,29 @@ class Runner:
         elif event.type == "llm.response":
             state.mark_first_output()
             state.deltas.pop(event.step_id or p.get("step_id") or "", None)
-            state.llm_calls += 1
+            key = event.step_id or f"anonymous:{len(state.responses)}"
+            previous = state.responses.get(key) or {}
+            old_usage = previous.get("usage") or {}
             usage = p.get("usage") or {}
-            state.prompt_tokens += int(usage.get("prompt_tokens") or 0)
-            state.completion_tokens += int(usage.get("completion_tokens") or 0)
+            state.responses[key] = {**previous, **p}
+            state.llm_calls = len(state.responses)
+            state.prompt_tokens += (
+                int(usage.get("prompt_tokens") or 0) - int(old_usage.get("prompt_tokens") or 0)
+            )
+            state.completion_tokens += int(usage.get("completion_tokens") or 0) - int(
+                old_usage.get("completion_tokens") or 0
+            )
             state.estimated = state.estimated or bool(usage.get("estimated"))
-            state.cost += float(p.get("cost") or 0.0)
+            state.cost += float(p.get("cost") or 0.0) - float(previous.get("cost") or 0.0)
         elif event.type == "tool.call":
-            state.tool_calls += 1
+            if p.get("source") != "hiagent_sse":
+                state.tools.add(str(p.get("call_id") or event.step_id))
+                state.tool_calls = len(state.tools)
+        elif event.type == "tool.result":
+            state.tools.add(str(p.get("call_id") or event.step_id))
+            state.tool_calls = len(state.tools)
+        elif event.type == "metrics":
+            state.metrics.update(p)
         elif event.type == "message.assistant":
             try:
                 state.final = Message.model_validate(p.get("message"))
@@ -254,6 +294,10 @@ class Runner:
     ) -> TurnResult:
         await self._ensure_started(ctx, user_input, emit, state)
         end = state.agent_end or {}
+        if (state.metrics.get("execution_status") == "completed" and state.final is not None
+                and state.outcome in ("timeout", "cancelled")):
+            # 补齐查询被取消或到期，不能改写上游已经确认成功的执行。
+            state.outcome = "done"
 
         # Adapter 只在 turn.end 里给了 output 时，补一个 message.assistant
         if state.final is None and state.outcome == "done" and state.error is None:
@@ -321,6 +365,25 @@ class Runner:
                 cost = float(end["cost"])
         if state.estimated:
             usage["estimated"] = True
+        if state.metrics:
+            reported = state.metrics.get("usage") or {}
+            # 整轮与明细不可双重累计；整轮是独立来源。
+            for key in ("prompt_tokens", "completion_tokens"):
+                if reported.get(key) is not None:
+                    usage[key] = reported[key]
+                elif reported:
+                    usage.pop(key, None)
+            usage.update({k: v for k, v in state.metrics.items() if k != "usage"})
+            usage["observation_status"] = reported.get("observation_status", "partial")
+            usage["token_source"] = reported.get("source")
+            if state.responses:
+                usage["llm_calls_status"] = "confirmed"
+            else:
+                usage["llm_calls_status"] = "unknown"
+        if state.error and state.error.get("code") == "UPSTREAM_RESULT_UNKNOWN":
+            usage["execution_status"] = "unknown"
+        if state.middleware_ms is not None:
+            usage["middleware_ms"] = state.middleware_ms
         partial = "".join(state.deltas.values()) if status != "ok" else ""
         if len(partial) > PARTIAL_TEXT_MAX:
             partial = partial[:PARTIAL_TEXT_MAX] + "…"

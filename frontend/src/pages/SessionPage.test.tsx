@@ -5,7 +5,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Session } from '@/api/types'
 import { buildSessionState, initialSessionState, type UseSessionStreamResult } from '@/components/session'
-import { mk, toolTurnEvents } from '@/components/session/testEvents'
+import { mk, recordedTurnEvents, toolTurnEvents } from '@/components/session/testEvents'
 import { formatDuration } from '@/lib/format'
 import { mockApi } from '@/test/mockApi'
 import SessionPage from './SessionPage'
@@ -149,6 +149,21 @@ describe('SessionPage 总用时', () => {
     const latency = await screen.findByTestId('session-latency')
     expect(latency).toHaveTextContent(`总用时 ${formatDuration(575 * 2)}`)
     expect(latency).toHaveAttribute('title', expect.stringContaining(`首轮开始到末轮结束共 ${formatDuration(10_575)}`))
+  })
+
+  it('录制会话每轮、会话总计和 Trace 采用同一原始执行耗时', async () => {
+    stubViewport(false)
+    stream.turns = buildSessionState([
+      ...recordedTurnEvents('a', 1),
+      ...recordedTurnEvents('b', 20, 600_000),
+    ]).turns
+    renderPage()
+    expect(await screen.findByTestId('session-latency')).toHaveTextContent(`总用时 ${formatDuration(142_470)}`)
+    for (const bar of screen.getAllByTestId('turn-metrics')) {
+      expect(bar.querySelector('[data-metric="latency"]')).toHaveTextContent(formatDuration(71_235))
+    }
+    expect(screen.getByTestId('trace-duration')).toHaveTextContent(formatDuration(71_235))
+    expect(screen.getByTestId('trace-duration')).not.toHaveTextContent(formatDuration(71_760))
   })
 })
 

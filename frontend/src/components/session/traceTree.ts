@@ -1,4 +1,5 @@
 import type { EventEnvelope } from '@/api/types'
+import { recordedTurnTiming, type TurnTiming } from './turnTiming'
 
 /**
  * Trace 步骤树与时间瀑布图的纯函数（详设 6.2 / 14.2）。
@@ -56,6 +57,17 @@ function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
 
+/** 本地包装步骤的展示名说明范围，原始事件名和计时值仍保留在详情中。 */
+function spanName(payload: { name: string; attrs?: Record<string, unknown> }): string {
+  if (payload.name === 'HiAgent SSE传输' && payload.attrs?.metric_scope === 'sse_transport') {
+    return 'SSE接收与终态核对（本地）'
+  }
+  if (payload.name === 'HiAgent普通发布会话' && payload.attrs?.local_session_id && payload.attrs?.config_sha256) {
+    return '发布API适配器（本地）'
+  }
+  return payload.name
+}
+
 function makeNode(id: string, stepId: string | null, kind: TraceKind, ev: EventEnvelope): TraceNode {
   return {
     id,
@@ -72,6 +84,49 @@ function makeNode(id: string, stepId: string | null, kind: TraceKind, ev: EventE
     events: [],
     children: [],
   }
+}
+
+/** 仅对录制来源还原原始时间轴，事件本身保留回放时间与原始 payload。 */
+function restoreRecordedTimes(roots: TraceNode[], timing: TurnTiming): void {
+  const origin = timing.startedAt ? ms(timing.startedAt) : null
+  const end = timing.endedAt ? ms(timing.endedAt) : origin
+  const visit = (node: TraceNode) => {
+    for (const child of node.children) visit(child)
+    let startMs: number | null = null
+    let endMs: number | null = null
+    for (const event of node.events) {
+      const payload = event.payload as unknown as Record<string, unknown>
+      const attrs = payload.original_attrs ?? payload.attrs
+      if (!attrs || typeof attrs !== 'object') continue
+      const original = attrs as Record<string, unknown>
+      const start = original.original_started_at
+      const finish = original.original_ended_at
+      if (typeof start === 'string' && Number.isFinite(Date.parse(start))) startMs = Date.parse(start)
+      if (typeof finish === 'string' && Number.isFinite(Date.parse(finish))) endMs = Date.parse(finish)
+    }
+    if (startMs === null && node.children.length) {
+      // 大 LLM payload 的存根没有 original_attrs，用原始子 Span 范围与已保留的耗时恢复位置。
+      startMs = Math.min(...node.children.map((child) => child.startMs))
+      endMs = Math.max(...node.children.map((child) => child.endMs ?? child.startMs))
+      endMs = Math.max(endMs, startMs + (node.durationMs ?? 0))
+    }
+    if (startMs === null) {
+      const sourceLog = node.kind === 'log' && node.events.some((event) =>
+        (event.payload as unknown as Record<string, unknown>).source_mode === 'recorded')
+      startMs = (sourceLog ? origin : end) ?? node.startMs
+      if (node.kind === 'log' || node.kind === 'error' || node.kind === 'final') endMs = startMs
+      else if (node.endMs !== null) {
+        endMs = startMs
+        startMs -= Math.max(0, node.durationMs ?? 0)
+      }
+    }
+    node.startMs = startMs
+    if (node.endMs !== null && endMs !== null) {
+      node.endMs = Math.max(startMs, endMs)
+      node.durationMs = node.endMs - startMs
+    }
+  }
+  for (const root of roots) visit(root)
 }
 
 /** 按事件序列构建步骤树，返回根节点列表（按开始时间排序）。events 需已按 seq 升序。 */
@@ -99,6 +154,15 @@ export function buildStepTree(events: readonly EventEnvelope[]): TraceNode[] {
 
   for (const ev of events) {
     switch (ev.type) {
+      case 'llm.reasoning': {
+        const n = get(ev, ev.step_id?.startsWith('stage:') ? 'span' : 'llm')
+        if (!n.name) n.name = ev.step_id?.startsWith('stage:') ? '上游思考阶段（调用关联未知）' : 'LLM'
+        break
+      }
+      case 'metrics': {
+        // 轮次指标由后端汇总，不在前端生成额外调用。
+        break
+      }
       case 'llm.request': {
         const n = get(ev, 'llm')
         n.name = ev.payload.model || n.name || 'LLM'
@@ -112,6 +176,19 @@ export function buildStepTree(events: readonly EventEnvelope[]): TraceNode[] {
         n.endMs = ms(ev.ts)
         if (n.events.length === 1) n.startMs = lat !== null ? n.endMs - lat : n.endMs // 缺少 request 事件
         n.durationMs = lat ?? n.endMs - n.startMs
+        // 实时request记录的是本地收到SSE的时刻；终态用同一次上游Trace还原模型时间轴。
+        const upstream = (ev.payload as unknown as Record<string, unknown>).upstream
+        if (upstream && typeof upstream === 'object') {
+          const source = upstream as Record<string, unknown>
+          const start = typeof source.start_time === 'string' ? Date.parse(source.start_time) : NaN
+          const end = typeof source.end_time === 'string' ? Date.parse(source.end_time) : NaN
+          if (source.source === 'actual_completed_upstream_trace' && source.trace_id && source.span_id &&
+              Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+            n.startMs = start
+            n.endMs = end
+            n.durationMs = lat ?? end - start
+          }
+        }
         n.status = 'ok'
         break
       }
@@ -130,22 +207,25 @@ export function buildStepTree(events: readonly EventEnvelope[]): TraceNode[] {
         n.durationMs = lat ?? n.endMs - n.startMs
         n.status = ev.payload.is_error ? 'error' : 'ok'
         n.mocked = !!ev.payload.mocked
+        if ((ev.payload as unknown as Record<string, unknown>).source === 'hiagent_sse' && lat === null) {
+          n.durationMs = null // 接收时间差不能冒充上游工具执行时间
+        }
         break
       }
       case 'span.start': {
         const n = get(ev, 'span')
-        n.name = ev.payload.name
+        n.name = spanName(ev.payload)
         n.startMs = ms(ev.ts)
         break
       }
       case 'span.end': {
         const n = get(ev, 'span')
-        if (!n.name) n.name = ev.payload.name
+        if (!n.name) n.name = spanName(ev.payload)
         const lat = num(ev.payload.latency_ms)
         n.endMs = ms(ev.ts)
         if (n.events.length === 1) n.startMs = lat !== null ? n.endMs - lat : n.endMs
         n.durationMs = lat ?? n.endMs - n.startMs
-        n.status = 'ok'
+        n.status = ['error', 'timeout', 'cancelled'].includes(String(ev.payload.status)) ? 'error' : 'ok'
         break
       }
       case 'log': {
@@ -200,6 +280,8 @@ export function buildStepTree(events: readonly EventEnvelope[]): TraceNode[] {
       parent.children.push(n)
     } else roots.push(n)
   }
+  const recorded = recordedTurnTiming(events)
+  if (recorded) restoreRecordedTimes(roots, recorded)
   const cmp = (a: TraceNode, b: TraceNode) => a.startMs - b.startMs || (a.seq ?? 0) - (b.seq ?? 0)
   const sortRec = (list: TraceNode[]) => {
     list.sort(cmp)

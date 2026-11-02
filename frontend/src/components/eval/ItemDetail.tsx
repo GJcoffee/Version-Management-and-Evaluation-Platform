@@ -4,7 +4,7 @@ import { ExternalLink } from 'lucide-react'
 import type { EvalItemDetailOut, EvalScoreOut } from '@/api/evalTypes'
 import { ChatPane, useSessionStream } from '@/components/session'
 import { Badge } from '@/components/ui/Badge'
-import { formatCost, formatDuration } from '@/lib/format'
+import { formatCost, formatDatasetValue, formatDuration } from '@/lib/format'
 import { VERDICT_LABEL, formatScore, itemErrorText, itemVerdict, scoreTone } from './evalUtils'
 
 export function VerdictBadge({ item }: { item: Pick<EvalItemDetailOut, 'status' | 'passed'> }) {
@@ -112,11 +112,11 @@ export function ItemDetailBody({ item, showConversation = true }: { item: EvalIt
         )}
       </Section>
       <Section title="期望">
-        <Text>{item.expected ?? <span className="text-muted-foreground">（用例没有 expected）</span>}</Text>
+        <Text>{item.expected == null ? <span className="text-muted-foreground">（用例没有 expected）</span> : formatDatasetValue(item.expected, true)}</Text>
       </Section>
-      {item.case_detail?.rubric && (
+      {item.case_detail?.rubric != null && (
         <Section title="评分标准 rubric">
-          <Text>{item.case_detail.rubric}</Text>
+          <Text>{formatDatasetValue(item.case_detail.rubric, true)}</Text>
         </Section>
       )}
       <Section title="评估器分数与理由">

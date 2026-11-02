@@ -5,6 +5,7 @@ import { ClipboardCheck, GitCompare, OctagonX, WifiOff } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import type { EvalItemOut, EvalRunDetailOut } from '@/api/evalTypes'
 import { evalKeys, useCancelEval, useEval, useEvals, type EvalItemFilter } from '@/api/queries/evals'
+import { EvalExportButton } from '@/components/eval/EvalExportButton'
 import { EvalItemDrawer } from '@/components/eval/EvalItemDrawer'
 import { EvalItemsTable } from '@/components/eval/EvalItemsTable'
 import { EvalProgressBar, EvalStatusBadge } from '@/components/eval/EvalStatus'
@@ -30,7 +31,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
-import { RelativeTime } from '@/components/ui/RelativeTime'
+import { DateTime } from '@/components/ui/DateTime'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { formatApiError } from '@/lib/apiError'
 import { toast } from '@/stores/toast'
@@ -112,6 +113,7 @@ function ReportView({ run }: { run: EvalRunDetailOut }) {
           </h1>
           <EvalStatusBadge status={status} />
           <div className="ml-auto flex flex-wrap items-center gap-2">
+            <EvalExportButton runId={run.id} status={status} />
             {hasHuman && status !== 'queued' && (
               <Link
                 to={`/evals/${run.id}/annotate`}
@@ -163,11 +165,11 @@ function ReportView({ run }: { run: EvalRunDetailOut }) {
             </span>
           )}
           <span>
-            创建 <RelativeTime value={run.created_at} />
+            创建 <DateTime value={run.created_at} />
           </span>
           {run.finished_at && (
             <span>
-              结束 <RelativeTime value={run.finished_at} />
+              结束 <DateTime value={run.finished_at} />
             </span>
           )}
         </div>

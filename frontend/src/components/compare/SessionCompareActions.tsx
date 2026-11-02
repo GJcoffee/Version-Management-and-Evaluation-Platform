@@ -177,7 +177,7 @@ export function ReplayDialog({ session, onClose }: { session: Session; onClose: 
   )
 }
 
-/** 选同一 agent 下的另一个会话 -> 创建 history 对比 -> 跳转 */
+/** 选同一 agent 下的基线会话 -> 左侧基线、右侧当前会话 -> 创建 history 对比。 */
 export function CompareSessionDialog({ session, onClose }: { session: Session; onClose: () => void }) {
   const navigate = useNavigate()
   // 候选默认不含重放产生的会话（它们是对比的副产品，容易把真正想比的会话挤出列表）
@@ -191,7 +191,7 @@ export function CompareSessionDialog({ session, onClose }: { session: Session; o
   const submit = async () => {
     if (!otherId) return
     try {
-      const g = await create.mutateAsync({ kind: 'session', mode: 'history', left: { session_id: session.id }, right: { session_id: otherId } })
+      const g = await create.mutateAsync({ kind: 'session', mode: 'history', left: { session_id: otherId }, right: { session_id: session.id } })
       onClose()
       navigate(`/compare/${g.id}`)
     } catch (e) {
@@ -205,7 +205,7 @@ export function CompareSessionDialog({ session, onClose }: { session: Session; o
       onOpenChange={(v) => !v && onClose()}
       size="md"
       title="与其他会话对比"
-      description={`选择 ${session.agent_name ?? '该 agent'} 下的另一个会话，按轮次逐行对比（当前会话在左侧）。`}
+      description={`选择 ${session.agent_name ?? '该 agent'} 下的基线会话。选中的会话在左侧，当前会话在右侧，按轮次逐行对比。`}
       footer={
         <>
           <Button variant="outline" onClick={onClose}>
@@ -227,7 +227,7 @@ export function CompareSessionDialog({ session, onClose }: { session: Session; o
         />
         包含重放会话
       </label>
-      <Field label="另一个会话" htmlFor="compare-other">
+      <Field label="基线会话" htmlFor="compare-other">
         {list.isLoading ? (
           <LoadingBlock className="py-2" />
         ) : candidates.length === 0 ? (

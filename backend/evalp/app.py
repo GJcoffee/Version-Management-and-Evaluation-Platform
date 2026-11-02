@@ -257,5 +257,9 @@ def _mount_static(app: FastAPI, static_dir: Path) -> None:
         if full_path:
             candidate = (root / full_path).resolve()
             if candidate.is_file() and candidate.is_relative_to(root):
+                if candidate == index.resolve():
+                    return FileResponse(candidate, headers={"Cache-Control": "no-store"})
                 return FileResponse(candidate)
-        return FileResponse(index, media_type="text/html")
+            if full_path.startswith("assets/") and Path(full_path).suffix in {".js", ".css"}:
+                raise NotFound("静态资源不存在")
+        return FileResponse(index, media_type="text/html", headers={"Cache-Control": "no-store"})

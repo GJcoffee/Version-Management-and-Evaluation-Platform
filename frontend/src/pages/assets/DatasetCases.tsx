@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Dialog } from '@/components/ui/Dialog'
 import { Input } from '@/components/ui/Input'
 import { LoadingBlock } from '@/components/ui/Spinner'
+import { formatDatasetValue } from '@/lib/format'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 
 const COLS = 'grid-cols-[3.5rem_11rem_minmax(0,1.4fr)_minmax(0,1fr)_10rem]'
@@ -76,6 +77,7 @@ export function DatasetCases({ revId, total }: { revId: string; total?: number }
                   )
                 }
                 const turns = c.input?.turns ?? []
+                const expected = formatDatasetValue(c.expected)
                 return (
                   <button
                     type="button"
@@ -94,8 +96,8 @@ export function DatasetCases({ revId, total }: { revId: string; total?: number }
                         {turns.join(' ⏎ ')}
                       </span>
                     </span>
-                    <span className="truncate text-muted-foreground" title={c.expected ?? undefined}>
-                      {c.expected ?? '-'}
+                    <span className="truncate text-muted-foreground" title={expected}>
+                      {expected}
                     </span>
                     <span className="flex gap-1 overflow-hidden">
                       {c.tags.map((t) => (
@@ -125,10 +127,10 @@ export function DatasetCases({ revId, total }: { revId: string; total?: number }
               </ol>
             </Item>
             <Item label="expected">
-              <p className="whitespace-pre-wrap">{detail.expected ?? '-'}</p>
+              <p className="whitespace-pre-wrap break-words">{formatDatasetValue(detail.expected, true)}</p>
             </Item>
             <Item label="rubric">
-              <p className="whitespace-pre-wrap">{detail.rubric ?? '-'}</p>
+              <p className="whitespace-pre-wrap break-words">{formatDatasetValue(detail.rubric, true)}</p>
             </Item>
             <Item label="tags">{detail.tags.length ? detail.tags.join(', ') : '-'}</Item>
             <Item label="metadata">

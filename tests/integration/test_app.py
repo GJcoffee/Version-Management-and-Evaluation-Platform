@@ -145,6 +145,24 @@ async def test_no_static_when_index_missing(config, ctx, tmp_path):
         assert r.status_code == 404 and r.json()["error"]["code"] == "NOT_FOUND"
 
 
+@pytest.mark.parametrize("path", ["/", "/index.html", "/assets", "/assets/ast_1"])
+async def test_spa_entry_is_not_cached(config, ctx, static_dir, path):
+    app = create_app(config, ctx=ctx, static_dir=static_dir)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        response = await c.get(path)
+        assert response.status_code == 200 and "SPA" in response.text
+        assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize("path", ["/assets/AssetsPage-old.js", "/assets/index-old.css"])
+async def test_missing_bundle_does_not_return_spa_html(config, ctx, static_dir, path):
+    app = create_app(config, ctx=ctx, static_dir=static_dir)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        response = await c.get(path)
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "NOT_FOUND"
+
+
 # ---------------------------------------------------------------- SSE 经 API 输出
 
 

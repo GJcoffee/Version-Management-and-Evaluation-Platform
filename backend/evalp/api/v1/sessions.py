@@ -115,6 +115,7 @@ async def create_turn(
         tool_mocks=body.tool_mocks,
         pair_index=body.pair_index,
         wait=do_wait,
+        middlewares=body.middlewares,
     )
     response.status_code = 200 if do_wait else 202
     return TurnAccepted(
@@ -130,6 +131,12 @@ async def cancel_turn(turn_id: str, ctx: AppContext = Depends(get_ctx)):
     svc = ctx.svc(SessionService)
     await svc.cancel_turn(turn_id)
     return await svc.get_turn(turn_id)
+
+
+@router.get("/turns/{turn_id}", response_model=TurnOut)
+async def get_turn(turn_id: str, ctx: AppContext = Depends(get_ctx)):
+    """读取轮次及已保存的中间件配置与实际输入。"""
+    return await ctx.svc(SessionService).get_turn(turn_id)
 
 
 @router.get("/sessions/{session_id}/stream")
@@ -171,7 +178,7 @@ async def get_blob(
 ):
     """读取被转存为 blob 的大 payload（事件里的 ``{"$blob": hash}``）；也可读取资产内容的 blob。
 
-    只允许读取被事件引用的 blob 或资产修订的 blob，其他 blob 一律 404。
+    只允许读取被事件、中间件快照或资产修订引用的 blob，其他 blob 一律 404。
     """
     if not _HASH_RE.match(blob_hash):
         raise ValidationFailed(

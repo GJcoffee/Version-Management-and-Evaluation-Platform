@@ -1,11 +1,24 @@
 import {
   formatBytes,
   formatCost,
+  formatDatasetValue,
   formatDuration,
   formatPercent,
   formatRelativeTime,
   formatTokens,
 } from './format'
+
+describe('formatDatasetValue', () => {
+  it('文本保持原样，结构化值输出 JSON，空值显示占位符', () => {
+    expect(formatDatasetValue('第一行\n第二行', true)).toBe('第一行\n第二行')
+    expect(formatDatasetValue({ nested: [false, 0, null] })).toBe('{"nested":[false,0,null]}')
+    expect(formatDatasetValue([{ score: 1 }], true)).toBe('[\n  {\n    "score": 1\n  }\n]')
+    expect(formatDatasetValue(false)).toBe('false')
+    expect(formatDatasetValue(0)).toBe('0')
+    expect(formatDatasetValue(null)).toBe('-')
+    expect(formatDatasetValue(undefined)).toBe('-')
+  })
+})
 
 describe('formatTokens', () => {
   it('小于 1000 原样输出', () => {
@@ -43,7 +56,8 @@ describe('formatDuration', () => {
     expect(formatDuration(1234)).toBe('1.2s')
     expect(formatDuration(1000)).toBe('1.0s')
     expect(formatDuration(65_000)).toBe('1m5s')
-    expect(formatDuration(3_660_000)).toBe('1h1m')
+    expect(formatDuration(3_660_000)).toBe('1h1m0s')
+    expect(formatDuration(3_677_646)).toBe('1h1m18s')
   })
   it('空值与负数', () => {
     expect(formatDuration(null)).toBe('-')

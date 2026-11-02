@@ -18,7 +18,7 @@ export interface SideSummary {
   running: boolean
 }
 
-function SidePanel({ label, side, summary, testid }: { label: string; side: CompareSide; summary: SideSummary; testid: string }) {
+function SidePanel({ label, side, summary, testid, baseline }: { label: string; side: CompareSide; summary: SideSummary; testid: string; baseline: boolean }) {
   const t = summary.totals
   return (
     <div className="min-w-0 rounded-lg border border-border bg-card px-3 py-2" data-testid={testid}>
@@ -30,6 +30,7 @@ function SidePanel({ label, side, summary, testid }: { label: string; side: Comp
         <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs" title={`版本 ${side.version_id}`} data-testid={`${testid}-version`}>
           {sideVersion(side)}
         </span>
+        {baseline && <Badge variant="outline" data-testid="baseline-badge">基线</Badge>}
         {summary.running && <Badge variant="info">运行中</Badge>}
         <Link
           to={`/sessions/${side.session_id}`}
@@ -146,8 +147,8 @@ export function CompareHeader({ group, left, right, replay, alignOn, onToggleAli
         <EditableNotes value={group.notes} disabled={!onUpdate} onSave={(notes) => onUpdate!({ notes })} />
       )}
       <div className="grid grid-cols-2 gap-3">
-        <SidePanel label={ll} side={group.left} summary={left} testid="side-left" />
-        <SidePanel label={rl} side={group.right} summary={right} testid="side-right" />
+        <SidePanel label={ll} side={group.left} summary={left} testid="side-left" baseline />
+        <SidePanel label={rl} side={group.right} summary={right} testid="side-right" baseline={false} />
       </div>
     </div>
   )

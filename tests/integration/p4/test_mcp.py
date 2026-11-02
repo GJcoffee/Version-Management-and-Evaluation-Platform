@@ -19,6 +19,8 @@ TOOLS = {
     "chat", "run_eval", "get_eval_report", "get_eval_compare",
     "list_agents", "get_draft", "update_draft", "list_assets", "upsert_asset", "import_dataset",
     "get_eval_status", "get_session", "replay_session", "compare_sessions", "get_conventions",
+    "list_adapters", "get_adapter_binding", "check_adapter_connection", "update_adapter_bindings",
+    "rollback_adapter_binding", "list_adapter_credentials", "create_adapter_credential", "get_version",
 }  # fmt: skip
 MOCK_API = "http://test/api/v1"
 
@@ -40,7 +42,7 @@ def mock_server(project_dir):
         yield server, m
 
 
-async def test_registers_exactly_the_twenty_tools(project_dir):
+async def test_registers_all_platform_tools(project_dir):
     server = build_server(project_dir=project_dir)
     async with Client(server) as c:
         tools = (await c.list_tools()).tools
@@ -51,6 +53,43 @@ async def test_registers_exactly_the_twenty_tools(project_dir):
     assert not run_eval.input_schema.get("required")  # 全部参数都可以省略（dataset 等取 [eval] 默认值）
     update = next(t for t in tools if t.name == "update_draft")
     assert update.input_schema["required"] == ["patch", "expected_revision"]
+
+
+async def test_adapter_tools_share_binding_service(project_dir, client, provider):
+    """通过 MCP 创建凭据、检查和覆盖，读回原版本接入修订。"""
+    from tests.integration.p2a.conftest import Api
+
+    api = Api(client)
+    agent = await api.agent("adapter-test", kind="code", spec={
+        "kind": "code", "transport": "http", "http": {"base_url": "http://127.0.0.1:9"},
+        "source": {"capture_git": False},
+    })
+    version = (await api.publish(agent["draft"]))["version"]
+    server = build_server(project_dir=project_dir, client_factory=lambda p: EvalpClient(http=client))
+    async with Client(server) as c:
+        registry = json.loads(text(await c.call_tool("list_adapters", {})))
+        assert registry[0]["id"] == "hiagent"
+        credential = json.loads(text(await c.call_tool("create_adapter_credential", {
+            "name": "mcp-test", "secret": "test-private-key",
+        })))
+        binding = {"id": "hiagent", "version": "1.0.0", "credential_ref": credential["ref"], "config": {
+            "base_url": "https://example.com", "app_id": "a", "user_id": "u", "published_version": "47",
+        }}
+        check = json.loads(text(await c.call_tool("check_adapter_connection", {"binding": binding})))
+        assert check["ok"] and check["details"]["llm_requested"] is False
+        result = json.loads(text(await c.call_tool("update_adapter_bindings", {
+            "version_ids": [version["id"]], "binding": binding,
+            "expected_revisions": {version["id"]: 0}, "reason": "MCP覆盖",
+            "acknowledge_transport_change": True, "dry_run": False,
+        })))
+        assert result[0]["applied"]
+        state = json.loads(text(await c.call_tool("get_adapter_binding", {"version": version["id"]})))
+        assert state["current"]["revision"] == 1
+        assert "test-private-key" not in str(state)
+        restored = json.loads(text(await c.call_tool("rollback_adapter_binding", {
+            "version": version["id"], "revision": 0, "expected_revision": 1, "reason": "恢复",
+        })))
+        assert restored["target"]["revision"] == 2 and restored["target"]["binding"] is None
 
 
 async def test_push_and_list_versions_against_real_app(project_dir, client, provider):
@@ -252,12 +291,14 @@ async def test_chat_tool(mock_server):
 async def test_evalp_mcp_command_speaks_stdio(project_dir, tmp_path):
     """`evalp mcp` 作为子进程通过 stdio 对话（stdout 只能有协议内容）。"""
     import sys
+    from pathlib import Path
 
     from mcp import StdioServerParameters
 
     params = StdioServerParameters(
         command=sys.executable, args=["-m", "evalp", "mcp"], cwd=str(project_dir),
-        env={"EVALP_DATA_DIR": str(tmp_path / "nodata"), "PATH": "/usr/bin:/bin"},
+        env={"EVALP_DATA_DIR": str(tmp_path / "nodata"), "PATH": "/usr/bin:/bin",
+             "PYTHONPATH": str(Path(__file__).resolve().parents[3] / "backend")},
     )  # fmt: skip
     async with Client(params) as c:
         assert {t.name for t in (await c.list_tools()).tools} == TOOLS

@@ -209,7 +209,7 @@ export interface EvalItemOut {
   repeat_idx: number
   input_preview: string | null
   output_preview: string | null
-  expected: string | null
+  expected: unknown
   tags: string[]
   status: EvalItemStatusOut
   passed: boolean | null
@@ -238,8 +238,8 @@ export interface EvalItemDetailOut extends EvalItemOut {
   case_detail: {
     case_key?: string
     input?: { turns?: string[] }
-    expected?: string | null
-    rubric?: string | null
+    expected?: unknown
+    rubric?: unknown
     tags?: string[]
     [k: string]: unknown
   }

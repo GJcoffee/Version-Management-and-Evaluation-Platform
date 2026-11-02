@@ -41,6 +41,13 @@ class RetentionConfig(BaseModel):
     eval_sessions_days: int = Field(0, ge=0)  # 0 表示永久保留
 
 
+class ArtifactsConfig(BaseModel):
+    allowed_hosts: str = ""  # 逗号分隔的精确域名；空值禁止远端读取
+    max_download_bytes: int = Field(1_048_576, ge=1)
+    max_input_bytes: int = Field(65_536, ge=1)
+    timeout_s: float = Field(15.0, gt=0)
+
+
 class Config(BaseModel):
     """平台配置。路径属性均由 data_dir 派生。"""
 
@@ -51,6 +58,7 @@ class Config(BaseModel):
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     events: EventsConfig = Field(default_factory=EventsConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
+    artifacts: ArtifactsConfig = Field(default_factory=ArtifactsConfig)
 
     @property
     def db_path(self) -> Path:

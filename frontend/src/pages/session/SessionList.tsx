@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom'
 import type { Session } from '@/api/types'
 import { Badge } from '@/components/ui/Badge'
-import { RelativeTime } from '@/components/ui/RelativeTime'
+import { DateTime } from '@/components/ui/DateTime'
 import { formatCost, formatTokens } from '@/lib/format'
 import { STATUS_LABEL, sessionTitle, sessionTokens, versionLabel } from './sessionUtils'
 
@@ -25,7 +25,7 @@ export function RecentSessionList({ sessions }: { sessions: Session[] }) {
             <span className="hidden shrink-0 font-mono text-xs text-muted-foreground sm:inline">
               {s.stats.turns ?? 0} 轮 · {formatTokens(sessionTokens(s))} · {formatCost(s.stats.cost ?? 0)}
             </span>
-            <RelativeTime value={s.updated_at} className="w-20 shrink-0 text-right text-xs text-muted-foreground" />
+            <DateTime value={s.updated_at} className="shrink-0 text-right text-xs text-muted-foreground" />
           </Link>
         </li>
       ))}

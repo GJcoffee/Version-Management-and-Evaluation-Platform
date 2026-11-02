@@ -6,7 +6,7 @@ import { useEvalItem } from '@/api/queries/evals'
 import { Badge } from '@/components/ui/Badge'
 import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
-import { formatCost, formatDuration } from '@/lib/format'
+import { formatCost, formatDatasetValue, formatDuration } from '@/lib/format'
 import { Drawer } from './Drawer'
 import { ItemConversation, ScoreList, VerdictBadge } from './ItemDetail'
 import { TONE_CLASS, deltaTone, formatScore, formatSigned, runVersionLabel } from './evalUtils'
@@ -118,7 +118,7 @@ export function CompareCaseDrawer({
             </div>
             <div>
               <div className="mb-0.5 text-xs font-semibold text-muted-foreground">期望</div>
-              <div className="whitespace-pre-wrap rounded-md bg-muted/50 px-3 py-2">{base.data?.expected ?? <span className="text-muted-foreground">（用例没有 expected）</span>}</div>
+              <div className="whitespace-pre-wrap rounded-md bg-muted/50 px-3 py-2">{base.data?.expected == null ? <span className="text-muted-foreground">（用例没有 expected）</span> : formatDatasetValue(base.data.expected, true)}</div>
             </div>
           </div>
           <div className="grid divide-x divide-border md:grid-cols-2">

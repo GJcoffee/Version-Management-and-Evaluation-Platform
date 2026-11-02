@@ -65,6 +65,7 @@ export default function DiffEditorImpl({
         scrollBeyondLastLine: false,
         automaticLayout: true,
         wordWrap: 'on',
+        unicodeHighlight: { ambiguousCharacters: false },
         // 中文按字符 diff
         diffAlgorithm: 'advanced',
         ignoreTrimWhitespace: false,
