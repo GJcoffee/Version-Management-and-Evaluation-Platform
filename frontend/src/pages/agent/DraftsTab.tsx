@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { FilePen, Plus } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import { useCreateDraft, useDrafts } from '@/api/queries/drafts'
+import { IncludeArchivedToggle, useArchiveFilter } from '@/components/IncludeArchivedToggle'
+import { milestoneText } from '@/lib/versionArchive'
 import type { Agent, VersionSummary } from '@/api/types'
 import { Button } from '@/components/ui/Button'
 import { Dialog } from '@/components/ui/Dialog'
@@ -98,6 +100,7 @@ function CreateDraftDialog({
   const [name, setName] = useState('')
   const [from, setFrom] = useState('')
   const [touched, setTouched] = useState(false)
+  const { shown, filter } = useArchiveFilter(versions, [from])
   const nameError = !name.trim()
     ? '请填写名称'
     : !DRAFT_NAME_RE.test(name.trim())
@@ -148,13 +151,17 @@ function CreateDraftDialog({
         <Field label="初始内容" htmlFor="dr-from">
           <Select id="dr-from" value={from} onChange={(e) => setFrom(e.target.value)}>
             <option value="">最小模板</option>
-            {versions.map((v) => (
+            {shown.map((v) => (
               <option key={v.id} value={v.id}>
                 基于 v{v.seq}
                 {v.tags.length ? `（${v.tags.join('、')}）` : ''}
+                {v.milestone ? ` ${milestoneText(v)}` : ''}
               </option>
             ))}
           </Select>
+          <div className="mt-1.5">
+            <IncludeArchivedToggle {...filter} />
+          </div>
         </Field>
         <button type="submit" className="hidden" />
       </form>

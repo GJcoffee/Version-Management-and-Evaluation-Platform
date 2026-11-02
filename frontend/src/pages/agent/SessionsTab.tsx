@@ -5,6 +5,7 @@ import { ApiError } from '@/api/client'
 import { useAgent } from '@/api/queries/agents'
 import { useInfiniteSessions } from '@/api/queries/sessions'
 import { useVersions } from '@/api/queries/versions'
+import { IncludeArchivedToggle, useArchiveFilter } from '@/components/IncludeArchivedToggle'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -15,6 +16,7 @@ import { LoadingBlock } from '@/components/ui/Spinner'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
 import { formatCost, formatTokens } from '@/lib/format'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
+import { milestoneText } from '@/lib/versionArchive'
 import { NewSessionDialog } from '../session/NewSessionDialog'
 import { SessionStatusBadge } from '../session/SessionList'
 import { MODE_LABEL, sessionTitle, sessionTokens, versionLabel } from '../session/sessionUtils'
@@ -29,6 +31,7 @@ export function SessionsTab({ agentId }: { agentId: string }) {
   const [versionId, setVersionId] = useState('')
   const [creating, setCreating] = useState(false)
   const dq = useDebouncedValue(q.trim(), 300)
+  const { shown, filter } = useArchiveFilter(versionList, [versionId])
 
   const sessions = useInfiniteSessions({ agent_id: agentId, version_id: versionId || undefined, q: dq || undefined })
   const items = sessions.data?.pages.flatMap((p) => p.items) ?? []
@@ -55,13 +58,15 @@ export function SessionsTab({ agentId }: { agentId: string }) {
           data-testid="version-filter"
         >
           <option value="">全部版本</option>
-          {versionList.map((v) => (
+          {shown.map((v) => (
             <option key={v.id} value={v.id}>
               v{v.seq}
               {v.tags.length > 0 ? `（${v.tags.join(', ')}）` : ''}
+              {v.milestone ? ` ${milestoneText(v)}` : ''}
             </option>
           ))}
         </Select>
+        <IncludeArchivedToggle {...filter} />
         <Button size="sm" className="ml-auto" onClick={() => setCreating(true)} disabled={!agent.data} data-testid="new-session">
           <Plus className="h-3.5 w-3.5" />
           新建对话

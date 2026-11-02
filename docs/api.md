@@ -239,13 +239,18 @@ DELETE → 204；已有版本时返回 409 `AGENT_IN_USE`，请改为归档。
 
 ### GET /agents/{agent_ref}/versions
 
-分页，新版本在前。条目没有 `spec` 和 `assets`，有 `tags`：
+分页，新版本在前。条目没有 `spec` 和 `assets`，有 `tags`，以及里程碑 / 归档信息（见下文"阶段性成果与归档"）：
 
 ```json
 {"items": [{"id": "ver_01…", "agent_id": "agt_01…", "seq": 13, "spec_hash": "ab12…", "source": {}, "parent_version_id": "ver_00…",
-            "from_draft_id": "drf_01…", "notes": "调低温度", "created_via": "ui", "created_at": "…", "tags": ["prod"]}],
+            "from_draft_id": "drf_01…", "notes": "调低温度", "created_via": "ui", "created_at": "…", "tags": ["prod"],
+            "milestone": true, "milestone_title": "第一阶段：语气优化", "archived_into": null, "archived_count": 12}],
  "next_cursor": null}
 ```
+
+可选参数 `archived`：`false` 只返回未归档的版本（里程碑与普通版本，列表更清爽），`true` 只返回已归档的；**缺省返回全部**，现有调用方不受影响。
+`milestone`（是否阶段性成果）、`milestone_title`（阶段名，可为 `null`）、`archived_into`（归档到的里程碑版本 id，未归档为 `null`）
+和 `archived_count`（里程碑下归档了多少个版本，非里程碑为 0）在版本详情、publish 响应里同样存在。
 
 ### GET /versions/{ref}
 
@@ -275,6 +280,31 @@ UPSERT：同一个标签会从旧版本移到这个版本。标签名：字母�
 ### DELETE /versions/{ref}/tags/{tag} → 204
 
 ### GET /agents/{agent_ref}/tags → `[{"agent_id", "tag", "version_id", "updated_at"}]`
+
+### 阶段性成果与归档
+
+某个版本是不错的阶段性成果时，把它设为**里程碑**，它之前的过程版本归档到它名下，版本列表里默认只留里程碑与未归档的版本。
+归档**只影响列表展示**：已归档的版本照常可以对话、评测、diff、按 `vN` / 标签引用，历史会话与评测、发布规范都不受影响，`latest` 也不变。
+结构只有一层：里程碑本身不能被归档到别的里程碑；已归档的版本不能设为里程碑（先移出归档）；之前的里程碑保持可见。
+三个接口都返回目标版本的摘要（`VersionSummary`，含最新的 `archived_count`）。
+
+### POST /versions/{ref}/milestone
+
+`{"title": "第一阶段：语气优化", "version_ids": ["ver_01…"]}`，两项都可省略。
+
+- `title`：阶段名（最长 100，首尾空白会去掉）。省略 = 不改（新里程碑为空）；空串或 `null` = 清空。
+- `version_ids`：要归档到它名下的版本（版本引用，通常是 id）。省略 = 归档同一 agent 中 `seq` 更小、未归档、非里程碑的**全部**版本；
+  给出时只归档所列版本，每个都必须是同一 agent 中 `seq` 更小、未归档、非里程碑的版本，否则 400 `VALIDATION_FAILED`（`details.errors[].path` 为 `version_ids[i]`），整体不生效。`[]` = 只标记里程碑、不归档。
+- 目标版本已归档 → 409 `INVALID_STATE`。已是里程碑的版本再次调用，可修改阶段名或补充归档更多版本。
+
+### DELETE /versions/{ref}/milestone
+
+取消阶段性成果：其下归档的版本全部移出归档，阶段名清空。该版本不是里程碑 → 409 `INVALID_STATE`。
+
+### POST /versions/{ref}/unarchive
+
+把该版本移出归档（`archived_into` 置空）。对**里程碑**调用则把它名下的版本**全部**移出归档（里程碑保留）。
+版本既不是里程碑、也没有被归档 → 409 `INVALID_STATE`。
 
 ### POST /versions/{ref}/to-draft
 

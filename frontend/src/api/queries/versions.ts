@@ -91,6 +91,34 @@ export function useRemoveTag() {
   })
 }
 
+/** 设为阶段性成果：`versionIds` 缺省 = 归档此前所有未归档的过程版本；`title` 为空串表示清空阶段名 */
+export function useSetMilestone() {
+  const invalidate = useInvalidateVersions()
+  return useMutation({
+    mutationFn: ({ versionId, title, versionIds }: { versionId: string; title?: string; versionIds?: string[] }) =>
+      api.post<VersionSummary>(`/versions/${versionId}/milestone`, { body: { title, version_ids: versionIds } }),
+    onSuccess: invalidate,
+  })
+}
+
+/** 取消阶段性成果：其下归档的版本全部移出归档 */
+export function useRemoveMilestone() {
+  const invalidate = useInvalidateVersions()
+  return useMutation({
+    mutationFn: (versionId: string) => api.delete<VersionSummary>(`/versions/${versionId}/milestone`),
+    onSuccess: invalidate,
+  })
+}
+
+/** 把版本移出归档；对里程碑调用则移出它名下的全部版本 */
+export function useUnarchiveVersion() {
+  const invalidate = useInvalidateVersions()
+  return useMutation({
+    mutationFn: (versionId: string) => api.post<VersionSummary>(`/versions/${versionId}/unarchive`),
+    onSuccess: invalidate,
+  })
+}
+
 /** 用该版本的 Spec 覆盖（或新建）草稿 */
 export function useVersionToDraft() {
   const qc = useQueryClient()

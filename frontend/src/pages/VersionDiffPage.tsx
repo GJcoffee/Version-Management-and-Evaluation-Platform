@@ -6,6 +6,7 @@ import { useRevision } from '@/api/queries/assets'
 import { useAgent } from '@/api/queries/agents'
 import { useVersion, useVersionDiff, useVersions } from '@/api/queries/versions'
 import type { AssetKind, DiffOp, PackageDiff, SpecChange, Version, VersionAssetRef } from '@/api/types'
+import { IncludeArchivedToggle, useArchiveFilter } from '@/components/IncludeArchivedToggle'
 import { Badge, type BadgeVariant } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { DiffEditor } from '@/components/ui/DiffEditor'
@@ -14,6 +15,7 @@ import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { ASSET_KIND_LABEL } from '@/lib/assetRef'
 import { cn } from '@/lib/cn'
+import { milestoneText } from '@/lib/versionArchive'
 import { unpinSpec } from '@/lib/specDiff'
 import { lineOfPath, specToYaml } from '@/lib/specYaml'
 import { languageFor } from './assets/assetUtils'
@@ -121,6 +123,7 @@ export default function VersionDiffPage() {
   const rightId = diff.data?.right.id ?? right
   const lv = useVersion(diff.data?.left.id)
   const rv = useVersion(diff.data?.right.id)
+  const { shown, filter } = useArchiveFilter(list, [leftId, rightId])
   const [selected, setSelected] = useState<SpecChange | null>(null)
   const [reveal, setReveal] = useState<{ line: number; side: 'original' | 'modified'; key: number } | null>(null)
   const [assetView, setAssetView] = useState<{ change: SpecChange; l?: VersionAssetRef; r?: VersionAssetRef } | null>(null)
@@ -159,10 +162,11 @@ export default function VersionDiffPage() {
   const versionSelect = (side: 'left' | 'right', value: string) => (
     <Select aria-label={side === 'left' ? '左侧版本' : '右侧版本'} value={value} onChange={(e) => setSide(side, e.target.value)} className="w-52">
       {!list.some((v) => v.id === value) && <option value={value}>{value ? value.slice(-10) : '选择版本…'}</option>}
-      {list.map((v) => (
+      {shown.map((v) => (
         <option key={v.id} value={v.id}>
           v{v.seq}
           {v.tags.length ? ` · ${v.tags.join(',')}` : ''}
+          {v.milestone ? ` · ${milestoneText(v)}` : ''}
           {v.notes ? ` · ${v.notes.slice(0, 16)}` : ''}
         </option>
       ))}
@@ -182,6 +186,7 @@ export default function VersionDiffPage() {
           <ArrowLeftRight className="h-4 w-4" />
         </Button>
         {versionSelect('right', rightId)}
+        <IncludeArchivedToggle {...filter} />
         {summary && (
           <div className="ml-auto flex items-center gap-1.5 text-xs" data-testid="diff-summary">
             {(Object.keys(OP_LABEL) as DiffOp[]).map((op) => (

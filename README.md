@@ -97,6 +97,9 @@ evalp eval gate <run_id> --baseline <基线 run_id> --max-regressions 0   # CI �
 evalp chat --version v2
 ```
 
+版本多了可以把阶段性成果标出来：`evalp milestone v5 --title "第一阶段：语气优化"` 把 v5 设为里程碑，它之前的过程版本归档到它名下
+（`evalp versions` 默认隐藏已归档的版本，`--all` 显示全部；归档只影响列表展示，已归档版本照常可用）；`evalp milestone --remove v5` 取消。
+
 其他常用命令：`evalp eval status|report|compare <run_id>`、`evalp asset ls|show|add|diff`、`evalp dataset import <文件> --name <名称>`、
 `evalp replay <会话> --to v2 --wait`、`evalp adapter check`、`evalp agent conventions show|set`（agent 的发布规范）、`evalp gc`；`evalp <命令> --help` 查看参数。
 

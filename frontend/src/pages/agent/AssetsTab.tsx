@@ -5,6 +5,7 @@ import { ApiError } from '@/api/client'
 import { useVersionAssets } from '@/api/queries/versions'
 import type { Agent, VersionSummary } from '@/api/types'
 import { AssetIdentity } from '@/components/AssetIdentity'
+import { IncludeArchivedToggle, useArchiveFilter } from '@/components/IncludeArchivedToggle'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -12,6 +13,7 @@ import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
 import { ASSET_KIND_LABEL, SNAPSHOT_READONLY_NOTE, assetTitle } from '@/lib/assetRef'
+import { versionOptionText } from '@/lib/versionArchive'
 import { changeText, groupVersionAssets } from './assetGroups'
 
 /**
@@ -30,6 +32,7 @@ export function AssetsTab({
   const [picked, setPicked] = useState<string | null>(null)
   const version = versions.find((v) => v.id === picked) ?? versions[0]
   const assets = useVersionAssets(version?.id)
+  const { shown, filter } = useArchiveFilter(versions, [version?.id])
 
   if (!version) {
     return (
@@ -59,15 +62,14 @@ export function AssetsTab({
         <label className="flex items-center gap-2 text-sm">
           <span className="text-xs text-muted-foreground">版本</span>
           <Select aria-label="选择版本" className="w-56" value={version.id} onChange={(e) => setPicked(e.target.value)}>
-            {versions.map((v) => (
+            {shown.map((v) => (
               <option key={v.id} value={v.id}>
-                v{v.seq}
-                {v === versions[0] ? ' · 最新' : ''}
-                {v.tags.length ? ` · ${v.tags.join(',')}` : ''}
+                {versionOptionText(v, v === versions[0] ? ['最新'] : [])}
               </option>
             ))}
           </Select>
         </label>
+        <IncludeArchivedToggle {...filter} />
         {previous && (
           <Link to={`/agents/${agent.id}/versions/diff?left=${previous.id}&right=${version.id}`}>
             <Button size="sm" variant="ghost">

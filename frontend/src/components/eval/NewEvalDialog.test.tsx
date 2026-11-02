@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -34,12 +34,12 @@ const estimate = {
   per_version: [],
 }
 
-function setup(testSelectable = false) {
+function setup(testSelectable = false, versions: unknown[] = [version], defaults = ['ver_1']) {
   const api = mockApi({
     'GET /api/v1/adapter-environments': { production: {}, test: {}, test_selectable: testSelectable },
     'GET /api/v1/agents': { items: [agent], next_cursor: null },
     'GET /api/v1/agents/agt_1': agent,
-    'GET /api/v1/agents/agt_1/versions': { items: [version], next_cursor: null },
+    'GET /api/v1/agents/agt_1/versions': { items: versions, next_cursor: null },
     'GET /api/v1/assets': { items: [], next_cursor: null },
     'POST /api/v1/evals': (c: { url: string }) =>
       c.url.includes('dry_run=true') ? { dry_run: true, batch_id: null, runs: [], estimate } : { batch_id: 'evb_1', runs: [{ id: 'evr_9', version_id: 'ver_1', status: 'queued' }], estimate },
@@ -49,7 +49,7 @@ function setup(testSelectable = false) {
   render(
     <QueryClientProvider client={client}>
       <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-        <NewEvalDialog agentId="agt_1" defaultVersionIds={['ver_1']} onClose={onClose} />
+        <NewEvalDialog agentId="agt_1" defaultVersionIds={defaults} onClose={onClose} />
       </MemoryRouter>
     </QueryClientProvider>,
   )
@@ -74,6 +74,31 @@ describe('NewEvalDialog：适配器环境', () => {
     setup(false)
     await screen.findByTestId('pick-dataset')
     expect(screen.queryByTestId('environment-switch')).toBeNull()
+  })
+})
+
+describe('NewEvalDialog：版本归档', () => {
+  const plain = { ...version, milestone: false, milestone_title: null, archived_into: null, archived_count: 0 }
+  const list = [
+    { ...plain, id: 'ver_3', seq: 3 },
+    { ...plain, id: 'ver_2', seq: 2, milestone: true, milestone_title: '第一阶段', archived_count: 1 },
+    { ...plain, id: 'ver_1', seq: 1, archived_into: 'ver_2' },
+  ]
+
+  it('默认只列里程碑（带标识）与未归档的版本，勾选「包括已归档」后才出现被归档的', async () => {
+    setup(false, list, ['ver_3'])
+    const picker = await screen.findByTestId('version-picker')
+    await within(picker).findByTestId('ver-v3')
+    expect(within(picker).getByTestId('ver-v2')).toHaveTextContent('★ 第一阶段')
+    expect(within(picker).queryByTestId('ver-v1')).toBeNull()
+    await userEvent.click(within(picker).getByTestId('include-archived'))
+    expect(within(picker).getByTestId('ver-v1')).toBeInTheDocument()
+  })
+
+  it('预选的版本已归档时仍然显示（从版本页展开的归档版本发起评测）', async () => {
+    setup(false, list, ['ver_1'])
+    const picker = await screen.findByTestId('version-picker')
+    expect(await within(picker).findByTestId('ver-v1')).toBeInTheDocument()
   })
 })
 

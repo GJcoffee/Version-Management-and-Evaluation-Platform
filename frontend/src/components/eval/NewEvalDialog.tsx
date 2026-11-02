@@ -9,6 +9,7 @@ import { useVersions } from '@/api/queries/versions'
 import type { VersionSummary } from '@/api/types'
 import { AssetRefPicker } from '@/components/AssetRefPicker'
 import { EnvironmentSwitch, environmentBody, useEnvironmentChoice } from '@/components/EnvironmentSwitch'
+import { IncludeArchivedToggle, useArchiveFilter } from '@/components/IncludeArchivedToggle'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Dialog } from '@/components/ui/Dialog'
@@ -17,6 +18,7 @@ import { Select } from '@/components/ui/Select'
 import { formatApiError } from '@/lib/apiError'
 import { parseAssetRef } from '@/lib/assetRef'
 import { cn } from '@/lib/cn'
+import { milestoneText } from '@/lib/versionArchive'
 import { toast } from '@/stores/toast'
 import { EvaluatorEditor } from './EvaluatorEditor'
 import { EstimatePanel } from './EstimatePanel'
@@ -92,6 +94,10 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
   const [error, setError] = useState<string | null>(null)
   const env = useEnvironmentChoice()
 
+  const { shown, filter } = useArchiveFilter(
+    versions,
+    selection.filter((k) => k.startsWith('ver:')).map((k) => k.slice(4)),
+  )
   const ds = useDatasetInfo(dataset)
   const tags = useMemo(() => {
     const seen = new Map<string, number>()
@@ -243,7 +249,7 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
                 ))}
               </div>
               <div className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto">
-                {versions.map((v) => (
+                {shown.map((v) => (
                   <VersionChip
                     key={v.id}
                     checked={selection.includes(`ver:${v.id}`)}
@@ -251,10 +257,12 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
                     label={`v${v.seq}`}
                     title={v.notes ?? undefined}
                     sub={v.tags.join(', ')}
+                    milestone={v.milestone ? milestoneText(v) : undefined}
                     testId={`ver-v${v.seq}`}
                   />
                 ))}
               </div>
+              <IncludeArchivedToggle {...filter} />
               <p className="text-xs text-muted-foreground">可多选；选多个版本时每个版本一个 run，便于直接对比。</p>
             </div>
           )}
@@ -354,6 +362,7 @@ function VersionChip({
   onToggle,
   label,
   sub,
+  milestone,
   title,
   testId,
 }: {
@@ -361,6 +370,8 @@ function VersionChip({
   onToggle: () => void
   label: string
   sub?: string
+  /** 里程碑标识（★ 阶段名） */
+  milestone?: string
   title?: string
   testId?: string
 }) {
@@ -376,6 +387,7 @@ function VersionChip({
       <input type="checkbox" className="h-3.5 w-3.5 accent-primary" checked={checked} onChange={onToggle} />
       <span className="font-mono">{label}</span>
       {sub && <Badge variant="info" className="font-mono">{sub}</Badge>}
+      {milestone && <Badge variant="warning">{milestone}</Badge>}
     </label>
   )
 }

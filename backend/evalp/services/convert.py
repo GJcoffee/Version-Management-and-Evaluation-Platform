@@ -38,7 +38,7 @@ def draft_out(d: Draft) -> DraftOut:
     )
 
 
-def version_summary(v: Version, tags: list[str] | None = None) -> VersionSummary:
+def version_summary(v: Version, tags: list[str] | None = None, archived_count: int = 0) -> VersionSummary:
     return VersionSummary(
         id=v.id,
         agent_id=v.agent_id,
@@ -51,4 +51,8 @@ def version_summary(v: Version, tags: list[str] | None = None) -> VersionSummary
         created_via=v.created_via,
         created_at=v.created_at,
         tags=tags or [],
+        milestone=v.milestone,
+        milestone_title=v.milestone_title,
+        archived_into=v.archived_into,
+        archived_count=archived_count,
     )

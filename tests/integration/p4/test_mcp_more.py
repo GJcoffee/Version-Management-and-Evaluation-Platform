@@ -312,3 +312,30 @@ async def test_session_replay_and_compare_tools(real_server, two_versions, fake_
         assert detail["session"]["replay_mode"] == "free" and len(detail["turns"]) == 2
         r = await c.call_tool("replay_session", {"session_id": sid, "target_version": "v2", "mode": "bogus"})
         assert r.is_error
+
+
+# ---------------------------------------------------------------- 阶段性成果与归档
+
+
+async def test_set_milestone_archives_earlier_versions_and_list_versions_hides_them(
+    real_server, project_dir, client, provider
+):
+    async with Client(real_server) as c:
+        await c.call_tool("push_draft", {})
+        await c.call_tool("publish_version", {"notes": "初版"})
+        for n in (2, 3):
+            (project_dir / "prompts" / "system.md").write_text(f"第 {n} 版\n", encoding="utf-8")
+            await c.call_tool("publish_version", {"notes": f"第{n}版"})
+
+        out = text(await c.call_tool("set_milestone", {"version": "v2", "title": "第一阶段：语气优化"}))
+        assert "v2 已设为阶段性成果「第一阶段：语气优化」" in out and "归档 1 个版本" in out
+
+        out = text(await c.call_tool("list_versions", {}))
+        assert "| v3 |" in out and "★ 第一阶段：语气优化（已归档 1 个版本）" in out
+        assert "| v1 |" not in out and "已隐藏 1 个归档版本" in out and "include_archived" in out
+
+        out = text(await c.call_tool("list_versions", {"include_archived": True}))
+        assert "| v1 |" in out and "已归档到 v2" in out and "已隐藏" not in out
+
+        r = await c.call_tool("set_milestone", {"version": "v1"})  # 已归档的不能设为阶段性成果
+        assert r.is_error and "已归档" in text(r)

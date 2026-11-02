@@ -530,3 +530,56 @@ def test_help_lists_new_commands():
     for sub in ("ls", "show", "add", "diff"):
         assert sub in invoke("asset", "--help").output
     assert "--no-autostart" in invoke("mcp", "--help").output
+
+
+# ---------------------------------------------------------------- 阶段性成果与归档
+
+
+def _version_row(seq: int, **extra) -> dict:
+    return {
+        "id": f"ver_{seq}", "seq": seq, "tags": [], "created_at": "2026-10-25T08:00:00.000Z",
+        "created_via": "cli", "notes": f"备注{seq}", "spec_hash": "a" * 64, "milestone": False,
+        "milestone_title": None, "archived_into": None, "archived_count": 0, **extra,
+    }  # fmt: skip
+
+
+def test_versions_hides_archived_by_default_and_all_shows_them(cli_env, api):  # noqa: F811
+    items = [
+        _version_row(3),
+        _version_row(2, milestone=True, milestone_title="第一阶段：语气优化", archived_count=1),
+    ]
+    route = api.get("/agents/support/versions").mock(
+        return_value=httpx.Response(200, json={"items": items, "next_cursor": None})
+    )
+    r = invoke("versions")
+    assert r.exit_code == 0, r.output
+    assert dict(route.calls[0].request.url.params) == {"limit": "20", "archived": "false"}
+    assert "★ 第一阶段：语气优化" in r.output and "已归档 1 个版本" in r.output and "--all" in r.output
+
+    items.append(_version_row(1, archived_into="ver_2"))
+    route.mock(return_value=httpx.Response(200, json={"items": items, "next_cursor": None}))
+    r = invoke("versions", "--all")
+    assert r.exit_code == 0, r.output
+    assert "archived" not in dict(route.calls[1].request.url.params)
+    assert "v1" in r.output and "已归档" in r.output and "--all" not in r.output
+
+
+def test_milestone_sets_title_and_removes(cli_env, api):  # noqa: F811
+    done = _version_row(2, milestone=True, milestone_title="第一阶段", archived_count=1)
+    route = api.post("/versions/support:v2/milestone").mock(return_value=httpx.Response(200, json=done))
+    r = invoke("milestone", "v2", "--title", "第一阶段")
+    assert r.exit_code == 0, r.output
+    assert json.loads(route.calls[0].request.content) == {"title": "第一阶段"}
+    assert "v2 已设为阶段性成果「第一阶段」" in r.output and "归档 1 个版本" in r.output
+
+    tagged = api.post("/versions/support:baseline/milestone").mock(
+        return_value=httpx.Response(200, json=done)
+    )
+    assert invoke("milestone", "baseline").exit_code == 0
+    assert json.loads(tagged.calls[0].request.content) == {}  # 不给 --title 就不改阶段名
+
+    gone = api.delete("/versions/support:v2/milestone").mock(
+        return_value=httpx.Response(200, json=_version_row(2))
+    )
+    r = invoke("milestone", "--remove", "v2")
+    assert r.exit_code == 0 and gone.called and "已取消 v2 的阶段性成果" in r.output

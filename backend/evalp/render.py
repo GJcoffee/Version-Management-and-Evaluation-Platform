@@ -79,16 +79,25 @@ def status_text(status: str | None) -> str:
 def render_versions(agent: str, items: list[dict[str, Any]], base_url: str = "") -> str:
     if not items:
         return f"agent `{agent}` 还没有已发布的版本。用 publish_version 发布第一个版本。"
+    seq_by_id = {v["id"]: v["seq"] for v in items}
     lines = [
         f"## {agent} 的版本（最新在前）",
         "",
-        "| 版本 | 标签 | 时间 | 来源 | 备注 | id |",
-        "|---|---|---|---|---|---|",
+        "| 版本 | 标签 | 阶段 | 时间 | 来源 | 备注 | id |",
+        "|---|---|---|---|---|---|---|",
     ]
     for v in items:
         tags = ", ".join(v.get("tags") or []) or "-"
+        if v.get("milestone"):
+            title = v.get("milestone_title") or "阶段性成果"
+            stage = f"★ {title}（已归档 {v.get('archived_count', 0)} 个版本）"
+        elif v.get("archived_into"):
+            target = v["archived_into"]
+            stage = f"已归档到 {'v' + str(seq_by_id[target]) if target in seq_by_id else '`' + target + '`'}"
+        else:
+            stage = "-"
         lines.append(
-            f"| v{v.get('seq')} | {tags} | {fmt_local(v.get('created_at'))} "
+            f"| v{v.get('seq')} | {tags} | {stage} | {fmt_local(v.get('created_at'))} "
             f"| {v.get('created_via') or '-'} | {truncate(v.get('notes') or '-', 40)} | `{v.get('id')}` |"
         )
     return "\n".join(lines)

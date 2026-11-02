@@ -8,12 +8,14 @@ import { useSession, useSessions } from '@/api/queries/sessions'
 import { useVersions } from '@/api/queries/versions'
 import type { Session } from '@/api/types'
 import { EnvironmentSwitch, environmentBody, useEnvironmentChoice } from '@/components/EnvironmentSwitch'
+import { IncludeArchivedToggle, useArchiveFilter } from '@/components/IncludeArchivedToggle'
 import { messageText } from '@/components/session'
 import { Button } from '@/components/ui/Button'
 import { Dialog } from '@/components/ui/Dialog'
 import { Field } from '@/components/ui/Input'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { Select } from '@/components/ui/Select'
+import { milestoneText } from '@/lib/versionArchive'
 import { sessionTitle, versionLabel } from '@/pages/session/sessionUtils'
 import { toast } from '@/stores/toast'
 
@@ -59,7 +61,8 @@ export function ReplayDialog({ session, onClose }: { session: Session; onClose: 
   const vlist = useMemo(() => versions.data?.pages.flatMap((p) => p.items) ?? [], [versions.data])
   // 仍在执行的轮次不能重放
   const turns = useMemo(() => (detail.data?.turns ?? []).filter((t) => t.status !== 'running'), [detail.data])
-  const targetId = target || vlist.find((v) => v.id !== session.version_id)?.id || vlist[0]?.id || ''
+  const { shown, filter } = useArchiveFilter(vlist, [target])
+  const targetId = target || shown.find((v) => v.id !== session.version_id)?.id || shown[0]?.id || ''
   const selected = turns.filter((t) => !unchecked.has(t.idx)).map((t) => t.idx)
   const all = selected.length === turns.length
 
@@ -106,15 +109,19 @@ export function ReplayDialog({ session, onClose }: { session: Session; onClose: 
             <LoadingBlock className="py-2" />
           ) : (
             <Select id="replay-target" value={targetId} onChange={(e) => setTarget(e.target.value)} data-testid="replay-target">
-              {vlist.map((v) => (
+              {shown.map((v) => (
                 <option key={v.id} value={v.id}>
                   v{v.seq}
                   {v.tags.length > 0 ? `（${v.tags.join(', ')}）` : ''}
+                  {v.milestone ? ` ${milestoneText(v)}` : ''}
                   {v.id === session.version_id ? ' · 当前会话所用版本' : ''}
                 </option>
               ))}
             </Select>
           )}
+          <div className="mt-1.5">
+            <IncludeArchivedToggle {...filter} />
+          </div>
         </Field>
         <EnvironmentSwitch {...env} onChange={env.setEnvironment} />
         <Field label="重放模式">

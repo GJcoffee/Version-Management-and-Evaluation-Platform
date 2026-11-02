@@ -21,7 +21,7 @@ TOOLS = {
     "get_eval_status", "get_session", "replay_session", "compare_sessions", "get_conventions",
     "list_adapters", "get_adapter_environments", "check_adapter_connection", "update_test_adapter",
     "push_adapter_to_production", "rollback_production_adapter", "list_adapter_credentials",
-    "create_adapter_credential", "get_version",
+    "create_adapter_credential", "get_version", "set_milestone",
 }  # fmt: skip
 MOCK_API = "http://test/api/v1"
 

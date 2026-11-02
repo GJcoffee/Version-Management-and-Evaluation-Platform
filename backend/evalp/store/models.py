@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Float,
     ForeignKey,
@@ -117,6 +118,10 @@ class Version(Base):
     notes: Mapped[str | None] = mapped_column(Text)
     created_via: Mapped[str] = mapped_column(Text, nullable=False)  # ui | cli | mcp | api
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    # 阶段性成果：里程碑版本可以把此前的过程版本归档到自己名下（只影响列表展示）
+    milestone: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("0"), default=False)
+    milestone_title: Mapped[str | None] = mapped_column(Text)  # 阶段名，如"第一阶段：语气优化"
+    archived_into: Mapped[str | None] = mapped_column(Text, ForeignKey("versions.id"))  # 归档到的里程碑版本
 
 
 class VersionTag(Base):

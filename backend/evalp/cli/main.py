@@ -58,6 +58,7 @@ def register_commands() -> None:
     app.command("pull")(workspace_cmd.pull)
     app.command("publish")(workspace_cmd.publish)
     app.command("versions")(versions_cmd.versions)
+    app.command("milestone")(versions_cmd.milestone)
     app.command("diff")(versions_cmd.diff)
     app.command("chat")(chat_cmd.chat)
     app.add_typer(agent_cmd.app, name="agent")

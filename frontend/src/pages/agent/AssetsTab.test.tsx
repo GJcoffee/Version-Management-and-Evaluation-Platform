@@ -21,7 +21,7 @@ const agent = (kind: Agent['kind']): Agent => ({
   tags: [],
   conventions: { tag_from_param: null, require_notes: false, require_source_id: [], snapshot_readonly: false },
 })
-const ver = (seq: number, tags: string[] = []): VersionSummary => ({
+const ver = (seq: number, tags: string[] = [], over: Partial<VersionSummary> = {}): VersionSummary => ({
   id: `ver_${seq}`,
   agent_id: 'agt_1',
   seq,
@@ -33,6 +33,11 @@ const ver = (seq: number, tags: string[] = []): VersionSummary => ({
   created_via: 'cli',
   created_at: '',
   tags,
+  milestone: false,
+  milestone_title: null,
+  archived_into: null,
+  archived_count: 0,
+  ...over,
 })
 const asset = (kind: VersionAssetItem['kind'], name: string, over: Partial<VersionAssetItem> = {}): VersionAssetItem => ({
   asset_id: `ast_${name}`,
@@ -123,6 +128,15 @@ describe('AssetsTab', () => {
     expect(identity).toHaveTextContent('crawl-engine')
     expect(identity).toHaveTextContent('ID sk_123')
     expect(within(screen.getByTestId('asset-group-skill')).getByText('暂无描述')).toBeInTheDocument()
+  })
+
+  it('版本下拉默认只列里程碑与未归档的版本，勾选「包括已归档」后列出全部', async () => {
+    setup('code', [ver(3), ver(2, [], { milestone: true, milestone_title: '第一阶段', archived_count: 1 }), ver(1, [], { archived_into: 'ver_2' })])
+    const select = await screen.findByLabelText('选择版本')
+    const texts = () => within(select).getAllByRole('option').map((o) => o.textContent)
+    expect(texts()).toEqual(['v3 · 最新', 'v2 · ★ 第一阶段'])
+    await userEvent.click(screen.getByTestId('include-archived'))
+    expect(texts()).toEqual(['v3 · 最新', 'v2 · ★ 第一阶段', 'v1'])
   })
 
   it('切换版本后显示该版本绑定的资产', async () => {

@@ -367,15 +367,53 @@ def build_server(
     async def list_versions(
         agent: Agent = None,
         limit: Annotated[int, Field(ge=1, le=100, description="最多返回多少个版本")] = 20,
+        include_archived: Annotated[
+            bool, Field(description="是否包括已归档到阶段性成果下的版本（默认隐藏）")
+        ] = False,
     ) -> str:
-        """列出 agent 已发布的版本（最新在前）：版本号、标签、时间、来源、备注和 id。"""
+        """列出 agent 已发布的版本（最新在前）：版本号、标签、阶段、时间、来源、备注和 id。
+
+        阶段性成果（里程碑）标 ★ 并给出阶段名和已归档的版本数；它之前的过程版本被归档到它名下，默认隐藏
+        （include_archived=true 可查看）。归档只影响列表展示，已归档的版本照常可以对话、评测、diff 和引用。
+        """
         name = env.agent_name(agent)
+        params: dict[str, Any] = {"limit": limit}
+        if not include_archived:
+            params["archived"] = "false"
         async with env.client(env.project()) as c:
-            page = await c.get(f"/agents/{name}/versions", params={"limit": limit})
+            page = await c.get(f"/agents/{name}/versions", params=params)
             text = render.render_versions(name, page["items"])
+            hidden = sum(v.get("archived_count", 0) for v in page["items"])
+            if not include_archived and hidden:
+                text += f"\n\n（已隐藏 {hidden} 个归档版本，传 include_archived=true 查看。）"
             if page.get("next_cursor"):
                 text += f"\n\n（只显示最新 {limit} 个，更多版本可调大 limit 或在 Web UI 查看。）"
             return text + f"\n\nWeb UI: {c.base_url}/agents/{name}"
+
+    @mcp.tool()
+    @_guard
+    async def set_milestone(
+        version: Annotated[str, Field(description="要设为阶段性成果的版本：v12、标签或版本 id")],
+        title: Annotated[str | None, Field(description="阶段名，如“第一阶段：语气优化”；不填则不改")] = None,
+        agent: Agent = None,
+    ) -> str:
+        """把某个版本标记为阶段性成果（里程碑），并把它之前尚未归档的过程版本全部归档到它名下。
+
+        用途：一个阶段做完、该版本是不错的成果时调用，让版本列表只保留阶段性成果和之后的新版本，更清爽。
+        归档只影响列表展示：已归档的版本照常可以对话、评测、diff 和按 vN / 标签引用，发布规范不受影响。
+        已归档的版本不能设为阶段性成果；再次对同一个里程碑调用可修改阶段名或归档更多版本。
+        """
+        project = env.project()
+        name = agent or (project.agent_name if project else None)
+        async with env.client(project) as c:
+            body = {} if title is None else {"title": title}
+            v = await c.post(f"/versions/{actions.qualify_version(name, version)}/milestone", body)
+            label = f"「{v['milestone_title']}」" if v.get("milestone_title") else ""
+            return (
+                f"v{v['seq']} 已设为阶段性成果{label}，其下共归档 {v['archived_count']} 个版本"
+                f"（默认隐藏，list_versions 传 include_archived=true 查看）。\n"
+                f"Web UI: {c.base_url}/agents/{v['agent_id']}?tab=versions"
+            )
 
     @mcp.tool()
     @_guard

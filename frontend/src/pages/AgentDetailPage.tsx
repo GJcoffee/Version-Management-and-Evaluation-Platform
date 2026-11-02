@@ -20,7 +20,7 @@ export default function AgentDetailPage() {
   const { id } = useParams()
   const [sp, setSp] = useSearchParams()
   const agent = useAgent(id)
-  const versions = useVersions(id)
+  const versions = useVersions(id, 200)
   const tabParam = sp.get('tab')
   const tab: TabKey = (TABS as readonly string[]).includes(tabParam ?? '') ? (tabParam as TabKey) : 'assets'
 

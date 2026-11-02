@@ -5,11 +5,13 @@ import { useCreateSession } from '@/api/queries/sessions'
 import type { Agent, SessionCreate, VersionSummary } from '@/api/types'
 import { Button } from '@/components/ui/Button'
 import { EnvironmentSwitch, environmentBody, useEnvironmentChoice } from '@/components/EnvironmentSwitch'
+import { IncludeArchivedToggle, useArchiveFilter } from '@/components/IncludeArchivedToggle'
 import { Dialog } from '@/components/ui/Dialog'
 import { Field, Input } from '@/components/ui/Input'
 import { KeyValueEditor } from '@/components/ui/KeyValueEditor'
 import { Select } from '@/components/ui/Select'
 import { formatApiError } from '@/lib/apiError'
+import { milestoneText } from '@/lib/versionArchive'
 import { toast } from '@/stores/toast'
 
 /** 选项值：`latest` | `tag:名称` | `ver:版本id` */
@@ -38,6 +40,7 @@ export function NewSessionDialog({
   const [vars, setVars] = useState<Record<string, string>>({})
   const [error, setError] = useState<string | null>(null)
   const env = useEnvironmentChoice()
+  const { shown, filter } = useArchiveFilter(versions, [choice.startsWith('ver:') ? choice.slice(4) : null])
 
   const tags = useMemo(() => {
     const seen = new Map<string, number>()
@@ -109,18 +112,22 @@ export function NewSessionDialog({
                 ))}
               </optgroup>
             )}
-            {versions.length > 0 && (
+            {shown.length > 0 && (
               <optgroup label="版本">
-                {versions.map((v) => (
+                {shown.map((v) => (
                   <option key={v.id} value={`ver:${v.id}`}>
                     v{v.seq}
                     {v.tags.length > 0 ? `（${v.tags.join(', ')}）` : ''}
+                    {v.milestone ? ` ${milestoneText(v)}` : ''}
                     {v.notes ? ` · ${v.notes.slice(0, 24)}` : ''}
                   </option>
                 ))}
               </optgroup>
             )}
           </Select>
+          <div className="mt-1.5">
+            <IncludeArchivedToggle {...filter} />
+          </div>
         </Field>
         <EnvironmentSwitch {...env} onChange={env.setEnvironment} />
         <Field label="标题" htmlFor="ns-title" hint="可选；缺省时取第一轮用户输入的前几十个字">

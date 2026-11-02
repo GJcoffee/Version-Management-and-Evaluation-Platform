@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 
 from evalp.api.deps import get_ctx
 from evalp.api.pagination import Page, PageParams, page_params
 from evalp.context import AppContext
 from evalp.schemas.agent import (
     DraftWrapper,
+    MilestoneIn,
     TagIn,
     TagOut,
     ToDraftIn,
@@ -25,10 +26,15 @@ router = APIRouter(tags=["versions"])
 
 @router.get("/agents/{agent_ref}/versions", response_model=Page[VersionSummary])
 async def list_versions(
-    agent_ref: str, p: PageParams = Depends(page_params), ctx: AppContext = Depends(get_ctx)
+    agent_ref: str,
+    archived: bool | None = Query(
+        None, description="false 只返回未归档的（里程碑与普通版本），true 只返回已归档的；缺省返回全部"
+    ),
+    p: PageParams = Depends(page_params),
+    ctx: AppContext = Depends(get_ctx),
 ):
-    """版本列表（新版本在前，含标签）。"""
-    return await ctx.svc(VersionService).list(agent_ref, limit=p.limit, cursor=p.cursor)
+    """版本列表（新版本在前，含标签、里程碑与归档信息）。"""
+    return await ctx.svc(VersionService).list(agent_ref, limit=p.limit, cursor=p.cursor, archived=archived)
 
 
 @router.get("/agents/{agent_ref}/tags", response_model=list[TagOut])
@@ -73,3 +79,29 @@ async def delete_tag(version_ref: str, tag: str, ctx: AppContext = Depends(get_c
 async def version_to_draft(version_ref: str, body: ToDraftIn, ctx: AppContext = Depends(get_ctx)):
     """用该版本的 Spec 覆盖草稿（或新建草稿），@rev 保持原样，base_version_id 设为该版本。"""
     return DraftWrapper(draft=await ctx.svc(VersionService).to_draft(version_ref, body.draft_name))
+
+
+@router.post("/versions/{version_ref}/milestone", response_model=VersionSummary)
+async def set_milestone(version_ref: str, body: MilestoneIn, ctx: AppContext = Depends(get_ctx)):
+    """设为阶段性成果（里程碑），并把此前的过程版本归档到它名下。
+
+    ``version_ids`` 缺省 = 归档此前所有未归档、非里程碑的版本；给出时只归档所列版本。归档只影响列表展示。
+    """
+    return await ctx.svc(VersionService).set_milestone(
+        version_ref,
+        title=body.title,
+        set_title="title" in body.model_fields_set,
+        version_ids=body.version_ids,
+    )
+
+
+@router.delete("/versions/{version_ref}/milestone", response_model=VersionSummary)
+async def remove_milestone(version_ref: str, ctx: AppContext = Depends(get_ctx)):
+    """取消阶段性成果：其下归档的版本全部移出归档。"""
+    return await ctx.svc(VersionService).remove_milestone(version_ref)
+
+
+@router.post("/versions/{version_ref}/unarchive", response_model=VersionSummary)
+async def unarchive_version(version_ref: str, ctx: AppContext = Depends(get_ctx)):
+    """把版本移出归档；对里程碑调用则把它名下的版本全部移出归档。"""
+    return await ctx.svc(VersionService).unarchive(version_ref)

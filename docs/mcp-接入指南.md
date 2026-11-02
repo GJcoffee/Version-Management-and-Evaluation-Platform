@@ -107,7 +107,8 @@ Cursor 不一定在项目目录启动 MCP 进程，所以用 `--project-dir` 显
 | `pull_draft` | `force?` | 拉取服务端草稿（比如有人在 Web UI 里改过），写回本地文件。本地有未推送的修改时拒绝覆盖，除非 `force` |
 | `get_conventions` | `agent?` | agent 生效的**发布规范**（服务端强制）和快照 `map` 规则说明；当前项目的规则里缺 `id` 的会被标出。**发布、推送前先调用**（MCP 服务说明里也写了这一点） |
 | `publish_version` | `notes?`、`tag?` | 先 push 再发布（标签与版本在服务端原子创建）；返回版本号、是否已存在（内容相同不会新建）、相对父版本的变更摘要。违反规范时返回服务端的中文说明 |
-| `list_versions` | `agent?`、`limit?` | 版本列表：版本号、标签、时间、来源、备注 |
+| `list_versions` | `agent?`、`limit?`、`include_archived?` | 版本列表：版本号、标签、阶段（阶段性成果标 ★ 并给出阶段名和已归档数）、时间、来源、备注。已归档到阶段性成果下的版本默认隐藏，`include_archived=true` 显示 |
+| `set_milestone` | `version`、`title?`、`agent?` | 把版本标记为阶段性成果，并把它之前未归档的过程版本全部归档到它名下（只影响列表展示，已归档版本照常可对话、评测、diff 和引用）；已归档的版本不能设为阶段性成果。取消或移出归档请用 Web UI / `evalp milestone --remove` |
 | `diff_versions` | `left`、`right`、`agent?`、`max_lines?` | 两个版本的变更列表 + 文本 diff（默认截断到 200 行）。版本可写 `v3`、标签或版本 id |
 | `chat` | `message`、`version?`、`session_id?`、`agent?` | 和某个已发布版本对话一轮；返回回复、工具调用摘要、`session_id`（继续对话时传回） |
 | `run_eval` | `dataset`、`versions?`、`evaluators?`、`repeats?`、`baseline?`、`wait?` | 发起评测。`wait` 默认 true，最多等 10 分钟，返回报告摘要和与基线的对比；`false` 时只返回 run id |

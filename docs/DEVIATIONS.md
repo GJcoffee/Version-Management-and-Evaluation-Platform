@@ -594,3 +594,13 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
   `chat` / `run_eval` / `replay_session` 与 CLI `chat` / `eval run` / `replay` 增加环境选项。
 - `config.business_bridge` 绑定某个固定版本，不适用于全平台环境配置：环境编辑拒绝它；旧会话快照里的桥接仍按原方式运行。
 
+## 版本里程碑与归档（迁移 0009）
+
+- `versions` 新增 `milestone`（布尔，默认 0）、`milestone_title`、`archived_into`（自引用外键，指向里程碑版本）。归档只是展示分组：
+  解析版本引用（`vN` / 标签 / `latest`）、会话、评测、diff、发布规范、`spec_hash` 去重都不看这三列。
+- 新接口 `POST|DELETE /versions/{ref}/milestone`、`POST /versions/{ref}/unarchive`；版本列表新增可选参数 `archived`（缺省返回全部），条目新增
+  `milestone` / `milestone_title` / `archived_into` / `archived_count`。`unarchive` 对里程碑调用 = 其下全部移出归档（未单设“全部”接口）。
+- 前端版本页默认只列里程碑与未归档版本，各处选版本的下拉 / 勾选默认同样隐藏已归档（已选中的版本始终保留），可“包括已归档”。Agent 详情页版本列表一次取 200 条以便把归档分组。
+- CLI `evalp versions` 默认隐藏已归档（`--all` 显示），新增 `evalp milestone <版本> [--title] [--remove]`；MCP `list_versions` 增加 `include_archived`，新增 `set_milestone`。
+  取消 / 移出归档只在 Web UI、CLI `--remove` 和 API 提供，MCP 暂不提供。
+

@@ -60,7 +60,7 @@ def test_orm_metadata_covers_design_tables():
 def test_idempotent(migrated):
     run_migrations(migrated)  # 再次执行不报错
     con = sqlite3.connect(migrated)
-    assert con.execute("select version_num from alembic_version").fetchall() == [("0008",)]
+    assert con.execute("select version_num from alembic_version").fetchall() == [("0009",)]
     con.close()
 
 
@@ -468,3 +468,35 @@ def test_0005_adds_conventions_and_asset_source_columns(tmp_path):
         {"display_name", "source_id", "meta"} & {r[1] for r in con.execute("pragma table_info(assets)")}
     )
     con.close()
+
+
+def test_0009_adds_milestone_columns_and_downgrades(tmp_path):
+    """0008 -> 0009：已有版本成为未归档的普通版本；archived_into 外键有效；降级后三列消失、版本保留。"""
+    from alembic import command
+    from evalp.store.migrate import make_alembic_config
+
+    path = tmp_path / "ms.db"
+    run_migrations(path, "0008")
+    plain = {"kind": "code", "transport": "adapter"}
+    with sqlite3.connect(path) as conn:
+        _seed_versions(conn, [("a", 1, "t1", plain), ("a", 2, "t2", plain)])
+
+    run_migrations(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("pragma foreign_keys=on")
+        rows = conn.execute("select id, milestone, milestone_title, archived_into from versions order by seq")
+        assert rows.fetchall() == [("a-v1", 0, None, None), ("a-v2", 0, None, None)]
+        conn.execute("update versions set milestone=1, milestone_title='第一阶段' where id='a-v2'")
+        conn.execute("update versions set archived_into='a-v2' where id='a-v1'")
+        with pytest.raises(sqlite3.IntegrityError):  # 外键：只能归档到存在的版本
+            conn.execute("update versions set archived_into='nope' where id='a-v1'")
+        # 迁移重建 versions 表后，其他表对它的外键仍然有效
+        conn.execute("insert into sessions(id,agent_id,version_id,mode,created_at,updated_at)"
+                     " values('s','a','a-v1','chat','t','t')")  # fmt: skip
+
+    command.downgrade(make_alembic_config(path), "0008")
+    with sqlite3.connect(path) as conn:
+        cols = {r[1] for r in conn.execute("pragma table_info(versions)")}
+        assert not ({"milestone", "milestone_title", "archived_into"} & cols)
+        assert conn.execute("select id from versions order by seq").fetchall() == [("a-v1",), ("a-v2",)]
+        assert conn.execute("select version_id from sessions").fetchall() == [("a-v1",)]

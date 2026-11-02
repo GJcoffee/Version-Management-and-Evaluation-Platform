@@ -366,6 +366,14 @@ export interface VersionSummary {
   created_via: CreatedVia
   created_at: ISODateTime
   tags: string[]
+  /** 阶段性成果（里程碑）：此前的过程版本可以归档到它名下 */
+  milestone: boolean
+  /** 阶段名，如“第一阶段：语气优化” */
+  milestone_title: string | null
+  /** 归档到的里程碑版本 id；未归档为 null */
+  archived_into: string | null
+  /** 里程碑下归档的版本数；非里程碑为 0 */
+  archived_count: number
 }
 
 export interface VersionAssetRef {

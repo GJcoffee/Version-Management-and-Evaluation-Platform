@@ -1,4 +1,4 @@
-"""版本服务：列表 / 详情 / 标签 / to-draft / diff，以及供运行时、评测使用的 ``get_resolved``。
+"""版本服务：列表 / 详情 / 标签 / 里程碑与归档 / to-draft / diff，以及供运行时、评测使用的 ``get_resolved``。
 
 版本引用写法（diff、会话创建等处通用）：版本 id（``ver_…``）、``agent名:v12``、
 ``agent名:标签``、``agent名:latest``。
@@ -14,12 +14,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from evalp.api.pagination import Page, paginate
 from evalp.context import AppContext
-from evalp.errors import NotFound, ValidationFailed
+from evalp.errors import InvalidState, NotFound, ValidationFailed
 from evalp.schemas.agent import (
     DraftOut,
     TagOut,
@@ -160,6 +160,23 @@ class VersionService:
             out.setdefault(vid, []).append(tag)
         return out
 
+    async def _archived_counts(self, s: AsyncSession, versions: list[Version]) -> dict[str, int]:
+        """里程碑版本 id -> 其下归档的版本数（只统计 ``versions`` 里的里程碑）。"""
+        ids = [v.id for v in versions if v.milestone]
+        if not ids:
+            return {}
+        rows = await s.execute(
+            select(Version.archived_into, func.count())
+            .where(Version.archived_into.in_(ids))
+            .group_by(Version.archived_into)
+        )
+        return dict(rows.all())
+
+    async def summary_in_session(self, s: AsyncSession, v: Version) -> VersionSummary:
+        """版本摘要（含标签与归档数）。"""
+        tags = (await self._tags_of(s, [v.id])).get(v.id)
+        return version_summary(v, tags, (await self._archived_counts(s, [v])).get(v.id, 0))
+
     async def out_in_session(self, s: AsyncSession, v: Version) -> VersionOut:
         """版本详情（含标签与引用的资产）。"""
         tags = (await self._tags_of(s, [v.id])).get(v.id, [])
@@ -185,7 +202,8 @@ class VersionService:
             )
             for ref, rev in rows
         ]
-        return VersionOut(**version_summary(v, tags).model_dump(), spec=v.spec, assets=assets)
+        summary = version_summary(v, tags, (await self._archived_counts(s, [v])).get(v.id, 0))
+        return VersionOut(**summary.model_dump(), spec=v.spec, assets=assets)
 
     async def get(self, ref: str) -> VersionOut:
         """版本详情（含标签）；ref 可以是版本 id 或 ``agent:v12`` 等。"""
@@ -212,7 +230,7 @@ class VersionService:
                 )
             ).all()
             tags = await self._tags_of(s, [v.id])
-            summary = version_summary(v, tags.get(v.id))
+            summary = version_summary(v, tags.get(v.id), (await self._archived_counts(s, [v])).get(v.id, 0))
             xpaths = identity_paths(v.spec)
         # 每个资产在各版本使用的修订（版本从新到旧）：asset_id -> [(版本, 修订)]
         history: dict[str, list[tuple[Version, AssetRevision]]] = {}
@@ -263,17 +281,23 @@ class VersionService:
         return VersionAssetsOut(version=summary, items=items)
 
     async def list(
-        self, agent_ref: str, *, limit: int = 50, cursor: str | None = None
+        self, agent_ref: str, *, limit: int = 50, cursor: str | None = None, archived: bool | None = None
     ) -> Page[VersionSummary]:
-        """某个 agent 的版本列表（新版本在前，含标签）。"""
+        """某个 agent 的版本列表（新版本在前，含标签与里程碑 / 归档信息）。
+
+        ``archived``：False 只要未归档的（里程碑与普通版本），True 只要已归档的，None（默认）全部。
+        """
         async with self.ctx.db.read() as s:
             agent = await AgentService.get_orm(s, agent_ref)
-            page = await paginate(
-                s, select(Version).where(Version.agent_id == agent.id), Version.id, limit=limit, cursor=cursor
-            )
+            stmt = select(Version).where(Version.agent_id == agent.id)
+            if archived is not None:
+                col = Version.archived_into
+                stmt = stmt.where(col.is_not(None) if archived else col.is_(None))
+            page = await paginate(s, stmt, Version.id, limit=limit, cursor=cursor)
             versions: list[Version] = page.items
             tags = await self._tags_of(s, [v.id for v in versions])
-            items = [version_summary(v, tags.get(v.id)) for v in versions]
+            counts = await self._archived_counts(s, versions)
+            items = [version_summary(v, tags.get(v.id), counts.get(v.id, 0)) for v in versions]
         return Page[VersionSummary](items=items, next_cursor=page.next_cursor)
 
     async def list_tags(self, agent_ref: str) -> list[TagOut]:
@@ -323,6 +347,91 @@ class VersionService:
             if row is None or row.version_id != v.id:
                 raise NotFound(f"该版本上没有标签: {tag}", {"tag": tag})
             await s.delete(row)
+
+    # ------------------------------------------------------------ 里程碑与归档
+
+    async def set_milestone(
+        self,
+        version_ref: str,
+        *,
+        title: str | None = None,
+        set_title: bool = False,
+        version_ids: list[str] | None = None,
+    ) -> VersionSummary:
+        """把版本设为阶段性成果，并把此前的过程版本归档到它名下。
+
+        ``version_ids`` 缺省时归档同一 agent 中 seq 更小、未归档、非里程碑的全部版本；给出时只归档所列版本，
+        且每个都必须满足同样的条件。已是里程碑的版本再次调用，可以补充归档更多版本或修改阶段名
+        （``set_title`` 为 True 时才改阶段名）。已归档的版本不能设为里程碑。
+        """
+        async with self.ctx.db.write() as s:
+            v = await self.resolve_ref_orm(s, version_ref)
+            if v.archived_into is not None:
+                raise InvalidState(
+                    f"v{v.seq} 已归档到其他阶段性成果下，请先移出归档再设为阶段性成果", {"version_id": v.id}
+                )
+            earlier = select(Version).where(
+                Version.agent_id == v.agent_id,
+                Version.seq < v.seq,
+                Version.archived_into.is_(None),
+                Version.milestone.is_(False),
+            )
+            if version_ids is None:
+                targets = list((await s.execute(earlier)).scalars())
+            else:
+                targets, errors = {}, []
+                for i, ref in enumerate(version_ids):
+                    t = await self.resolve_ref_orm(s, ref)
+                    reason = (
+                        "不属于同一个 agent" if t.agent_id != v.agent_id
+                        else "必须比目标版本更早" if t.seq >= v.seq
+                        else "是阶段性成果，不能被归档" if t.milestone
+                        else "已经归档" if t.archived_into is not None
+                        else None
+                    )  # fmt: skip
+                    if reason:
+                        errors.append({"path": f"version_ids[{i}]", "message": f"{ref}: {reason}"})
+                    targets[t.id] = t
+                if errors:
+                    raise ValidationFailed("要归档的版本不符合条件", {"errors": errors})
+                targets = list(targets.values())
+            v.milestone = True
+            if set_title:
+                v.milestone_title = title
+            for t in targets:
+                t.archived_into = v.id
+            await s.flush()
+            return await self.summary_in_session(s, v)
+
+    @staticmethod
+    async def _release(s: AsyncSession, milestone: Version) -> None:
+        """把归档在该里程碑名下的版本全部移出归档。"""
+        stmt = update(Version).where(Version.archived_into == milestone.id).values(archived_into=None)
+        await s.execute(stmt)
+
+    async def remove_milestone(self, version_ref: str) -> VersionSummary:
+        """取消阶段性成果：其下归档的版本全部移出归档。"""
+        async with self.ctx.db.write() as s:
+            v = await self.resolve_ref_orm(s, version_ref)
+            if not v.milestone:
+                raise InvalidState(f"v{v.seq} 不是阶段性成果", {"version_id": v.id})
+            await self._release(s, v)
+            v.milestone = False
+            v.milestone_title = None
+            return await self.summary_in_session(s, v)
+
+    async def unarchive(self, version_ref: str) -> VersionSummary:
+        """把版本移出归档；对里程碑调用则把它名下的版本全部移出归档（里程碑本身保留）。"""
+        async with self.ctx.db.write() as s:
+            v = await self.resolve_ref_orm(s, version_ref)
+            if v.milestone:
+                await self._release(s, v)
+            elif v.archived_into is not None:
+                v.archived_into = None
+            else:
+                raise InvalidState(f"v{v.seq} 没有被归档", {"version_id": v.id})
+            await s.flush()
+            return await self.summary_in_session(s, v)
 
     # ------------------------------------------------------------ 回滚
 

@@ -180,6 +180,10 @@ class VersionSummary(BaseModel):
     created_via: str
     created_at: str
     tags: list[str] = Field(default_factory=list)
+    milestone: bool = Field(False, description="是否为阶段性成果（里程碑）")
+    milestone_title: str | None = Field(None, description="阶段名，如“第一阶段：语气优化”")
+    archived_into: str | None = Field(None, description="归档到的里程碑版本 id；未归档为 null")
+    archived_count: int = Field(0, description="里程碑下归档了多少个版本；非里程碑为 0")
 
 
 class VersionAssetRefOut(BaseModel):
@@ -236,6 +240,21 @@ class TagOut(BaseModel):
     tag: str
     version_id: str
     updated_at: str
+
+
+class MilestoneIn(BaseModel):
+    """设为阶段性成果。``version_ids`` 缺省 = 归档此前所有未归档的过程版本；给出时只归档所列版本。
+    ``title`` 缺省 = 不改阶段名（新里程碑为空），给空串 / null = 清空。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(None, max_length=100)
+    version_ids: list[str] | None = None
+
+    @field_validator("title")
+    @classmethod
+    def _strip_title(cls, v: str | None) -> str | None:
+        return (v or "").strip() or None
 
 
 class ToDraftIn(BaseModel):
