@@ -72,6 +72,17 @@ class TraceEvaluator(Evaluator):
             called = [c["name"] for c in transcript.tool_calls()]
         llm_calls = sum(1 for e in events if e.type == "llm.response")
         steps = llm_calls if llm_calls else len(called) + 1
+        unverifiable = [
+            label
+            for label, wanted, missing in (
+                ("步数", a.max_steps is not None, transcript.llm_calls_missing),
+                ("耗时", a.max_latency_ms is not None, transcript.latency_ms is None),
+                ("token", a.max_tokens is not None, transcript.tokens_missing),
+            )
+            if wanted and missing
+        ]
+        if unverifiable:  # 远端指标未取得：无法判断，计入评分出错而不是未通过
+            return ScoreResult.error(f"{'、'.join(unverifiable)}未取得，无法核对")
         checks: list[tuple[bool, str]] = []
         for name in a.tool_called:
             ok = name in called
@@ -83,10 +94,7 @@ class TraceEvaluator(Evaluator):
             checks.append((steps <= a.max_steps, f"步数 {steps}（上限 {a.max_steps}）"))
         if a.max_latency_ms is not None:
             lat = transcript.latency_ms
-            if lat is None:
-                checks.append((False, f"耗时未取得（上限 {a.max_latency_ms}ms），无法核对"))
-            else:
-                checks.append((lat <= a.max_latency_ms, f"耗时 {lat}ms（上限 {a.max_latency_ms}ms）"))
+            checks.append((lat <= a.max_latency_ms, f"耗时 {lat}ms（上限 {a.max_latency_ms}ms）"))
         if a.max_tokens is not None:
             tok = transcript.tokens
             checks.append((tok <= a.max_tokens, f"token {tok}（上限 {a.max_tokens}）"))

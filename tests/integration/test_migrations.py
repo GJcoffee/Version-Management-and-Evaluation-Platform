@@ -60,7 +60,7 @@ def test_orm_metadata_covers_design_tables():
 def test_idempotent(migrated):
     run_migrations(migrated)  # 再次执行不报错
     con = sqlite3.connect(migrated)
-    assert con.execute("select version_num from alembic_version").fetchall() == [("0009",)]
+    assert con.execute("select version_num from alembic_version").fetchall() == [("0010",)]
     con.close()
 
 
@@ -500,3 +500,106 @@ def test_0009_adds_milestone_columns_and_downgrades(tmp_path):
         assert not ({"milestone", "milestone_title", "archived_into"} & cols)
         assert conn.execute("select id from versions order by seq").fetchall() == [("a-v1",), ("a-v2",)]
         assert conn.execute("select version_id from sessions").fetchall() == [("a-v1",)]
+
+
+def _insert(conn, table, **cols):
+    marks = ",".join("?" * len(cols))
+    conn.execute(f"insert into {table}({','.join(cols)}) values({marks})", list(cols.values()))
+
+
+def _seed_remote_history(conn):
+    """旧版 HiAgent 轮次（有 / 无 upstream_run_ms）、配置型与业务桥接轮次，以及对应的评测用例与 run。"""
+    hiagent = json.dumps({"binding": {"id": "hiagent", "config": {}}})
+    bridge = json.dumps({"binding": {"id": "hiagent", "config": {"business_bridge": {"spec_hash": "x"}}}})
+    for sid, snapshot in (("sH", hiagent), ("sH2", hiagent), ("sC", None), ("sB", bridge)):
+        _insert(conn, "sessions", id=sid, agent_id="a", version_id="v", mode="eval", status="idle",
+                last_seq=0, stats="{}", created_at="t", updated_at="t", variables="{}",
+                adapter_snapshot=snapshot)
+
+    def turn(tid, sid, idx, usage, latency, ttft):
+        _insert(conn, "turns", id=tid, session_id=sid, idx=idx, status="ok", input="{}",
+                usage=json.dumps(usage), cost=0.0, latency_ms=latency, ttft_ms=ttft, started_at="t")
+
+    base = {"prompt_tokens": 9, "completion_tokens": 3, "tool_calls": 1}
+    done = {**base, "llm_calls": 2, "upstream_run_ms": 20000, "trace_status": "complete"}
+    turn("t1", "sH", 0, done, 31000, 7000)
+    gone = {**base, "llm_calls": 0, "trace_status": "unavailable", "trace_note": "凭据未提供"}
+    turn("t2", "sH", 1, gone, 9000, 800)
+    turn("t3", "sH", 2, {**base, "llm_calls": 0}, 7000, 700)
+    turn("t4", "sH", 3, {**base, "llm_calls": 0, "upstream_run_ms": 4000}, 6000, 600)
+    turn("t5", "sH2", 0, {**done, "llm_calls": 1, "upstream_run_ms": 5000}, 8000, 900)
+    turn("c1", "sC", 0, {"prompt_tokens": 5, "completion_tokens": 2, "llm_calls": 1}, 100, 10)
+    turn("b1", "sB", 0, {"prompt_tokens": 5, "completion_tokens": 2, "llm_calls": 0}, 200, 20)
+    _insert(conn, "eval_cases", id="case", dataset_rev_id="d", case_key="k", idx=0, input="{}", tags="[]",
+            metadata="{}", case_hash="h")
+    for rid in ("R1", "R2"):
+        _insert(conn, "eval_runs", id=rid, batch_id="b", agent_id="a", version_id="v", dataset_rev_id="d",
+                case_filter="{}", evaluators="[]", evaluators_hash="h", repeats=1, concurrency=1,
+                cache_policy="use", budget="{}", status="completed", progress="{}", created_at="t",
+                stats=json.dumps({"latency_ms": {"p50": 1, "p95": 1}}))
+
+    def item(iid, rid, sid, usage, latency, repeat):
+        _insert(conn, "eval_items", id=iid, run_id=rid, case_id="case", repeat_idx=repeat, cache_key=iid,
+                status="done", session_id=sid, attempts=1, latency_ms=latency, cost=0.5,
+                usage=json.dumps(usage))
+
+    old = {"prompt_tokens": 36, "completion_tokens": 12, "llm_calls": 2, "tool_calls": 4, "turns": 4,
+           "failed_attempts": [{"attempt": 1}], "wasted_cost": 0.2}
+    item("i1", "R1", "sH", old, 53000, 0)
+    one = {"prompt_tokens": 9, "completion_tokens": 3, "llm_calls": 1, "tool_calls": 1, "turns": 1}
+    item("i2", "R1", "sH2", one, 8000, 1)
+    item("i3", "R2", "sC", {**one, "prompt_tokens": 5, "completion_tokens": 2, "tool_calls": 0}, 100, 0)
+
+
+def _snapshot(conn):
+    turns = {r[0]: r[1:] for r in conn.execute("select id, latency_ms, ttft_ms, usage from turns")}
+    items = {r[0]: r[1:] for r in conn.execute("select id, latency_ms, usage, cost from eval_items")}
+    runs = dict(conn.execute("select id, stats from eval_runs"))
+    return turns, items, runs
+
+
+def test_0010_backfills_remote_history_and_leaves_other_agents_alone(tmp_path):
+    from alembic import command
+    from evalp.store.migrate import make_alembic_config
+
+    path = tmp_path / "remote.db"
+    run_migrations(path, "0009")
+    with sqlite3.connect(path) as conn:
+        _seed_remote_history(conn)
+        before = _snapshot(conn)
+
+    run_migrations(path)
+    with sqlite3.connect(path) as conn:
+        turns, items, runs = _snapshot(conn)
+    usage = {k: json.loads(v[2]) for k, v in turns.items()}
+    # 有 upstream_run_ms：用时改为远端值，首 token 置空，本地值移入 usage
+    assert turns["t1"][:2] == (20000, None)
+    assert usage["t1"]["local_latency_ms"] == 31000 and usage["t1"]["local_ttft_ms"] == 7000
+    assert usage["t1"]["trace_status"] == "complete"
+    # 缺 trace_status：有模型调用明细为 complete，否则 partial
+    assert turns["t4"][:2] == (4000, None) and usage["t4"]["trace_status"] == "partial"
+    # HiAgent 来源但没有远端用时：用时置空，标 unavailable；已有原因保留
+    assert turns["t2"][:2] == (None, None) and usage["t2"]["trace_status"] == "unavailable"
+    assert usage["t2"]["trace_note"] == "凭据未提供" and usage["t2"]["local_latency_ms"] == 9000
+    assert turns["t3"][:2] == (None, None) and usage["t3"]["trace_note"] == "历史数据未取得 Trace"
+    assert usage["t3"]["local_ttft_ms"] == 700
+    # 配置型与业务桥接：原样不动
+    for tid in ("c1", "b1"):
+        assert turns[tid] == before[0][tid]
+    # 评测用例按新口径重算：任一轮缺失则用时为空；用量、失败尝试保留
+    lat, u, cost = items["i1"][0], json.loads(items["i1"][1]), items["i1"][2]
+    assert lat is None and u["trace_status"] == "unavailable" and u["turns"] == 4
+    assert u["prompt_tokens"] == 36 and u["tool_calls"] == 4 and u["llm_calls"] == 2
+    assert u["failed_attempts"] == [{"attempt": 1}] and u["wasted_cost"] == 0.2 and cost == 0.5
+    assert items["i2"][0] == 5000 and json.loads(items["i2"][1])["trace_status"] == "complete"
+    assert items["i3"] == before[1]["i3"]
+    # 受影响的 run 打上重算标记，其他 run 不动
+    assert json.loads(runs["R1"])["needs_recompute"] is True
+    assert runs["R2"] == before[2]["R2"]
+
+    command.downgrade(make_alembic_config(path), "0009")
+    with sqlite3.connect(path) as conn:
+        turns, items, runs = _snapshot(conn)
+    assert {tid: turns[tid][:2] for tid in turns} == {tid: before[0][tid][:2] for tid in before[0]}
+    assert items["i1"][0] == 53000 and items["i2"][0] == 8000 and items["i3"] == before[1]["i3"]
+    assert "needs_recompute" not in json.loads(runs["R1"])

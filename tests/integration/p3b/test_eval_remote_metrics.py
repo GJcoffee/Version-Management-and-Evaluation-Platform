@@ -136,3 +136,20 @@ async def test_items_waiting_for_trace_when_the_service_restarts_are_scored_afte
     (item,) = await ev.items(run_id)
     assert detail.status == "completed" and item.status == "done" and item.passed is True
     assert item.latency_ms is None and item.usage["trace_status"] == "unavailable"
+
+
+async def test_startup_reconcile_recomputes_stats_flagged_by_the_history_backfill(ev):
+    from evalp.store.models import EvalRun
+    from sqlalchemy import select
+
+    version = await ev.config_version()
+    await ev.dataset("ds", [{"case_key": "c0", "input": "问题0", "expected": "echo: 问题0"}])
+    detail, _ = await ev.run(version, "asset://dataset/ds@latest")
+    async with ev.ctx.db.write() as s:  # 迁移 0010 的效果：旧统计被打上标记、数值是旧口径
+        run = await s.get(EvalRun, detail.id)
+        run.stats = {**run.stats, "latency_ms": {"p50": 1, "p95": 1}, "needs_recompute": True}
+    await ev.evals.reconcile()
+    async with ev.ctx.db.read() as s:
+        stats = (await s.execute(select(EvalRun.stats).where(EvalRun.id == detail.id))).scalar_one()
+    assert "needs_recompute" not in stats
+    assert stats["latency_ms"] == detail.stats["latency_ms"] and stats["remote"] is False

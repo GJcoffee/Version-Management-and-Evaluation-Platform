@@ -614,4 +614,7 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
   取舍：等待任务不持久化，靠启动对账兜底；补齐后的评分作业仍占用一个并发名额（只在评分期间）。
 - 评测汇总新增 `remote`、`latency_missing`；`tools` 按工具耗时仍取 `tool.result`（Trace 的覆盖 SSE 的）。
 - 取消了前端旧的 `actual_upstream_trace_timestamps` 日志口径与「本地用时 / SSE接收 / Trace补齐 / 本地首正文」的展示。
+- 迁移 0010 把历史数据回填为远端口径：`usage.upstream_run_ms` 存在的轮次 `latency_ms` 改为它、`ttft_ms` 置空；`adapter_snapshot.binding.id == "hiagent"`（非业务桥接）但没有远端用时的轮次置空并标 `unavailable`（“历史数据未取得 Trace”）；
+  原本地值移入 `usage.local_latency_ms` / `local_ttft_ms`。受影响的评测用例按新规则重算，受影响评测的 `stats` 带 `needs_recompute`，下次启动对账时重算并清除；降级还原本地值（评测统计不回退）。
+- trace 评估器的 `max_latency_ms` / `max_tokens` / `max_steps` 依赖的远端指标未取得（用时为空、HiAgent 未返回 token、Trace 不可用）时，评分记为出错（“…未取得，无法核对”），不判未通过。
 

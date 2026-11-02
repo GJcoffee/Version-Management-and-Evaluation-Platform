@@ -573,8 +573,10 @@ function applyTurnEnd(t: TurnState, p: TurnEndPayload, ts: string): TurnState {
     }
   }
   // 远端为主的轮次：用时只认 Trace（metrics 事件已写入）；turn.end 时尚未补齐的标为 pending
+  // 旧版 HiAgent 轮次（transport_ms 只有 HiAgent 适配器写）没有补齐过 Trace：远端用时未取得，不显示本地值
   const trace: TraceSync | null = t.trace ?? (u.trace_status
-    ? { status: u.trace_status, note: u.trace_note ?? null } : null)
+    ? { status: u.trace_status, note: u.trace_note ?? null }
+    : u.transport_ms !== undefined ? { status: 'unavailable', note: '历史数据未取得 Trace' } : null)
   return {
     ...t,
     status,

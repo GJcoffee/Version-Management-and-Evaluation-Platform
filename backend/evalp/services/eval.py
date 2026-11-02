@@ -884,6 +884,18 @@ class EvalService:
         for rid in ids:
             await self._maybe_finalize(rid)
         await self._requeue_orphan_scoring()
+        await self._recompute_flagged_stats()
+
+    async def _recompute_flagged_stats(self) -> None:
+        """迁移 0010 回填历史 HiAgent 数据后，受影响评测的统计快照带 ``needs_recompute``，重算并清除。"""
+        async with self.ctx.db.write() as s:
+            runs = (
+                await s.execute(
+                    select(EvalRun).where(func.json_extract(EvalRun.stats, "$.needs_recompute").is_not(None))
+                )
+            ).scalars().all()
+            for run in runs:
+                run.stats = await self._compute_stats(s, run)
 
     async def _requeue_orphan_scoring(self) -> None:
         """等待 Trace 补齐时进程退出的 Item：停在 scoring、没有任何待执行的任务，重新排队评分。"""

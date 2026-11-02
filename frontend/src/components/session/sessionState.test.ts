@@ -384,3 +384,25 @@ describe('上游 Trace 补齐的模型调用', () => {
       .toEqual(expect.arrayContaining(['llm:a', 'llm:b']))
   })
 })
+
+describe('旧版 HiAgent 轮次', () => {
+  it('没有补齐过 Trace 时用时为未取得，不显示 turn.end 里的本地值', () => {
+    const state = fold([
+      mk('turn.start', { input: { role: 'user', content: '查订单' } }, { seq: 1 }),
+      mk('turn.end', { status: 'completed', latency_ms: 9000, ttft_ms: 400, usage: { transport_ms: 8800 } }, { seq: 2, at: 9000 }),
+    ])
+    const turn = state.turns[0]
+    expect(turn.trace).toEqual({ status: 'unavailable', note: '历史数据未取得 Trace' })
+    expect(turn.metrics.latencyMs).toBeNull()
+    expect(turn.metrics.ttftMs).toBeNull()
+  })
+
+  it('普通 agent 的轮次照常使用自己的用时', () => {
+    const state = fold([
+      mk('turn.start', { input: { role: 'user', content: '你好' } }, { seq: 1 }),
+      mk('turn.end', { status: 'completed', latency_ms: 1200, ttft_ms: 300, usage: {} }, { seq: 2, at: 1200 }),
+    ])
+    expect(state.turns[0].trace).toBeNull()
+    expect(state.turns[0].metrics.latencyMs).toBe(1200)
+  })
+})
