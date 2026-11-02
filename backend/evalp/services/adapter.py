@@ -106,6 +106,11 @@ class AdapterService:
             if binding is None and v.spec.get("transport") == "adapter":
                 raise ValidationFailed("此版本没有可恢复的 HTTP 或子进程入口")
             target = self.make_snapshot(binding, current["revision"] + 1, "override")
+            if target["fingerprint"] == current["fingerprint"]:
+                return {
+                    "version_id": v.id, "before": current, "target": current,
+                    "applied": False, "message": "内容未变化",
+                }
             if body.dry_run:
                 return {"version_id": v.id, "before": current, "target": target, "applied": False}
             s.add(AdapterRevision(

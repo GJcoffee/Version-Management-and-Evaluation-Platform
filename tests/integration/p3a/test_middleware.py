@@ -16,6 +16,7 @@ from evalp.services.middleware import MiddlewareService
 from evalp.store.gc import run_gc
 from evalp.store.models import Event, Session, Turn
 from evalp.utils.time import iso_ago, now_iso
+from sqlalchemy import event
 
 URL = "https://artifacts.example/story.json?signature=retained"
 
@@ -341,3 +342,29 @@ async def test_business_bridge_and_multimodal_input_are_rejected(world):
     with pytest.raises(EvalpError, match="业务桥接"):
         await service.freeze(row, Message.user("不添加对白"), [MiddlewareSelection(source_turn_id=source)],
                              adapter_snapshot=legacy_binding)
+
+
+async def test_blob_access_is_queried_by_hash_without_loading_snapshots(world):
+    _, session, _ = await setup_source(world)
+    other = await world.session(await world.config_version())
+    hashes = [f"{n:064x}" for n in range(1, 4)]
+    async with world.ctx.db.write() as db:
+        owners = [session, session, other]
+        for idx, (owner, blob) in enumerate(zip(owners, hashes, strict=True), 1):
+            steps = [{"status": "ok"}, {"status": "ok", "result_blob_hash": blob}]
+            db.add(Turn(id=f"trn_snap{idx}", session_id=owner.id, idx=idx, status="ok",
+                        input=Message.user("生成").model_dump(), started_at=now_iso(),
+                        finished_at=now_iso(), middleware_snapshot={"steps": steps}))
+    statements = []
+    engine = world.ctx.db._read_engine.sync_engine
+    listener = lambda conn, cursor, statement, *_: statements.append(statement)  # noqa: E731
+    event.listen(engine, "before_cursor_execute", listener)
+    try:
+        assert await world.sessions.blob_kind(hashes[1], session.id) == "event"
+        assert await world.sessions.blob_kind(hashes[2], session.id) is None
+        assert await world.sessions.blob_kind(hashes[2]) == "event"
+        assert await world.sessions.blob_kind("f" * 64) is None
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+    # 只让数据库按 hash 过滤，不把各轮的快照整体读回 Python。
+    assert not any(s.startswith("SELECT turns.middleware_snapshot") for s in statements)

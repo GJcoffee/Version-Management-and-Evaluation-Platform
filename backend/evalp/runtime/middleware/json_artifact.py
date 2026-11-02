@@ -115,7 +115,7 @@ def candidates(source_id: str, final: Message, config: JsonArtifactConfig) -> li
             covered.append(match.span())
         for match in re.finditer(r"https?://[^\s<>\"'`)\]}，。；]+", text):
             if not any(start <= match.start() < end for start, end in covered):
-                add(match[0], "text")
+                add(match[0].rstrip(".,;!?:"), "text")
     return [
         ArtifactCandidate(
             id=hashlib.sha256(f"{source_id}\0{url}".encode()).hexdigest()[:24],

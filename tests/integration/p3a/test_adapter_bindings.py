@@ -56,6 +56,35 @@ async def test_override_keeps_spec_and_pins_session(world, client):
     assert [h["revision"] for h in history] == [2, 1, 0]
 
 
+async def test_saving_identical_binding_does_not_add_revision(world, client):
+    version = await world.http_version("http://127.0.0.1:9")
+    ref = await credential(client)
+    url = f"/api/v1/versions/{version['id']}/adapter-binding"
+    body = {"binding": binding(ref), "expected_revision": 0, "reason": "覆盖",
+            "acknowledge_transport_change": True}
+    assert (await client.put(url, json=body)).json()["target"]["revision"] == 1
+
+    same = {**body, "expected_revision": 1, "reason": "重复保存"}
+    result = (await client.put(url, json=same)).json()
+    assert result["applied"] is False and result["message"] == "内容未变化"
+    assert result["target"]["revision"] == 1
+    preview = (await client.put(url, json={**same, "dry_run": True})).json()
+    assert preview["applied"] is False and preview["message"] == "内容未变化"
+    batch = (await client.post("/api/v1/adapters/bindings/batch", json={
+        **same, "version_ids": [version["id"]], "expected_revisions": {version["id"]: 1},
+    })).json()
+    assert batch[0]["applied"] is False and batch[0]["message"] == "内容未变化"
+    state = (await client.get(url)).json()
+    assert state["current"]["revision"] == 1 and [h["revision"] for h in state["history"]] == [1, 0]
+    assert (await world.session(version)).adapter_snapshot["revision"] == 1
+
+    other = binding(ref)
+    other["config"]["published_version"] = "48"
+    changed = {**same, "binding": other}
+    result = (await client.put(url, json=changed)).json()
+    assert result["applied"] is True and result["target"]["revision"] == 2
+
+
 async def test_batch_preview_partial_conflict_and_unknown_adapter(world, client):
     a = await world.http_version("http://127.0.0.1:9")
     b = await world.http_version("http://127.0.0.1:9")

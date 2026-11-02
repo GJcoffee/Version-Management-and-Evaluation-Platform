@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from sqlalchemy import Text, func, select, type_coerce, update
+from sqlalchemy import Text, exists, func, select, type_coerce, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from evalp.api.pagination import Page, paginate
@@ -985,12 +985,14 @@ class SessionService:
                 stmt = stmt.where(Event.session_id == session_id)
             if (await s.execute(stmt)).first() is not None:
                 return "event"
-            refs = select(Turn.middleware_snapshot).where(Turn.middleware_snapshot.is_not(None))
+            steps = func.json_each(Turn.middleware_snapshot, "$.steps").table_valued("value")
+            stmt = select(Turn.id).where(
+                exists().where(func.json_extract(steps.c.value, "$.result_blob_hash") == blob_hash)
+            ).limit(1)
             if session_id:
-                refs = refs.where(Turn.session_id == session_id)
-            for snapshot in (await s.execute(refs)).scalars():
-                if any(step.get("result_blob_hash") == blob_hash for step in snapshot.get("steps", [])):
-                    return "event"
+                stmt = stmt.where(Turn.session_id == session_id)
+            if (await s.execute(stmt)).first() is not None:
+                return "event"
             if (
                 await s.execute(select(AssetRevision.id).where(AssetRevision.blob_hash == blob_hash).limit(1))
             ).first() is not None:

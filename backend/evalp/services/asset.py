@@ -25,7 +25,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, BinaryIO
 
-from sqlalchemy import Text, and_, cast, delete, func, insert, literal, or_, select
+from sqlalchemy import Text, cast, delete, func, insert, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -158,7 +158,7 @@ class AssetService:
         async with self.ctx.db.read() as s:
             if q:
                 like = f"%{q}%"
-                matches = [
+                stmt = stmt.where(or_(
                     Asset.name.like(like), Asset.display_name.like(like), Asset.description.like(like),
                     select(AssetRevision.id).where(
                         AssetRevision.asset_id == Asset.id, AssetRevision.rev == Asset.latest_rev,
@@ -167,24 +167,7 @@ class AssetService:
                             func.json_extract(cast(AssetRevision.meta, Text), "$.description").like(like),
                         ),
                     ).exists(),
-                ]
-                if kind in (None, "skill"):
-                    # 旧修订没有描述元数据：按原始文件补充搜索条件，再进行分页。
-                    rows = await s.execute(
-                        select(Asset, AssetRevision).join(
-                            AssetRevision,
-                            and_(AssetRevision.asset_id == Asset.id, AssetRevision.rev == Asset.latest_rev),
-                        ).where(
-                            Asset.kind == "skill",
-                            func.json_type(cast(AssetRevision.meta, Text), "$.description").is_(None),
-                        )
-                    )
-                    for a, r in rows:
-                        await self._fill_skill_meta(a, r)
-                        description = (r.meta or {}).get("description")
-                        if description:
-                            matches.append(and_(Asset.id == a.id, literal(description).like(like)))
-                stmt = stmt.where(or_(*matches))
+                ))
             page = await paginate(s, stmt, Asset.id, limit=limit, cursor=cursor)
             assets: list[Asset] = page.items
             latest: dict[tuple[str, int], AssetRevision] = {}
@@ -209,15 +192,20 @@ class AssetService:
             return asset_out(a, latest)
 
     async def _fill_skill_meta(self, asset: Asset, revision: AssetRevision | None) -> None:
-        """兼容升级前已入库的 Skill 元数据，无需修改历史 blob。"""
+        """升级前入库的 Skill 缺展示元数据：第一次读取时解析并写回该修订，之后不再解析。
+
+        没有描述的旧包也会记下 ``description: null`` 作为"已检查"标记。
+        """
         if asset.kind == "skill" and revision and (
             not (revision.meta or {}).get("format") or "description" not in (revision.meta or {})
         ):
             data = await self.ctx.blobs.get_bytes(revision.blob_hash)
             package = await asyncio.to_thread(open_package, data)
             metadata = package.metadata() if package else legacy_skill_metadata(data)
-            # 派生展示字段只存在于本次读取，不写回不可变的历史修订。
-            set_committed_value(revision, "meta", {**(revision.meta or {}), **metadata})
+            async with self.ctx.db.write() as s:
+                row = await self._revision_orm(s, revision.id)
+                row.meta = {**row.meta, "description": None, **metadata}
+                set_committed_value(revision, "meta", row.meta)
 
     async def find(self, kind: str, name: str, *, include_deleted: bool = False) -> AssetOut | None:
         """按 (kind, name) 查找；不存在返回 None。"""
