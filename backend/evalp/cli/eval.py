@@ -12,7 +12,17 @@ from rich.markdown import Markdown
 from rich.progress import BarColumn, Progress, TaskID, TextColumn, TimeElapsedColumn
 
 from evalp import actions, render
-from evalp.cli.common import AgentOpt, DataDirOpt, cli_errors, console, err_console, open_client, run
+from evalp.cli.common import (
+    AgentOpt,
+    DataDirOpt,
+    Environment,
+    EnvOpt,
+    cli_errors,
+    console,
+    err_console,
+    open_client,
+    run,
+)
 from evalp.client import EvalpClient
 
 app = typer.Typer(help="评测：发起、状态、报告、对比、CI 门禁", no_args_is_help=True)
@@ -76,6 +86,7 @@ def eval_run(
     name: Annotated[str | None, typer.Option("--name", help="评测名称")] = None,
     wait: Annotated[bool, typer.Option("--wait", help="等待评测结束，显示进度条和报告摘要")] = False,
     poll_interval: Annotated[float, typer.Option("--poll-interval", hidden=True)] = 1.0,
+    env: EnvOpt = Environment.production,
     agent: AgentOpt = None,
     data_dir: DataDirOpt = None,
 ) -> None:
@@ -109,6 +120,7 @@ def eval_run(
                 repeats=args.repeats,
                 concurrency=args.concurrency,
                 name=name,
+                environment=env.value,
             )
             console.print(f"[green]已发起评测[/green] 批次 {batch.batch_id}")
             for rid, ref in zip(batch.run_ids, batch.version_refs, strict=True):

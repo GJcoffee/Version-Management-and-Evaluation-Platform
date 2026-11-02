@@ -227,7 +227,7 @@ class EvalService:
     async def create(self, body: EvalCreate, *, dry_run: bool | None = None) -> EvalCreated:
         """发起评测（详设 8.1）：每个版本一个 Run，同属一个批次；``dry_run=True`` 只返回预估。"""
         dry = body.dry_run if dry_run is None else dry_run
-        versions = await self._resolve_versions(body.version_ids)
+        versions = await self._resolve_versions(body.version_ids, body.environment)
         rev_id, asset_id = await self._resolve_dataset(body.dataset)
         cases = await self.ctx.svc(DatasetService).list_cases(rev_id, body.case_filter)
         if not cases:
@@ -246,10 +246,8 @@ class EvalService:
         for rv in versions:
             keys = {
                 (c.id, r): cache_key_of(
-                    rv.spec_hash + (
-                        ":" + rv.adapter_snapshot.get("fingerprint", "")
-                        if rv.adapter_snapshot and rv.adapter_snapshot.get("revision", 0) > 0 else ""
-                    ), c.case_hash, r, body.seed
+                    rv.spec_hash + (":" + rv.adapter_snapshot["fingerprint"] if rv.adapter_snapshot else ""),
+                    c.case_hash, r, body.seed
                 )
                 for c in cases
                 for r in range(body.repeats)
@@ -337,7 +335,7 @@ class EvalService:
 
         return await self.ctx.svc(SettingsService).get_all()
 
-    async def _resolve_versions(self, refs: list[str]) -> list[ResolvedVersion]:
+    async def _resolve_versions(self, refs: list[str], environment: str) -> list[ResolvedVersion]:
         versions = self.ctx.svc(VersionService)
         out: list[ResolvedVersion] = []
         for ref in refs:
@@ -347,7 +345,7 @@ class EvalService:
                     f"version_ids 中有重复的版本: {ref}",
                     {"errors": [{"path": "version_ids", "message": "版本重复"}]},
                 )
-            out.append(await versions.get_resolved(vid))
+            out.append(await versions.get_resolved(vid, environment=environment))
         return out
 
     async def _resolve_dataset(self, ref: str) -> tuple[str, str]:
@@ -630,6 +628,7 @@ class EvalService:
                     seed=r.seed,
                     cache_policy=r.cache_policy,
                     budget=r.budget or {},
+                    adapter_snapshot=r.adapter_snapshot,
                     status=r.status,  # type: ignore[arg-type]
                     pause_reason=stored.get("pause_reason") if r.status == "paused" else None,
                     progress=prog,
@@ -1071,9 +1070,7 @@ class EvalService:
             sess = await sessions.create(
                 version_id=run.version_id,
                 mode="eval",
-                adapter_snapshot=run.adapter_snapshot or {
-                    "revision": 0, "binding": None, "source": "legacy",
-                },
+                adapter_snapshot=run.adapter_snapshot,
                 title=f"{case_row.case_key} #{item.repeat_idx}",
                 variables=md.get("variables") or {},
             )

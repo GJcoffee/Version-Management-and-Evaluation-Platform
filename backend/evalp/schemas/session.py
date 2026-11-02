@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from evalp.runtime.events import AgentEvent
 from evalp.runtime.messages import Message, TurnOutput
+from evalp.schemas.adapter import Environment, EnvironmentDescription
 from evalp.schemas.middleware import MiddlewareSelection
 
 SessionMode = Literal["chat", "eval", "replay", "judge"]
@@ -83,6 +84,7 @@ class SessionCreate(BaseModel):
     tag: str | None = Field(None, description="标签、v12 或 latest；缺省为 latest")
     title: str | None = None
     variables: dict[str, Any] | None = None
+    environment: Environment = Field("production", description=EnvironmentDescription)
 
     @model_validator(mode="after")
     def _check(self) -> SessionCreate:

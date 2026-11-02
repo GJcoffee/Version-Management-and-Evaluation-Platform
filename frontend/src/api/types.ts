@@ -178,7 +178,6 @@ export interface BuiltinKnowledgeTool {
 export type ToolEntry = AssetRefValue | BuiltinKnowledgeTool
 
 export interface SpecDisplayFields {
-  adapter?: import('./queries/adapters').AdapterBinding | null
   /** 仅用于显示，不参与哈希，也不存入版本 */
   name?: string | null
   description?: string | null
@@ -760,6 +759,8 @@ export interface SessionCreate {
   tag?: string
   title?: string
   variables?: Record<string, unknown>
+  /** 适配器接入环境；缺省为 production */
+  environment?: 'production' | 'test'
 }
 
 export interface SessionListParams {

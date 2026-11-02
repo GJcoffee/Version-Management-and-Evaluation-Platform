@@ -63,4 +63,6 @@ async def get_alignment(compare_id: str, ctx: AppContext = Depends(get_ctx)) -> 
 @router.post("/sessions/{session_id}/replay", response_model=ReplayAccepted, status_code=201)
 async def replay_session(session_id: str, body: ReplayCreate, ctx: AppContext = Depends(get_ctx)):
     """用另一个版本重放历史会话（锚定 ``anchored`` / 自由 ``free``）：立即返回新会话与对比组，后台执行。"""
-    return await ctx.svc(CompareService).replay(session_id, body.target_version_id, body.turns, body.mode)
+    return await ctx.svc(CompareService).replay(
+        session_id, body.target_version_id, body.turns, body.mode, body.environment
+    )

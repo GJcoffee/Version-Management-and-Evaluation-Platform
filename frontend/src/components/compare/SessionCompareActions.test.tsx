@@ -63,6 +63,22 @@ describe('ReplayDialog：重放模式', () => {
     expect(api.find('POST', /replay$/)[0].body).toEqual({ target_version_id: 'ver_2', mode: 'free' })
   })
 
+  it('测试已配置且不同：可选「测试」重放，请求带 environment；默认不带', async () => {
+    const api = mockApi({
+      ...routes,
+      'GET /api/v1/adapter-environments': { production: {}, test: {}, test_selectable: true },
+    })
+    wrap(<ReplayDialog session={session} onClose={() => {}} />)
+    await screen.findByTestId('replay-turns')
+    expect(await screen.findByRole('radio', { name: '生产' })).toBeChecked()
+    await userEvent.click(screen.getByRole('radio', { name: '测试' }))
+    await userEvent.click(screen.getByTestId('replay-submit'))
+    await waitFor(() => expect(api.find('POST', /replay$/)).toHaveLength(1))
+    expect(api.find('POST', /replay$/)[0].body).toEqual({
+      target_version_id: 'ver_2', mode: 'anchored', environment: 'test',
+    })
+  })
+
   it('不改模式时发送 anchored（且全选轮次不带 turns）', async () => {
     const api = mockApi(routes)
     wrap(<ReplayDialog session={session} onClose={() => {}} />)

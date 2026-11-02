@@ -7,6 +7,7 @@ import { useCreateCompare, useReplaySession } from '@/api/queries/compare'
 import { useSession, useSessions } from '@/api/queries/sessions'
 import { useVersions } from '@/api/queries/versions'
 import type { Session } from '@/api/types'
+import { EnvironmentSwitch, environmentBody, useEnvironmentChoice } from '@/components/EnvironmentSwitch'
 import { messageText } from '@/components/session'
 import { Button } from '@/components/ui/Button'
 import { Dialog } from '@/components/ui/Dialog'
@@ -53,6 +54,7 @@ export function ReplayDialog({ session, onClose }: { session: Session; onClose: 
   const [target, setTarget] = useState('')
   const [replayMode, setReplayMode] = useState<ReplayMode>('anchored')
   const [unchecked, setUnchecked] = useState<ReadonlySet<number>>(new Set())
+  const env = useEnvironmentChoice()
 
   const vlist = useMemo(() => versions.data?.pages.flatMap((p) => p.items) ?? [], [versions.data])
   // 仍在执行的轮次不能重放
@@ -72,7 +74,7 @@ export function ReplayDialog({ session, onClose }: { session: Session; onClose: 
   const submit = async () => {
     if (!targetId || selected.length === 0) return
     try {
-      const r = await replay.mutateAsync({ target_version_id: targetId, turns: all ? undefined : selected, mode: replayMode })
+      const r = await replay.mutateAsync({ target_version_id: targetId, turns: all ? undefined : selected, mode: replayMode, ...environmentBody(env.environment) })
       onClose()
       navigate(`/compare/${r.compare_id}`)
     } catch (e) {
@@ -114,6 +116,7 @@ export function ReplayDialog({ session, onClose }: { session: Session; onClose: 
             </Select>
           )}
         </Field>
+        <EnvironmentSwitch {...env} onChange={env.setEnvironment} />
         <Field label="重放模式">
           <div role="radiogroup" aria-label="重放模式" className="space-y-1.5" data-testid="replay-mode">
             {REPLAY_MODES.map((m) => (

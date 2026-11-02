@@ -7,21 +7,71 @@ export interface AdapterBinding {
   config: Record<string, unknown>
   credential_ref: string
 }
+
+export type AdapterEnvironmentName = 'production' | 'test'
+
+export const ENVIRONMENT_LABEL: Record<AdapterEnvironmentName, string> = { production: '生产', test: '测试' }
+
+/** 存档来源：编辑 / 推送 / 回滚 / 迁移 */
+export type RevisionSource = 'edit' | 'push' | 'rollback' | 'migration'
+export const SOURCE_LABEL: Record<RevisionSource, string> = {
+  edit: '编辑', push: '推送', rollback: '回滚', migration: '迁移',
+}
+
+/** 会话 / 评测运行固化的接入快照（旧数据没有 environment） */
 export interface BindingSnapshot {
+  /** 所用环境；旧的版本绑定快照没有此字段 */
+  environment?: AdapterEnvironmentName
+  /** 环境存档号 */
   revision: number
   binding: AdapterBinding | null
-  /** spec = 版本规范内置，override = 接入覆盖，legacy = 旧数据 */
-  source?: string
   fingerprint?: string
-  upstream?: Record<string, unknown>
+  /** 存档说明 */
   reason?: string
-  created_at?: string
+  /** 请求的环境与实际不同时（测试未配置或与生产相同）记录请求的环境 */
+  requested_environment?: AdapterEnvironmentName
+  upstream?: Record<string, unknown>
 }
-export interface BindingState {
-  version_id: string
-  current: BindingSnapshot
-  history: BindingSnapshot[]
+
+export interface EnvironmentState {
+  environment: AdapterEnvironmentName
+  configured: boolean
+  /** 当前存档号，0 表示尚未配置 */
+  revision: number
+  binding: AdapterBinding | null
+  fingerprint: string | null
+  source: RevisionSource | null
+  reason: string | null
+  created_at: string | null
+  updated_at: string | null
 }
+
+export interface AdapterEnvironments {
+  production: EnvironmentState
+  test: EnvironmentState
+  /** 测试已配置且与生产不同：发起时才提供「生产 | 测试」选项 */
+  test_selectable: boolean
+}
+
+export interface EnvironmentRevision {
+  revision: number
+  current: boolean
+  binding: AdapterBinding
+  fingerprint: string
+  source: RevisionSource
+  reason: string
+  origin: Record<string, unknown> | null
+  created_at: string
+}
+
+export interface EnvironmentChange {
+  environment: AdapterEnvironmentName
+  applied: boolean
+  message?: string
+  before: EnvironmentState
+  target: EnvironmentState
+}
+
 export interface AdapterDefinition {
   id: string
   name: string
@@ -39,21 +89,29 @@ export const useAdapterCredentials = () => useQuery({
   queryKey: ['adapter-credentials'],
   queryFn: () => api.get<{ ref: string; name: string; adapter_id: string }[]>('/adapters/credentials'),
 })
-export const useBindingState = (id: string) => useQuery({
-  queryKey: ['adapter-binding', id],
-  queryFn: () => api.get<BindingState>(`/versions/${id}/adapter-binding`),
+
+export const useAdapterEnvironments = () => useQuery({
+  queryKey: ['adapter-environments'],
+  queryFn: () => api.get<AdapterEnvironments>('/adapter-environments'),
 })
-export function useBindingMutation() {
+export const useEnvironmentRevisions = (name: AdapterEnvironmentName) => useQuery({
+  queryKey: ['adapter-environments', name, 'revisions'],
+  queryFn: () => api.get<EnvironmentRevision[]>(`/adapter-environments/${name}/revisions`),
+})
+
+function useEnvironmentMutation<T>(call: (body: T) => Promise<EnvironmentChange>) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ path, body }: { path: string; body: unknown }) => api.post<unknown>(path, { body }),
-    onSuccess: (result) => {
-      const applied = Array.isArray(result)
-        ? result.some((item) => item?.applied === true)
-        : (result as { applied?: boolean } | null)?.applied === true
-      if (!applied) return
-      void qc.invalidateQueries({ queryKey: ['adapter-binding'] })
-      void qc.invalidateQueries({ queryKey: ['versions'] })
-    },
+    mutationFn: call,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['adapter-environments'] }),
   })
 }
+export const useUpdateTest = () => useEnvironmentMutation((body: {
+  binding: AdapterBinding; expected_revision: number; reason: string
+}) => api.put<EnvironmentChange>('/adapter-environments/test', { body }))
+export const usePushToProduction = () => useEnvironmentMutation((body: {
+  test_revision: number; reason?: string
+}) => api.post<EnvironmentChange>('/adapter-environments/production/push', { body }))
+export const useRollbackProduction = () => useEnvironmentMutation((body: {
+  revision: number; reason?: string
+}) => api.post<EnvironmentChange>('/adapter-environments/production/rollback', { body }))

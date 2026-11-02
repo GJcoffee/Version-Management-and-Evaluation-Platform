@@ -13,7 +13,7 @@ TABLES = {
     "providers", "agents", "drafts", "versions", "version_tags", "version_asset_refs", "blobs", "assets",
     "asset_revisions", "eval_cases", "sessions", "turns", "events", "eval_batches", "eval_runs",
     "eval_items", "eval_scores", "compare_groups", "jobs", "settings",
-    "adapter_revisions", "adapter_credentials",
+    "adapter_credentials", "adapter_environments", "adapter_environment_revisions",
 }  # fmt: skip
 
 
@@ -60,7 +60,7 @@ def test_orm_metadata_covers_design_tables():
 def test_idempotent(migrated):
     run_migrations(migrated)  # 再次执行不报错
     con = sqlite3.connect(migrated)
-    assert con.execute("select version_num from alembic_version").fetchall() == [("0007",)]
+    assert con.execute("select version_num from alembic_version").fetchall() == [("0008",)]
     con.close()
 
 
@@ -86,6 +86,137 @@ def test_0006_freezes_legacy_session_binding_without_changing_spec(tmp_path):
         assert snapshot == {"revision": 0, "binding": None, "source": "legacy"}
         row = conn.execute("select spec_hash,spec from versions").fetchone()
         assert row[0] == "original" and json.loads(row[1]) == original
+
+
+def _seed_versions(conn, specs):
+    """specs: [(agent, seq, created_at, spec)]；同一 agent 只建一次。"""
+    for agent in {a for a, *_ in specs}:
+        conn.execute(
+            "insert into agents(id,name,kind,created_at,updated_at) values(?,?,'code','t','t')",
+            (agent, agent),
+        )
+    for agent, seq, created, spec in specs:
+        conn.execute(
+            "insert into versions(id,agent_id,seq,spec_hash,spec,created_via,created_at)"
+            " values(?,?,?,?,?,'api',?)",
+            (f"{agent}-v{seq}", agent, seq, f"h-{agent}-{seq}", json.dumps(spec), created),
+        )
+
+
+def _revision(conn, version, number, host, created, reason, binding=True):
+    value = {"id": "hiagent", "version": "1.0.0", "credential_ref": "adapter:x",
+             "config": {"base_url": f"https://{host}", "app_id": "a", "user_id": "u",
+                        "published_version": "1"}}
+    snapshot = {"revision": number, "binding": value if binding else None, "source": "override",
+                "fingerprint": f"fp-{host}"}
+    conn.execute(
+        "insert into adapter_revisions(version_id,revision,snapshot,reason,created_at) values(?,?,?,?,?)",
+        (version, number, json.dumps(snapshot), reason, created),
+    )
+    return value
+
+
+def test_0008_revisions_are_numbered_oldest_first_and_the_latest_is_current(tmp_path):
+    """多个版本各有修订：按 created_at 从旧到新编为 #1…，最新的一条 = 最大号 = 当前生产；测试为空，旧运行快照不变。"""
+    path = tmp_path / "envs.db"
+    run_migrations(path, "0007")
+    plain = {"kind": "code", "transport": "adapter"}
+    with sqlite3.connect(path) as conn:
+        _seed_versions(conn, [("a", 1, "t1", plain), ("a", 2, "t2", plain), ("b", 1, "t3", plain)])
+        _revision(conn, "a-v1", 1, "old-a1", "2026-01-01T00:00:00Z", "第一次")
+        newest = _revision(conn, "b-v1", 1, "newest", "2026-03-01T00:00:00Z", "最新")
+        _revision(conn, "a-v1", 2, "mid-a1", "2026-02-01T00:00:00Z", "第二次")
+        _revision(conn, "a-v2", 1, "old-a2", "2025-12-01T00:00:00Z", "更早")
+        _revision(conn, "a-v2", 2, "cleared", "2026-03-02T00:00:00Z", "撤销覆盖", binding=False)
+        conn.execute(
+            "insert into sessions(id,agent_id,version_id,mode,created_at,updated_at,adapter_snapshot)"
+            " values('s','a','a-v1','chat','t','t','{\"revision\":1}')"
+        )
+    run_migrations(path)
+    with sqlite3.connect(path) as conn:
+        envs = dict(conn.execute("select name, revision from adapter_environments"))
+        assert envs == {"production": 4, "test": 0}  # 当前 = 最大号
+        rows = conn.execute(
+            "select revision, binding, source, reason, created_at from adapter_environment_revisions"
+            " where environment='production' order by revision"
+        ).fetchall()
+        assert [r[0] for r in rows] == [1, 2, 3, 4]
+        assert {r[2] for r in rows} == {"migration"}
+        assert [r[4] for r in rows] == [
+            "2025-12-01T00:00:00Z", "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z", "2026-03-01T00:00:00Z"]
+        # 最新那条是最大号，也就是当前生效的存档；说明写明来自哪个版本的哪个修订。
+        assert json.loads(rows[3][1]) == newest
+        assert "b:v1" in rows[3][3] and "修订 #1" in rows[3][3] and "最新" in rows[3][3]
+        assert "a:v2" in rows[0][3] and "更早" in rows[0][3]
+        assert "a:v1" in rows[2][3] and "修订 #2" in rows[2][3]
+        assert conn.execute(
+            "select updated_at from adapter_environments where name='production'").fetchone() == (rows[3][4],)
+        assert conn.execute("select count(*) from adapter_environment_revisions where environment='test'"
+                            ).fetchone() == (0,)
+        assert conn.execute("select adapter_snapshot from sessions").fetchone() == ('{"revision":1}',)
+        assert not conn.execute("select 1 from sqlite_master where name='adapter_revisions'").fetchone()
+
+
+def test_0008_without_revisions_uses_the_latest_spec_adapter(tmp_path):
+    path = tmp_path / "spec.db"
+    run_migrations(path, "0007")
+    binding = {"id": "hiagent", "version": "1.0.0", "credential_ref": "adapter:s", "config": {
+        "base_url": "https://spec", "app_id": "a", "user_id": "u", "published_version": "1"}}
+    older = {**binding, "config": {**binding["config"], "base_url": "https://older"}}
+    with sqlite3.connect(path) as conn:
+        _seed_versions(conn, [
+            ("a", 1, "2026-01-01T00:00:00Z", {"kind": "code", "transport": "adapter", "adapter": older}),
+            ("a", 2, "2026-02-01T00:00:00Z", {"kind": "code", "transport": "adapter", "adapter": binding}),
+            ("a", 3, "2026-03-01T00:00:00Z", {"kind": "code", "transport": "http"}),
+        ])
+    run_migrations(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "select revision from adapter_environments where name='production'").fetchone() == (1,)
+        rows = conn.execute(
+            "select revision, binding, source, reason from adapter_environment_revisions").fetchall()
+        assert len(rows) == 1 and rows[0][0] == 1 and json.loads(rows[0][1]) == binding
+        assert rows[0][2] == "migration" and "a:v2" in rows[0][3] and "spec.adapter" in rows[0][3]
+
+
+def test_0008_with_nothing_to_migrate_leaves_both_environments_empty(tmp_path):
+    path = tmp_path / "empty.db"
+    run_migrations(path)
+    with sqlite3.connect(path) as conn:
+        assert dict(conn.execute("select name, revision from adapter_environments")) == {
+            "production": 0, "test": 0}
+        assert conn.execute("select count(*) from adapter_environment_revisions").fetchone() == (0,)
+
+
+def test_0008_downgrade_restores_version_revisions_best_effort(tmp_path):
+    from alembic import command
+    from evalp.store.migrate import make_alembic_config
+
+    path = tmp_path / "down.db"
+    run_migrations(path, "0007")
+    plain = {"kind": "code", "transport": "adapter"}
+    with sqlite3.connect(path) as conn:
+        _seed_versions(conn, [("a", 1, "t1", plain), ("b", 1, "t2", plain)])
+        first = _revision(conn, "a-v1", 1, "one", "2026-01-01T00:00:00Z", "第一次")
+        second = _revision(conn, "b-v1", 1, "two", "2026-02-01T00:00:00Z", "第二次")
+    run_migrations(path)
+    with sqlite3.connect(path) as conn:  # 升级后又在新模型里追加了两条，降级时无法归属到版本
+        for env, number in (("production", 3), ("test", 1)):
+            conn.execute(
+                "insert into adapter_environment_revisions values(?,?,'{}','edit','新',NULL,'t')",
+                (env, number),
+            )
+    command.downgrade(make_alembic_config(path), "0007")
+    with sqlite3.connect(path) as conn:
+        rows = {r[0]: r for r in conn.execute(
+            "select version_id, revision, snapshot, reason, created_at from adapter_revisions")}
+        assert set(rows) == {"a-v1", "b-v1"}
+        assert json.loads(rows["a-v1"][2])["binding"] == first and rows["a-v1"][3] == "第一次"
+        assert json.loads(rows["b-v1"][2])["binding"] == second and rows["b-v1"][4] == "2026-02-01T00:00:00Z"
+        assert json.loads(rows["b-v1"][2])["fingerprint"]
+        names = {r[0] for r in conn.execute("select name from sqlite_master where type='table'")}
+        assert "adapter_environments" not in names and "adapter_environment_revisions" not in names
+    run_migrations(path)  # 降级后可再次升级
 
 
 def test_indexes_and_without_rowid(migrated):

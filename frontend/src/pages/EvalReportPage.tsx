@@ -15,6 +15,7 @@ import { PauseNotice, RunControls } from '@/components/eval/RunControls'
 import { StatsPanel } from '@/components/eval/StatsPanel'
 import { ToolStatsTable } from '@/components/eval/ToolStats'
 import { useEvalStream } from '@/components/eval/useEvalStream'
+import { AdapterBadge } from '@/components/session'
 import {
   compareHref,
   describeBudget,
@@ -112,6 +113,7 @@ function ReportView({ run }: { run: EvalRunDetailOut }) {
             {runTitle(run)}
           </h1>
           <EvalStatusBadge status={status} />
+          {run.adapter_snapshot?.binding && <AdapterBadge snapshot={run.adapter_snapshot} />}
           <div className="ml-auto flex flex-wrap items-center gap-2">
             <EvalExportButton runId={run.id} status={status} />
             {hasHuman && status !== 'queued' && (

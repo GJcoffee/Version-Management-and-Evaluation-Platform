@@ -4,6 +4,7 @@ import { ApiError } from '@/api/client'
 import { useCreateSession } from '@/api/queries/sessions'
 import type { Agent, SessionCreate, VersionSummary } from '@/api/types'
 import { Button } from '@/components/ui/Button'
+import { EnvironmentSwitch, environmentBody, useEnvironmentChoice } from '@/components/EnvironmentSwitch'
 import { Dialog } from '@/components/ui/Dialog'
 import { Field, Input } from '@/components/ui/Input'
 import { KeyValueEditor } from '@/components/ui/KeyValueEditor'
@@ -36,6 +37,7 @@ export function NewSessionDialog({
   const [title, setTitle] = useState('')
   const [vars, setVars] = useState<Record<string, string>>({})
   const [error, setError] = useState<string | null>(null)
+  const env = useEnvironmentChoice()
 
   const tags = useMemo(() => {
     const seen = new Map<string, number>()
@@ -51,6 +53,7 @@ export function NewSessionDialog({
         sessionCreateBody(choice, agent, {
           title: title.trim() || undefined,
           variables: Object.keys(vars).length > 0 ? vars : undefined,
+          ...environmentBody(env.environment),
         }),
       )
       toast.success('已创建会话')
@@ -119,6 +122,7 @@ export function NewSessionDialog({
             )}
           </Select>
         </Field>
+        <EnvironmentSwitch {...env} onChange={env.setEnvironment} />
         <Field label="标题" htmlFor="ns-title" hint="可选；缺省时取第一轮用户输入的前几十个字">
           <Input id="ns-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="例如：退款流程验证" />
         </Field>

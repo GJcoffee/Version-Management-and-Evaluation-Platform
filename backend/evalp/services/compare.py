@@ -85,7 +85,10 @@ class CompareService:
                 )
             versions = self.ctx.svc(VersionService)
             ids = [await versions.resolve_ref(r) for r in (body.left.version_id, body.right.version_id)]
-            sides = [await self.sessions.create(version_id=vid, mode="chat") for vid in ids]
+            sides = [
+                await self.sessions.create(version_id=vid, mode="chat", environment=body.environment)
+                for vid in ids
+            ]
             left_id, right_id = sides[0].id, sides[1].id
         else:
             if not body.left.session_id or not body.right.session_id:
@@ -395,7 +398,12 @@ class CompareService:
     # ------------------------------------------------------------ 重放
 
     async def replay(
-        self, src_session_id: str, target_ref: str, turns: list[int] | None = None, mode: str = "anchored"
+        self,
+        src_session_id: str,
+        target_ref: str,
+        turns: list[int] | None = None,
+        mode: str = "anchored",
+        environment: str = "production",
     ) -> ReplayAccepted:
         """创建重放会话与对比组，并在后台开始执行；立即返回。
 
@@ -447,7 +455,7 @@ class CompareService:
 
         version_id = await self.ctx.svc(VersionService).resolve_ref(target_ref)
         if mode == "anchored":
-            await self._reject_hiagent_anchored(version_id)
+            await self._reject_hiagent_anchored(version_id, environment)
         new = await self.sessions.create(
             version_id=version_id,
             mode="replay",
@@ -455,6 +463,7 @@ class CompareService:
             variables=src.variables,
             source_session_id=src.id,
             replay_mode=mode,
+            environment=environment,
         )
         # 先登记"进行中"并持有 SSE，再建对比组：返回之后随时连上来的 SSE / 查询都看得到进行中
         self._replay_live.add(new.id)
@@ -476,17 +485,18 @@ class CompareService:
         task.add_done_callback(lambda _t, sid=new.id: self._replays.pop(sid, None))
         return ReplayAccepted(session_id=new.id, compare_id=group.id)
 
-    async def _reject_hiagent_anchored(self, version_id: str) -> None:
+    async def _reject_hiagent_anchored(self, version_id: str, environment: str) -> None:
         """HiAgent 直接接入由上游会话维护历史，忽略外部历史：并发的锚定轮次会共用并抢写同一个上游会话。"""
         from evalp.services.adapter import AdapterService
 
         async with self.ctx.db.read() as s:
             version = await s.get(Version, version_id)
             assert version is not None
-            binding = (await self.ctx.svc(AdapterService).snapshot(s, version))["binding"]
+            snapshot = await self.ctx.svc(AdapterService).snapshot(s, version.spec, environment)
+        binding = snapshot and snapshot["binding"]
         if binding and binding["id"] == "hiagent" and not binding["config"].get("business_bridge"):
             raise ValidationFailed(
-                "该版本绑定了 HiAgent 适配器：HiAgent 不接受外部历史，不能做锚定重放，请改用自由重放",
+                "该版本使用 HiAgent 适配器：HiAgent 不接受外部历史，不能做锚定重放，请改用自由重放",
                 code="ANCHORED_REPLAY_UNSUPPORTED",
             )
 

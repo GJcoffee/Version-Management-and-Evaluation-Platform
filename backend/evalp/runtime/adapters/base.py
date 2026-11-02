@@ -81,15 +81,13 @@ class AgentAdapter(ABC):
 
 
 def build_adapter(version: ResolvedVersion, app: AppContext) -> AgentAdapter:
-    """按版本的 Spec 构造 Adapter：config -> ConfigAdapter，code + http / subprocess -> 对应 Adapter。"""
+    """构造 Adapter：运行快照带接入配置 -> HiAgentAdapter；否则 config -> ConfigAdapter，
+    code + http / subprocess -> 对应 Adapter。"""
     from evalp.runtime.adapters.config_adapter import ConfigAdapter
     from evalp.runtime.adapters.http_adapter import HttpAdapter
     from evalp.runtime.adapters.subprocess_adapter import SubprocessAdapter
 
-    binding = (
-        version.adapter_snapshot.get("binding") if version.adapter_snapshot is not None
-        else version.spec.get("adapter")
-    )
+    binding = (version.adapter_snapshot or {}).get("binding")
     if binding:
         from evalp.runtime.adapters.hiagent_adapter import HiAgentAdapter
         from evalp.runtime.adapters.registry import validate_binding

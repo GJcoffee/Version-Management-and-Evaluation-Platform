@@ -157,6 +157,8 @@ export interface EvalRunOut {
   cache_policy: string
   /** 预算上限：max_cost（元）、max_tokens；都是本次新增消耗的上限 */
   budget?: EvalBudget
+  /** 适配器接入快照（transport=adapter 的版本才有）：所用环境与存档号 */
+  adapter_snapshot?: import('./queries/adapters').BindingSnapshot | null
   status: EvalRunStatusOut
   /** 暂停原因（仅 paused 时有值） */
   pause_reason?: string | null
@@ -256,6 +258,8 @@ export interface EvalCreateRequest {
   cache_policy?: 'reuse' | 'refresh'
   budget?: EvalBudget
   via?: 'ui'
+  /** 适配器接入环境；缺省为 production */
+  environment?: 'production' | 'test'
 }
 
 /** 成本预估（创建响应与 dry_run 都带） */

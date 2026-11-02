@@ -18,6 +18,8 @@ from evalp.store.models import Event, Session, Turn
 from evalp.utils.time import iso_ago, now_iso
 from sqlalchemy import event
 
+from tests.integration.adapter_env import configure_production, hiagent_binding, make_credential
+
 URL = "https://artifacts.example/story.json?signature=retained"
 
 
@@ -292,15 +294,10 @@ async def test_code_adapters_receive_combined_input(world, monkeypatch, transpor
 
 
 async def test_direct_hiagent_query_uses_saved_input_and_reuses_conversation(world, client):
-    secret = await client.post("/api/v1/adapters/credentials", json={
-        "name": "test", "secret": "agent-key", "adapter_id": "hiagent",
-    })
-    version = await world.code_version({"transport": "adapter", "adapter": {
-        "id": "hiagent", "version": "1.0.0", "credential_ref": secret.json()["ref"], "config": {
-            "base_url": "https://hiagent.example", "app_id": "app",
-            "user_id": "user", "published_version": "47",
-        },
-    }})
+    ref = await make_credential(client, "agent-key")
+    await configure_production(client, hiagent_binding(
+        ref, base_url="https://hiagent.example", app_id="app", user_id="user"))
+    version = await world.code_version({"transport": "adapter"})
     _, session, source = await setup_source(world, version=version)
     world.ctx.config.artifacts.allowed_hosts = "artifacts.example"
     frames = [

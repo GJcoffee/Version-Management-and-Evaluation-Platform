@@ -47,7 +47,15 @@ export type CompareSend = 'both' | 'left' | 'right'
 
 /** POST /compare：live 传 version_id（也可写 `agent:vN`），history 传 session_id */
 export type CompareCreate =
-  | { kind: 'session'; mode: 'live'; left: { version_id: string }; right: { version_id: string }; title?: string }
+  | {
+      kind: 'session'
+      mode: 'live'
+      left: { version_id: string }
+      right: { version_id: string }
+      title?: string
+      /** 适配器接入环境；缺省为 production */
+      environment?: 'production' | 'test'
+    }
   | { kind: 'session'; mode: 'history'; left: { session_id: string }; right: { session_id: string }; title?: string }
 
 export interface CompareTurnCreate {
@@ -71,6 +79,8 @@ export interface ReplayRequest {
   turns?: number[]
   /** anchored（默认）：各轮用原会话的历史、并发；free：新版本用自己的回复续写、逐轮串行 */
   mode?: ReplayMode
+  /** 适配器接入环境；缺省为 production */
+  environment?: 'production' | 'test'
 }
 
 export interface ReplayResponse {

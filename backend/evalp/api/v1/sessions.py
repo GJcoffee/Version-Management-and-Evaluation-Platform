@@ -42,7 +42,8 @@ async def create_session(body: SessionCreate, ctx: AppContext = Depends(get_ctx)
     ref = body.version_id or f"{body.agent}:{body.tag or 'latest'}"
     version_id = await ctx.svc(VersionService).resolve_ref(ref)
     session = await ctx.svc(SessionService).create(
-        version_id=version_id, mode="chat", title=body.title, variables=body.variables
+        version_id=version_id, mode="chat", title=body.title, variables=body.variables,
+        environment=body.environment,
     )
     return SessionWrapper(session=session)
 

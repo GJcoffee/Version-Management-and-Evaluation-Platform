@@ -610,7 +610,8 @@ CSV 需要 `column_map`（`{字段名: 列名}`）；字段名可用 `case_key /
 {"version_id": "ver_…", "title": "可选", "variables": {"lang": "zh"}}
 {"agent": "客服助手", "tag": "prod", "title": "…"}        // tag 可为标签、v12、latest（缺省 latest）
 ```
-`version_id` 与 `agent` 二选一（`version_id` 也接受 `agent:v3` 这样的引用）。返回 `{"session": SessionOut}`，
+`version_id` 与 `agent` 二选一（`version_id` 也接受 `agent:v3` 这样的引用）。可选 `environment`：`production`（默认）| `test`，
+只对 `transport: adapter` 的版本有意义，见「适配器接入环境」一节。返回 `{"session": SessionOut}`，
 `SessionOut = {id, agent_id, agent_name, version_id, version_seq, mode, title, status, last_seq, stats, variables, source_session_id, replay_mode, created_at, updated_at}`。
 通过本接口创建的会话 `mode` 恒为 `chat`；`stats = {turns, prompt_tokens, completion_tokens, llm_calls, tool_calls, cost}`。
 `variables` 是会话级模板变量（优先级：Spec < 会话 < 单轮）。标题缺省时取第一轮用户输入的前几十个字。
@@ -724,7 +725,7 @@ UTF-8 输入字节计算，不能静默截断。首期不支持额外产物凭�
 历史查看与只读对比可继续使用，评测尚不开放中间件配置。HiAgent 直接接入将实际输入作为本轮
 `Query`，沿用上游会话；业务桥接的组合输入消费尚未验证，首期禁用此接入的中间件。
 
-目标版本绑定了直接 HiAgent 适配器（上游自己维护会话历史、不接受外部历史）时，`mode=anchored` 返回 400 `ANCHORED_REPLAY_UNSUPPORTED`，请改用 `mode=free`。
+目标版本在所选环境里使用直接 HiAgent 适配器（上游自己维护会话历史、不接受外部历史）时，`mode=anchored` 返回 400 `ANCHORED_REPLAY_UNSUPPORTED`，请改用 `mode=free`。
 
 ### GET /sessions/{id}/stream（SSE）
 先回放库里 `seq > after_seq` 的事件，再订阅实时事件；回放与实时之间不会重复也不会丢失。`after_seq` 与请求头 `Last-Event-ID` 同时给出时取较大者，断线重连时浏览器会自动带上它。
@@ -763,6 +764,62 @@ HTTP 状态恒为 200（版本不存在 404），agent 的任何问题都体现�
 没有报告则看 `llm.request` 是否带上了上一轮内容，都没有给 `warn`）、`timeout`（极短超时后以 `timeout` 结束并终止进程）、`cancel`（执行中取消后以 `cancelled` 结束并终止进程）、
 `events`（逐条列出事件顺序 / 成对 / 协议违例等问题，`details.problems`）。agent 响应得比探测超时还快时 `timeout` / `cancel` 为 `skip`；`single` 失败时后续项为 `skip`。`ok` 表示没有 `fail`。
 
+## 适配器接入环境
+
+`transport: adapter` 的版本（由平台托管适配器，例如 HiAgent 发布 API）不在版本里保存连接配置。全平台只有**生产（production）**和
+**测试（test）**两套接入配置，所有这类版本运行时都使用环境里的配置，新发布的版本自动沿用，没有任何绑定操作。
+一套配置与原先的绑定内容相同：`{id, version, credential_ref, config}`（`GET /adapters` 给出可用适配器和 `config` 的 JSON Schema）。
+Spec 里的 `adapter` 字段已取消：草稿校验会报错（`path=adapter`），历史版本里残留的该字段运行时被忽略，「从版本创建草稿」时会去掉。
+
+**默认用生产。** 对话、评测、重放、双栏对比都接受可选的 `environment`（`production` 默认 | `test`）。测试未配置、或与生产配置
+内容相同（`fingerprint` 相同）时，选测试也落到生产，并在运行快照里记 `requested_environment: "test"`。
+生产尚未配置而版本又需要适配器时，创建会话 / 评测返回 400（`VALIDATION_ERROR`，提示先配置并推送到生产）。
+
+**改动流程**：只能编辑测试 → 在测试上验证（发起时选「测试」）→ 推送到生产。生产可以回滚到历史存档。
+
+**存档**：每个环境每次变化追加一个存档（存档号在环境内递增），记录配置、说明和来源：`edit`（编辑测试）| `push`（推送）|
+`rollback`（回滚）| `migration`（迁移 0008）。内容没有变化时不产生新存档，响应 `applied=false, message="内容未变化"`。
+存档不会被改写或删除；环境的"当前存档"指向其中一个。
+
+### GET /adapter-environments
+```json
+{"production": {"environment": "production", "configured": true, "revision": 2, "binding": {…}, "fingerprint": "…",
+                "source": "push", "reason": "推送自测试存档 #3", "created_at": "…", "updated_at": "…"},
+ "test": {"configured": false, "revision": 0, "binding": null, …},
+ "test_selectable": false}
+```
+`revision` 是当前存档号，0 表示尚未配置。`test_selectable` = 测试已配置且与生产内容不同；前端只在它为真时才提供「生产 | 测试」选项。
+
+### GET /adapter-environments/{production|test}/revisions
+存档历史，新的在前：`[{revision, current, binding, fingerprint, source, reason, origin, created_at}]`。`origin` 为推送 / 回滚 / 迁移时的来源存档
+（如 `{"environment": "test", "revision": 3}`）。
+
+### PUT /adapter-environments/test
+`{"binding": {…}, "expected_revision": 3, "reason": "升级发布版本"}`。`expected_revision` 是测试当前的存档号（未配置为 0），不一致返回 409；
+`binding` 校验适配器与版本、`config` 字段、凭据引用存在且正文可读，不通过返回 400。`config.business_bridge`（绑定某个固定版本的兼容入口）不能用于环境配置。
+
+### POST /adapter-environments/production/push
+`{"test_revision": 3, "reason": "可选备注"}`：把测试当前的配置复制为生产的新存档。`test_revision` 必须是测试当前的存档号（防止推送没验证过的内容），否则 409。
+
+### POST /adapter-environments/production/rollback
+`{"revision": 1, "reason": "可选备注"}`：生产回到某个历史存档，即把它的配置追加为新存档（来源 `rollback`）；存档不存在返回 404。
+
+以上三个写接口响应相同：`{"environment", "applied": true|false, "message"?: "内容未变化", "before": <环境状态>, "target": <环境状态>}`。
+
+### 运行记录里的接入快照
+会话（`SessionOut.adapter_snapshot`）和评测 Run（`EvalRun.adapter_snapshot`）创建时固化：
+`{"environment": "production|test", "revision": 存档号, "binding": {…}, "fingerprint": "…", "reason": "存档说明",
+"requested_environment"?: "test", "upstream"?: {…}}`。`requested_environment` 只在请求的环境与实际不同时出现。
+`upstream`（HiAgent 的会话 ID 等）由适配器在运行中写回同一个快照。非 `transport: adapter` 的版本快照为 `null`。
+评测缓存键 = `sha256(spec_hash[:fingerprint] | case_hash | repeat_idx | seed)`：有接入快照时 `spec_hash` 后接配置的 `fingerprint`，
+不同配置不共用缓存，生产与测试配置相同（落到生产）时共用。迁移前创建的会话 / 评测保留原快照（没有 `environment`，`revision` 为旧的版本修订号）。
+
+### 其他
+- `GET /adapters`：适配器注册表；`GET /adapters/credentials`、`POST /adapters/credentials`：凭据引用（密钥正文只进 SecretStore，接口不回显）；
+  `POST /adapters/check-connection`：只检查配置与凭据可读，不发起 LLM 请求。
+- 旧的 `/versions/{ref}/adapter-binding`（GET / PUT / rollback）与 `/adapters/bindings/batch` 已删除。
+- `POST /versions/{ref}/adapter-check` 对 `transport: adapter` 的版本使用生产环境配置。
+
 ## 对比与重放（P3-C）
 
 契约来源 `docs/contract-eval.md` 第 3 节；这里补充实现细节。对比组 id 前缀 `cmp_`。
@@ -773,6 +830,7 @@ HTTP 状态恒为 200（版本不存在 404），agent 的任何问题都体现�
 {"kind": "session", "mode": "history", "left": {"session_id": "ses_x"}, "right": {"session_id": "ses_y"}}
 ```
 - `live`：`version_id` 可写版本 id、`agent:vN`、`agent:标签`；自动创建两个 `mode=chat` 的会话（出现在会话列表里）。两侧可以是不同的 agent。
+- `live` 可带 `environment`（`production` 默认 | `test`），两侧会话都按该环境固化接入配置。
 - `history`：两侧是已有会话（任意 mode），会话不存在返回 404。
 - `replay` 模式只能由重放生成，不能直接创建。`kind` 目前只支持 `session`。
 - 响应（CompareGroup）：
@@ -833,7 +891,7 @@ HTTP 状态恒为 200（版本不存在 404），agent 的任何问题都体现�
 - **缓存**：两侧会话都没有正在执行的轮次（库里无 `running` 轮次、内存里也没有占用的槽位，重放则要求已结束）时，结果按（对比模式、重放所选轮次、两侧会话的 `last_seq` 及各轮 `id/status/finished_at`）缓存，最多 64 条、LRU 淘汰；任何一侧有新事件或新轮次，`last_seq` 变化，旧条目自然失效。运行中的结果不缓存。缓存只在进程内，重启后重算；响应内容与不缓存时完全一致。
 
 ### POST /sessions/{id}/replay → 201
-请求 `{"target_version_id": "ver_b | agent:v13 | agent:标签", "turns"?: [0, 2], "mode"?: "anchored" | "free"}`，响应 `{"session_id": "ses_new", "compare_id": "cmp_…"}`。
+请求 `{"target_version_id": "ver_b | agent:v13 | agent:标签", "turns"?: [0, 2], "mode"?: "anchored" | "free", "environment"?: "production" | "test"}`，响应 `{"session_id": "ses_new", "compare_id": "cmp_…"}`。
 - `mode` 缺省 `anchored`；其他取值返回 400。`turns` 是原会话的轮次 `idx`，缺省为全部（不含仍在执行的轮次）；不存在的 idx 返回 400。
 - 立即返回；新会话（`mode=replay`、`source_session_id`=原会话、`replay_mode`=所选模式、变量沿用原会话）和 `CompareGroup(mode=replay, left=原会话, right=新会话, replay_status=running, replay_turns=所选轮次)` 在返回时已创建，前端可立刻打开对比页，随后订阅新会话的 SSE（重放期间不发 `idle`）/ 轮询 alignment 或对比组详情看到逐轮完成。尚未执行的轮次在 alignment 中 `right_turn_id` 为 null。新轮次的 `pair_index` = 原轮次 `idx`。
 - **锚定（anchored）**：第 k 轮的上下文 = 原会话前 k 轮的历史（只含 `status=ok` 的轮次）；新轮次的 `anchored_from_turn_id` = 原轮次 id。各轮互不依赖，**轮内并发**执行：全部重放合计最多同时执行 4 个轮次（超出的排队），同一新会话里的并发轮次共用一个事件序列（见 SSE）。`Turn` 行按原轮次顺序创建，所以新会话里的 `idx` 与原轮次顺序一致，只是完成顺序不定。
@@ -883,6 +941,8 @@ HTTP 状态恒为 200（版本不存在 404），agent 的任何问题都体现�
 | GET | `/evals/{id}/gate?baseline=&max_regressions=0&min_pass_rate=&threshold=0.05` | CI 门禁，始终 200，返回 `{passed, reasons, summary}` |
 | POST | `/evals?dry_run=true` | 只返回 `estimate`（200），不创建 |
 
+`POST /evals` 可带 `environment`（`production` 默认 | `test`）：`transport: adapter` 的版本按该环境固化接入配置，Run 的 `adapter_snapshot` 记录所用环境与存档号。
+
 `EvalRun.budget` 为 `{max_cost, max_tokens}`；SSE 的 `eval.status` 带 `pause_reason`。
 
 ### EvalRun / EvalItem 的附加字段
@@ -915,7 +975,7 @@ HTTP 状态恒为 200（版本不存在 404），agent 的任何问题都体现�
 
 ### 缓存
 
-`cache_key = sha256(spec_hash | case_hash | repeat_idx | seed)`。`cache_policy=reuse`（默认）时，已有 `done` 状态的同 key Item 会被复用：新 Item 直接引用它的会话（`cached=true`，`reused_from_item_id`），不再调用被测 agent，只重新执行评估器；`refresh` 不复用。`seed` 不同则不命中。
+`cache_key = sha256(spec_hash | case_hash | repeat_idx | seed)`（`transport: adapter` 的版本在 `spec_hash` 后接所用适配器配置的指纹，见「适配器接入环境」）。`cache_policy=reuse`（默认）时，已有 `done` 状态的同 key Item 会被复用：新 Item 直接引用它的会话（`cached=true`，`reused_from_item_id`），不再调用被测 agent，只重新执行评估器；`refresh` 不复用。`seed` 不同则不命中。
 
 ### 调度、重试与重启恢复
 

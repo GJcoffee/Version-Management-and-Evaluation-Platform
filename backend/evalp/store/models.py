@@ -129,14 +129,32 @@ class VersionTag(Base):
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
 
 
-class AdapterRevision(Base):
-    __tablename__ = "adapter_revisions"
-    __table_args__ = (PrimaryKeyConstraint("version_id", "revision"),)
+class AdapterEnvironment(Base):
+    """全平台只有生产 / 测试两套接入配置；``revision`` 指向当前存档号，0 表示尚未配置。"""
 
-    version_id: Mapped[str] = mapped_column(Text, ForeignKey("versions.id"), nullable=False)
+    __tablename__ = "adapter_environments"
+    __table_args__ = (CheckConstraint("name IN ('production','test')", name="name"),)
+
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"), default=0)
+    updated_at: Mapped[str | None] = mapped_column(Text)
+
+
+class AdapterEnvironmentRevision(Base):
+    """环境每次变化的存档；存档号在环境内递增，当前生效的存档由 ``adapter_environments.revision`` 指定。"""
+
+    __tablename__ = "adapter_environment_revisions"
+    __table_args__ = (
+        PrimaryKeyConstraint("environment", "revision"),
+        CheckConstraint("source IN ('edit','push','rollback','migration')", name="source"),
+    )
+
+    environment: Mapped[str] = mapped_column(Text, ForeignKey("adapter_environments.name"), nullable=False)
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
-    snapshot: Mapped[dict[str, Any]] = _json_col()
+    binding: Mapped[dict[str, Any]] = _json_col()
+    source: Mapped[str] = mapped_column(Text, nullable=False)  # edit | push | rollback | migration
     reason: Mapped[str] = mapped_column(Text, nullable=False)
+    origin: Mapped[dict[str, Any] | None] = _json_col(nullable=True)  # 推送 / 回滚 / 迁移时的来源存档
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
 
 

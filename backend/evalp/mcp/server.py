@@ -53,6 +53,9 @@ run_eval（baseline 对比）-> get_eval_report / get_eval_compare 查看失败�
 其他：list_agents / get_draft / update_draft（直接改服务端草稿）、
 list_assets / upsert_asset / import_dataset、
 get_eval_status（评测进度）、get_session / replay_session / compare_sessions（会话查看、重放与对比）。
+transport 为 adapter 的版本使用平台的适配器环境配置（get_adapter_environments）：
+chat / run_eval / replay_session 默认用生产；改动适配器时先 update_test_adapter，
+用 environment=test 验证，确认后 push_adapter_to_production。
 服务没有运行时会自动启动 `evalp serve`（可用 --no-autostart 关闭）。
 所有 agent 参数省略时取 .evalp.toml 中的 agent；run_eval 的数据集等参数省略时取 .evalp.toml 的 [eval] 段。"""
 
@@ -210,7 +213,7 @@ def build_server(
     wait_timeout: float = WAIT_TIMEOUT_S,
     launcher: ServerLauncher | None = None,
 ) -> Any:
-    """构造 MCP Server 并注册 20 个工具。``launcher`` 非空时，服务没有运行就先拉起（注入客户端时不用）。"""
+    """构造 MCP Server 并注册全部工具。``launcher`` 非空时，服务没有运行就先拉起（注入客户端时不用）。"""
     env = Env(data_dir, project_dir, client_factory, poll_interval, wait_timeout, launcher)
     mcp = _FastMCP("evalp", instructions=INSTRUCTIONS)
 
@@ -223,10 +226,10 @@ def build_server(
 
     @mcp.tool()
     @_guard
-    async def get_adapter_binding(version: str) -> str:
-        """读取版本当前接入及修订历史。"""
+    async def get_adapter_environments() -> str:
+        """读取生产 / 测试两套适配器接入配置的当前内容；test_selectable 为真时才可以选测试环境。"""
         async with env.client(env.project()) as c:
-            return json.dumps(await c.get(f"/versions/{version}/adapter-binding"), ensure_ascii=False)
+            return json.dumps(await c.get("/adapter-environments"), ensure_ascii=False)
 
     @mcp.tool()
     @_guard
@@ -247,29 +250,31 @@ def build_server(
 
     @mcp.tool()
     @_guard
-    async def update_adapter_bindings(
-        version_ids: list[str], binding: dict[str, Any] | None,
-        expected_revisions: dict[str, int], reason: str,
-        dry_run: bool = True, acknowledge_transport_change: bool = False,
-    ) -> str:
-        """单个或批量覆盖已有版本接入；旧会话和任务保持快照，dry_run 只检查。"""
+    async def update_test_adapter(binding: dict[str, Any], expected_revision: int, reason: str) -> str:
+        """编辑测试环境的适配器接入配置（只能改测试）；内容未变化不产生新存档，旧会话和任务保持各自快照。"""
         async with env.client(env.project()) as c:
-            result = await c.post("/adapters/bindings/batch", {
-                "version_ids": version_ids, "binding": binding, "expected_revision": 0,
-                "expected_revisions": expected_revisions, "reason": reason,
-                "dry_run": dry_run, "acknowledge_transport_change": acknowledge_transport_change,
+            result = await c.put("/adapter-environments/test", {
+                "binding": binding, "expected_revision": expected_revision, "reason": reason,
             })
             return json.dumps(result, ensure_ascii=False)
 
     @mcp.tool()
     @_guard
-    async def rollback_adapter_binding(
-        version: str, revision: int, expected_revision: int, reason: str,
-    ) -> str:
-        """追加接入恢复修订，不覆盖历史证据。"""
+    async def push_adapter_to_production(test_revision: int, reason: str = "") -> str:
+        """把测试环境当前的接入配置推送到生产（复制为生产的新存档）；test_revision 是验证过的测试存档号。"""
         async with env.client(env.project()) as c:
-            result = await c.post(f"/versions/{version}/adapter-binding/rollback", {
-                "revision": revision, "expected_revision": expected_revision, "reason": reason,
+            result = await c.post("/adapter-environments/production/push", {
+                "test_revision": test_revision, "reason": reason,
+            })
+            return json.dumps(result, ensure_ascii=False)
+
+    @mcp.tool()
+    @_guard
+    async def rollback_production_adapter(revision: int, reason: str = "") -> str:
+        """生产环境回到某个历史存档（追加新存档，不覆盖历史）。"""
+        async with env.client(env.project()) as c:
+            result = await c.post("/adapter-environments/production/rollback", {
+                "revision": revision, "reason": reason,
             })
             return json.dumps(result, ensure_ascii=False)
 
@@ -409,6 +414,10 @@ def build_server(
         session_id: Annotated[
             str | None, Field(description="继续已有会话（上一次 chat 返回的 session_id）")
         ] = None,
+        environment: Annotated[
+            Literal["production", "test"],
+            Field(description="适配器接入环境，默认生产；只在验证适配器改动时选 test"),
+        ] = "production",
         agent: Agent = None,
     ) -> str:
         """和 agent 的某个已发布版本对话一轮：返回回复内容、工具调用摘要和 session_id（继续对话时传回）。"""
@@ -416,7 +425,7 @@ def build_server(
         async with env.client(project) as c:
             ver_label = ""
             if session_id is None:
-                session = await actions.create_session(c, env.agent_name(agent), version)
+                session = await actions.create_session(c, env.agent_name(agent), version, environment)
                 session_id = session["id"]
                 ver_label = f"v{session.get('version_seq')}"
             turn = await actions.chat_turn(c, session_id, message, timeout=CHAT_TIMEOUT_S)
@@ -484,6 +493,10 @@ def build_server(
         wait: Annotated[
             bool, Field(description="是否等待评测结束（最多 10 分钟）；false 时只返回 run id")
         ] = True,
+        environment: Annotated[
+            Literal["production", "test"],
+            Field(description="适配器接入环境，默认生产；只在验证适配器改动时选 test"),
+        ] = "production",
         agent: Agent = None,
     ) -> str:
         """发起评测。
@@ -514,6 +527,7 @@ def build_server(
                 repeats=args.repeats,
                 concurrency=args.concurrency,
                 via="mcp",
+                environment=environment,
             )
             lines = ["## 评测已发起\n"]
             for rid, ref in zip(batch.run_ids, batch.version_refs, strict=True):
@@ -858,12 +872,17 @@ def build_server(
         ] = "anchored",
         turns: Annotated[list[int] | None, Field(description="只重放这些轮次（idx）；省略为全部")] = None,
         wait: Annotated[bool, Field(description="是否等待重放结束（最多 10 分钟）并给出对比摘要")] = True,
+        environment: Annotated[
+            Literal["production", "test"],
+            Field(description="适配器接入环境，默认生产；只在验证适配器改动时选 test"),
+        ] = "production",
         agent: Agent = None,
     ) -> str:
         """用另一个版本重放历史会话：返回新会话 id 和与原会话的逐轮对比摘要。"""
         async with env.client(env.project()) as c:
             out = await actions.replay_session(
-                c, session_id, target_version, agent=agent, turns=turns or None, mode=mode
+                c, session_id, target_version, agent=agent, turns=turns or None, mode=mode,
+                environment=environment,
             )
             new_id, compare_id = out["session_id"], out["compare_id"]
             lines = [

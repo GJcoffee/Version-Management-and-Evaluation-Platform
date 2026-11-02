@@ -1,6 +1,4 @@
 import { useState } from 'react'
-import type { AdapterBinding } from '@/api/queries/adapters'
-import { AdapterBindingFields } from '@/components/AdapterBindingFields'
 import { Link, useNavigate } from 'react-router-dom'
 import { Archive, ArchiveRestore, Bot, Plus, Search } from 'lucide-react'
 import { ApiError } from '@/api/client'
@@ -210,7 +208,7 @@ function CreateAgentDialogInner({ onOpenChange }: { onOpenChange: (v: boolean) =
   const [name, setName] = useState('')
   const [kind, setKind] = useState<AgentKind>('config')
   const [description, setDescription] = useState('')
-  const [binding, setBinding] = useState<AdapterBinding | null>(null)
+  const [managed, setManaged] = useState(false)
   const [touched, setTouched] = useState(false)
 
   const nameError = !name.trim() ? '请填写名称' : !AGENT_NAME_RE.test(name.trim()) ? '只能包含字母（含中文）、数字、_ . -，最长 64，不能有空格和冒号' : null
@@ -220,8 +218,8 @@ function CreateAgentDialogInner({ onOpenChange }: { onOpenChange: (v: boolean) =
     if (nameError) return
     try {
       const r = await create.mutateAsync({
-        name: name.trim(), kind: binding ? 'code' : kind, description: description.trim() || undefined,
-        spec: binding ? { kind: 'code', transport: 'adapter', adapter: binding, source: { capture_git: false } } : undefined,
+        name: name.trim(), kind: managed ? 'code' : kind, description: description.trim() || undefined,
+        spec: managed ? { kind: 'code', transport: 'adapter', source: { capture_git: false } } : undefined,
       })
       toast.success(`已创建 ${r.agent.name}`)
       onOpenChange(false)
@@ -267,7 +265,16 @@ function CreateAgentDialogInner({ onOpenChange }: { onOpenChange: (v: boolean) =
         <Field label="描述" htmlFor="ag-desc">
           <Textarea id="ag-desc" rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
-        <AdapterBindingFields value={binding} onChange={setBinding} />
+        <label className="flex items-start gap-2 text-sm">
+          <input type="checkbox" className="mt-1 h-4 w-4 accent-primary" checked={managed}
+            onChange={(e) => setManaged(e.target.checked)} />
+          <span>
+            由平台托管适配器接入（代码型）
+            <span className="block text-xs text-muted-foreground">
+              连接配置在 设置 → 适配器 的生产 / 测试环境里维护，新版本自动沿用。
+            </span>
+          </span>
+        </label>
         <button type="submit" className="hidden" />
       </form>
     </Dialog>

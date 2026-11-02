@@ -7,7 +7,7 @@ import { Field, Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { toast } from '@/stores/toast'
 
-/** 创建、草稿和已有版本共享同一注册表驱动的连接表单。 */
+/** 适配器环境（测试）的连接配置表单，由适配器注册表驱动。 */
 export function AdapterBindingFields({ value, onChange, disabled }: {
   value: AdapterBinding | null
   onChange: (binding: AdapterBinding | null) => void
@@ -38,7 +38,7 @@ export function AdapterBindingFields({ value, onChange, disabled }: {
     } finally { setSaving(false) }
   }
   return <div className="space-y-3 rounded-lg border border-border p-3">
-    <Field label="调用接入" htmlFor={`${formId}-adapter`} hint="版本固定具体适配器；凭据只保存引用">
+    <Field label="调用接入" htmlFor={`${formId}-adapter`} hint="固定具体适配器版本；凭据只保存引用">
       <Select id={`${formId}-adapter`} disabled={disabled || adapters.isLoading} value={value ? `${value.id}@${value.version}` : ''}
         onChange={(e) => {
           const selected = adapters.data?.find((a) => `${a.id}@${a.version}` === e.target.value)
@@ -49,7 +49,7 @@ export function AdapterBindingFields({ value, onChange, disabled }: {
               .map(([key, property]) => [key, property.default])),
           } : null)
         }}>
-        <option value="">使用原运行方式</option>
+        <option value="">选择适配器</option>
         {adapters.data?.map((a) => <option key={`${a.id}@${a.version}`} value={`${a.id}@${a.version}`}>
           {a.name} · {a.version}
         </option>)}

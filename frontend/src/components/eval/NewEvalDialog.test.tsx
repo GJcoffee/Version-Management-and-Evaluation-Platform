@@ -34,8 +34,9 @@ const estimate = {
   per_version: [],
 }
 
-function setup() {
+function setup(testSelectable = false) {
   const api = mockApi({
+    'GET /api/v1/adapter-environments': { production: {}, test: {}, test_selectable: testSelectable },
     'GET /api/v1/agents': { items: [agent], next_cursor: null },
     'GET /api/v1/agents/agt_1': agent,
     'GET /api/v1/agents/agt_1/versions': { items: [version], next_cursor: null },
@@ -54,6 +55,27 @@ function setup() {
   )
   return { api, onClose }
 }
+
+describe('NewEvalDialog：适配器环境', () => {
+  it('测试已配置且不同：默认生产（请求不带 environment），选「测试」后预估与发起都带 environment=test', async () => {
+    const { api } = setup(true)
+    await userEvent.click(await screen.findByTestId('pick-dataset'))
+    expect(await screen.findByRole('radio', { name: '生产' })).toBeChecked()
+    await userEvent.click(screen.getByTestId('estimate-eval'))
+    await waitFor(() => expect(api.find('POST', /\/evals/)).toHaveLength(1))
+    expect(api.find('POST', /\/evals/)[0].body).not.toHaveProperty('environment')
+    await userEvent.click(screen.getByRole('radio', { name: '测试' }))
+    await userEvent.click(screen.getByTestId('submit-eval'))
+    await waitFor(() => expect(api.find('POST', /\/evals/)).toHaveLength(2))
+    expect(api.find('POST', /\/evals/)[1].body).toMatchObject({ environment: 'test' })
+  })
+
+  it('测试未配置或与生产相同：不出现环境选项', async () => {
+    setup(false)
+    await screen.findByTestId('pick-dataset')
+    expect(screen.queryByTestId('environment-switch')).toBeNull()
+  })
+})
 
 describe('NewEvalDialog：预算与成本预估', () => {
   it('预估成本走 dry_run，带上预算，显示预估并提示超出预算；不创建评测', async () => {

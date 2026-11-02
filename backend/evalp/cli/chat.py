@@ -11,7 +11,17 @@ import typer
 from rich.markup import escape
 
 from evalp import actions
-from evalp.cli.common import AgentOpt, DataDirOpt, agent_name, cli_errors, console, open_client, run
+from evalp.cli.common import (
+    AgentOpt,
+    DataDirOpt,
+    Environment,
+    EnvOpt,
+    agent_name,
+    cli_errors,
+    console,
+    open_client,
+    run,
+)
 from evalp.client import EvalpClient, EvalpClientError
 
 
@@ -157,6 +167,7 @@ def chat(
         str | None, typer.Option("--version", help="版本：v3、标签或版本 id（默认最新版本）")
     ] = None,
     message: Annotated[str | None, typer.Option("-m", "--message", help="只发送这一条消息然后退出")] = None,
+    env: EnvOpt = Environment.production,
     agent: AgentOpt = None,
     data_dir: DataDirOpt = None,
 ) -> None:
@@ -171,7 +182,7 @@ def chat(
 
     async def start() -> dict[str, Any]:
         async with open_client(project, data_dir) as c:
-            return await actions.create_session(c, name, version)
+            return await actions.create_session(c, name, version, env.value)
 
     session = run(start())
     console.print(

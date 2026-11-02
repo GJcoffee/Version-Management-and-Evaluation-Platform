@@ -232,31 +232,40 @@ describe('SessionPage Trace 轮次切换', () => {
 
 describe('SessionPage 适配器标签', () => {
   const hiagent = {
-    revision: 3, source: 'override',
-    binding: { id: 'hiagent', version: '1.0.0', credential_ref: 'cred_1', config: { published_version: '47' } },
+    environment: 'production', revision: 3, reason: '切换到新发布的桥接',
+    binding: { id: 'hiagent', version: '1.0.0', credential_ref: 'cred_1', config: { published_version: '47', app_id: 'app-1' } },
   }
 
-  it('绑定适配器：统一显示「HiAgent 发布版本 · 接入修订 N」，悬停显示该修订的来源与说明', async () => {
+  it('显示「生产 · 存档 #N」，悬停显示适配器、关键配置和存档说明，不再请求版本绑定', async () => {
     stubViewport(false)
-    const { find } = renderPage({ adapter_snapshot: hiagent } as Partial<Session>, {
-      'GET /api/v1/versions/ver_1/adapter-binding': {
-        version_id: 'ver_1', current: hiagent,
-        history: [{ ...hiagent, reason: '切换到新发布的桥接' }, { revision: 2, source: 'override', reason: '旧说明', binding: null }],
-      },
-    })
+    const { find } = renderPage({ adapter_snapshot: hiagent } as Partial<Session>)
     const badge = await screen.findByTestId('adapter-badge')
-    expect(badge).toHaveTextContent('HiAgent 发布版本 47 · 接入修订 3')
-    await vi.waitFor(() => expect(badge.getAttribute('title')).toContain('切换到新发布的桥接'))
-    expect(badge.getAttribute('title')).toContain('来源：覆盖')
-    expect(badge.getAttribute('title')).not.toContain('旧说明')
-    expect(find('GET', /adapter-binding/)).toHaveLength(1)
+    expect(badge).toHaveTextContent('生产 · 存档 #3')
+    expect(badge.getAttribute('title')).toContain('HiAgent 1.0.0 · 发布版本 47 · app app-1')
+    expect(badge.getAttribute('title')).toContain('说明：切换到新发布的桥接')
+    expect(find('GET', /adapter-binding/)).toHaveLength(0)
   })
 
-  it('未绑定适配器的会话保持原样，也不请求接入历史', async () => {
+  it('请求测试却落到生产时标明未生效', async () => {
     stubViewport(false)
-    const { find } = renderPage()
+    renderPage({
+      adapter_snapshot: { ...hiagent, environment: 'production', requested_environment: 'test' },
+    } as Partial<Session>)
+    const badge = await screen.findByTestId('adapter-badge')
+    expect(badge).toHaveTextContent('生产 · 存档 #3（测试未生效）')
+    expect(badge.getAttribute('title')).toContain('已使用生产')
+  })
+
+  it('测试环境的会话显示「测试 · 存档 #N」', async () => {
+    stubViewport(false)
+    renderPage({ adapter_snapshot: { ...hiagent, environment: 'test', revision: 2 } } as Partial<Session>)
+    expect(await screen.findByTestId('adapter-badge')).toHaveTextContent('测试 · 存档 #2')
+  })
+
+  it('未绑定适配器的会话保持原样', async () => {
+    stubViewport(false)
+    renderPage()
     await screen.findByTestId('agent-link')
     expect(screen.queryByTestId('adapter-badge')).toBeNull()
-    expect(find('GET', /adapter-binding/)).toHaveLength(0)
   })
 })
