@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import { useProviders } from '@/api/queries/providers'
-import type { AdapterBinding } from '@/api/queries/adapters'
-import { AdapterBindingFields } from '@/components/AdapterBindingFields'
 import type { SpecSchema } from '@/api/types'
 import { AssetRefListEditor, AssetRefPicker } from '@/components/AssetRefPicker'
 import { Field, Textarea } from '@/components/ui/Input'
@@ -35,8 +33,6 @@ export function SpecForm({ spec, kind, schema, onEdit, disabled }: SpecFormProps
   }
   return (
     <div className="space-y-3" data-testid="spec-form">
-      <AdapterBindingFields value={(spec.adapter as AdapterBinding) ?? null}
-        disabled={disabled} onChange={(binding) => onEdit([[['adapter'], binding ?? undefined]])} />
       {kind === 'config' ? <ConfigForm ctx={ctx} /> : <CodeForm ctx={ctx} />}
     </div>
   )
@@ -449,7 +445,9 @@ function CodeForm({ ctx }: { ctx: FormCtx }) {
               />
             </Field>
           </div>
-        ) : <p className="text-xs text-muted-foreground">使用上方固定的适配器与连接配置</p>}
+        ) : <p className="text-xs text-muted-foreground">
+            连接配置不在版本里：由 设置 → 适配器 的生产 / 测试环境提供，新发布的版本自动沿用。
+          </p>}
       </Section>
 
       <Section title="代码来源" description="source">

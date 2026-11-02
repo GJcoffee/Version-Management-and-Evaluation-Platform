@@ -24,8 +24,8 @@ function Form() {
   </>
 }
 
-describe('统一调用接入表单', () => {
-  it('从注册表选择具体版本并保存凭据引用，清空时恢复原运行方式', async () => {
+describe('适配器连接配置表单', () => {
+  it('从注册表选择具体版本并保存凭据引用，取消选择时配置为空', async () => {
     const client = new QueryClient()
     render(<QueryClientProvider client={client}><Form /></QueryClientProvider>)
     await userEvent.selectOptions(screen.getByLabelText('调用接入'), 'hiagent@1.0.0')

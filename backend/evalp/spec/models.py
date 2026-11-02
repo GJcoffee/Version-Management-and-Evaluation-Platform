@@ -283,7 +283,7 @@ class SnapshotSpec(_Model):
 
 
 class AdapterBinding(_Model):
-    """版本固定的接入配置；凭据只保存引用。"""
+    """一套接入配置（生产或测试环境）；凭据只保存引用。"""
 
     id: str = Field(min_length=1)
     version: str = Field(min_length=1)
@@ -300,7 +300,9 @@ class _SpecBase(_Model):
     name: str | None = Field(None, description="显示用，不参与哈希")
     description: str | None = Field(None, description="显示用，不参与哈希")
     notes: str | None = Field(None, description="备注，不参与哈希")
-    adapter: AdapterBinding | None = None
+    adapter: AdapterBinding | None = Field(
+        None, description="已取消：接入配置按生产 / 测试环境维护；只为读取历史版本保留"
+    )
 
 
 class ConfigSpec(_SpecBase):
@@ -344,8 +346,6 @@ class CodeSpec(_SpecBase):
             if self.subprocess is None:
                 raise ValueError("transport=subprocess 时必须提供 subprocess 配置")
             self.http = None
-        elif self.adapter is None:
-            raise ValueError("transport=adapter 时必须提供 adapter 配置")
         return self
 
 

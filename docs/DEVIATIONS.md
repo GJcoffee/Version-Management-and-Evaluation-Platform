@@ -576,3 +576,21 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
   不丢失输入语义；历史与只读对比保持可用。
 
 验证使用 Fake 模型、受控 SDK Agent 与模拟产物/HiAgent HTTP 响应，不调用真实模型。
+
+## 适配器接入改为全平台生产 / 测试两套（迁移 0008）
+
+取代上文「适配器统一接入」中按版本绑定、按版本修订的做法：
+
+- 新增 `adapter_environments`（`production` / `test`，当前存档号）与 `adapter_environment_revisions`（每次变化一个存档：配置、说明、来源 edit|push|rollback|migration、来源存档 `origin`）；
+  删除 `adapter_revisions`。`transport: adapter` 的版本运行时使用环境配置，新版本无需绑定。
+- Spec 的 `adapter` 字段取消：`transport: adapter` 不再要求它，草稿校验遇到会报错，历史版本里的残留值运行时忽略。`to-draft` 去掉该字段。
+- 默认用生产；对话 / 评测 / 重放 / 双栏对比可选 `environment=test`。测试未配置或与生产 fingerprint 相同时落到生产，快照记 `requested_environment`。
+- `sessions` / `eval_runs.adapter_snapshot` 沿用，内容改为 `{environment, revision(存档号), binding, fingerprint, reason}`；`EvalRun` 响应新增 `adapter_snapshot`。
+  非适配器版本的快照为 NULL（原先是 `{revision:0, binding:null}`）。旧运行的快照不改。评测缓存键有快照时一律带 fingerprint。
+- 迁移：原修订（有配置的）按 `created_at` 从旧到新依次编为生产存档 #1、#2…，最新的一条号码最大并且是当前生效的存档（来源「迁移」，说明写明版本与修订号）；
+  无修订时取最新带 `spec.adapter` 的版本作为 #1。「撤销覆盖」修订（binding 为空）不进存档。测试初始为空。降级把来源为迁移的存档还原成原版本修订，其余存档丢弃。
+- 删除 `/versions/{ref}/adapter-binding*`、`/adapters/bindings/batch`、前端版本绑定对话框；MCP 的 `get_adapter_binding` / `update_adapter_bindings` /
+  `rollback_adapter_binding` 换成 `get_adapter_environments` / `update_test_adapter` / `push_adapter_to_production` / `rollback_production_adapter`，
+  `chat` / `run_eval` / `replay_session` 与 CLI `chat` / `eval run` / `replay` 增加环境选项。
+- `config.business_bridge` 绑定某个固定版本，不适用于全平台环境配置：环境编辑拒绝它；旧会话快照里的桥接仍按原方式运行。
+

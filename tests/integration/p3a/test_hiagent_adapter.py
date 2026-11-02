@@ -11,6 +11,8 @@ import respx
 from evalp.runtime.adapters.hiagent_adapter import HiAgentAdapter
 from evalp.runtime.adapters.registry import validate_binding
 
+from tests.integration.adapter_env import configure_production, make_credential
+
 CHAT = "https://hiagent.example/api/v1/chat_query_v2"
 CREATE = "https://hiagent.example/api/v1/create_conversation"
 OBSERVE = "https://observe.example/api/observe"
@@ -66,16 +68,15 @@ def observe(trace, spans, *, calls=None):
 
 async def make_session(world, client, *, wait=2.0, observe_headers=True, extra=None):
     secret = {"api_key": "key-1", **({"observe_headers": {"Cookie": "c"}} if observe_headers else {})}
-    ref = (await client.post("/api/v1/adapters/credentials", json={
-        "name": "t", "secret": json.dumps(secret), "adapter_id": "hiagent",
-    })).json()["ref"]
-    version = await world.code_version({"transport": "adapter", "adapter": {
+    ref = await make_credential(client, secret)
+    await configure_production(client, {
         "id": "hiagent", "version": "1.0.0", "credential_ref": ref, "config": {
             "base_url": "https://hiagent.example", "app_id": "app-test", "user_id": "u",
             "published_version": "47", "observe_base_url": "https://observe.example",
             "observation_wait_s": wait, **(extra or {}),
         },
-    }})
+    })
+    version = await world.code_version({"transport": "adapter"})
     return version, await world.session(version)
 
 

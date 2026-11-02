@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from evalp.runtime.messages import Message
+from evalp.schemas.adapter import Environment, EnvironmentDescription
 
 
 class CompareSide(BaseModel):
@@ -26,6 +27,7 @@ class CompareCreate(BaseModel):
     left: CompareSide
     right: CompareSide
     title: str | None = None
+    environment: Environment = Field("production", description=EnvironmentDescription)
 
 
 class CompareSideOut(BaseModel):
@@ -105,6 +107,7 @@ class ReplayCreate(BaseModel):
     target_version_id: str
     turns: list[int] | None = Field(None, description="只重放这些原轮次的 idx；缺省为全部")
     mode: Literal["anchored", "free"] = "anchored"
+    environment: Environment = Field("production", description=EnvironmentDescription)
 
 
 class ReplayAccepted(BaseModel):

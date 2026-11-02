@@ -214,7 +214,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
           </Link>
           <Badge variant="outline">{MODE_LABEL[session.mode]}</Badge>
           {session.adapter_snapshot?.binding && (
-            <AdapterBadge versionId={session.version_id} snapshot={session.adapter_snapshot} />
+            <AdapterBadge snapshot={session.adapter_snapshot} />
           )}
           {session.replay_mode && <Badge variant="outline">{session.replay_mode === 'anchored' ? '锚定重放' : '自由重放'}</Badge>}
           <SessionStatusBadge status={running ? 'running' : session.status} />

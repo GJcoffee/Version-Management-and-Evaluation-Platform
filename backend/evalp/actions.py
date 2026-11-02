@@ -192,6 +192,7 @@ async def create_eval(
     concurrency: int | None = None,
     name: str | None = None,
     via: str = "cli",
+    environment: str = "production",
 ) -> EvalBatch:
     """发起评测（每个版本一个 Run）。有 ``baseline`` 时基线排在第一位；否则多个版本时以第一个为基线。"""
     refs: list[str] = []
@@ -211,6 +212,8 @@ async def create_eval(
         "evaluators": evaluators,
         "via": via,
     }
+    if environment != "production":
+        body["environment"] = environment
     if repeats is not None:
         body["repeats"] = repeats
     if concurrency is not None:
@@ -351,10 +354,15 @@ async def regression_details(
 # ---------------------------------------------------------------------- 对话
 
 
-async def create_session(client: EvalpClient, agent: str | None, version: str | None) -> dict[str, Any]:
-    """为版本创建对话会话；``version`` 省略时用最新版本。"""
+async def create_session(
+    client: EvalpClient, agent: str | None, version: str | None, environment: str = "production"
+) -> dict[str, Any]:
+    """为版本创建对话会话；``version`` 省略时用最新版本；``environment`` 为 production | test。"""
     ref = qualify_version(agent, version or "latest")
-    out = await client.post("/sessions", {"version_id": ref})
+    body: dict[str, Any] = {"version_id": ref}
+    if environment != "production":
+        body["environment"] = environment
+    out = await client.post("/sessions", body)
     return out["session"]
 
 
@@ -603,12 +611,15 @@ async def replay_session(
     agent: str | None = None,
     turns: list[int] | None = None,
     mode: str = "anchored",
+    environment: str = "production",
 ) -> dict[str, Any]:
     """用另一个版本重放历史会话；``target`` 写 v13 / 标签时，agent 缺省取原会话的 agent。"""
     if not target.startswith(("ver_", "drf_")) and ":" not in target and not agent:
         detail = await client.get(f"/sessions/{session_id}", params={"include": ""})
         agent = (detail.get("session") or {}).get("agent_name")
     body: dict[str, Any] = {"target_version_id": qualify_version(agent, target), "mode": mode}
+    if environment != "production":
+        body["environment"] = environment
     if turns:
         body["turns"] = turns
     return await client.post(f"/sessions/{session_id}/replay", body)

@@ -5,11 +5,6 @@ import { SpecForm } from './SpecForm'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 
-vi.mock('@/api/queries/adapters', () => ({
-  useAdapters: () => ({ data: [] }),
-  useAdapterCredentials: () => ({ data: [] }),
-}))
-
 function render(ui: ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return rtlRender(<QueryClientProvider client={client}>{ui}</QueryClientProvider>)

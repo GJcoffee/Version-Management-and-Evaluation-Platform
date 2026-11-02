@@ -19,8 +19,9 @@ TOOLS = {
     "chat", "run_eval", "get_eval_report", "get_eval_compare",
     "list_agents", "get_draft", "update_draft", "list_assets", "upsert_asset", "import_dataset",
     "get_eval_status", "get_session", "replay_session", "compare_sessions", "get_conventions",
-    "list_adapters", "get_adapter_binding", "check_adapter_connection", "update_adapter_bindings",
-    "rollback_adapter_binding", "list_adapter_credentials", "create_adapter_credential", "get_version",
+    "list_adapters", "get_adapter_environments", "check_adapter_connection", "update_test_adapter",
+    "push_adapter_to_production", "rollback_production_adapter", "list_adapter_credentials",
+    "create_adapter_credential", "get_version",
 }  # fmt: skip
 MOCK_API = "http://test/api/v1"
 
@@ -55,16 +56,8 @@ async def test_registers_all_platform_tools(project_dir):
     assert update.input_schema["required"] == ["patch", "expected_revision"]
 
 
-async def test_adapter_tools_share_binding_service(project_dir, client, provider):
-    """通过 MCP 创建凭据、检查和覆盖，读回原版本接入修订。"""
-    from tests.integration.p2a.conftest import Api
-
-    api = Api(client)
-    agent = await api.agent("adapter-test", kind="code", spec={
-        "kind": "code", "transport": "http", "http": {"base_url": "http://127.0.0.1:9"},
-        "source": {"capture_git": False},
-    })
-    version = (await api.publish(agent["draft"]))["version"]
+async def test_adapter_tools_edit_test_push_and_rollback_production(project_dir, client, provider):
+    """通过 MCP 创建凭据、检查、编辑测试、推送生产并回滚，读回两个环境。"""
     server = build_server(project_dir=project_dir, client_factory=lambda p: EvalpClient(http=client))
     async with Client(server) as c:
         registry = json.loads(text(await c.call_tool("list_adapters", {})))
@@ -77,19 +70,46 @@ async def test_adapter_tools_share_binding_service(project_dir, client, provider
         }}
         check = json.loads(text(await c.call_tool("check_adapter_connection", {"binding": binding})))
         assert check["ok"] and check["details"]["llm_requested"] is False
-        result = json.loads(text(await c.call_tool("update_adapter_bindings", {
-            "version_ids": [version["id"]], "binding": binding,
-            "expected_revisions": {version["id"]: 0}, "reason": "MCP覆盖",
-            "acknowledge_transport_change": True, "dry_run": False,
+        edited = json.loads(text(await c.call_tool("update_test_adapter", {
+            "binding": binding, "expected_revision": 0, "reason": "MCP配置",
         })))
-        assert result[0]["applied"]
-        state = json.loads(text(await c.call_tool("get_adapter_binding", {"version": version["id"]})))
-        assert state["current"]["revision"] == 1
+        assert edited["applied"] and edited["target"]["revision"] == 1
+        pushed = json.loads(text(await c.call_tool("push_adapter_to_production", {"test_revision": 1})))
+        assert pushed["applied"] and pushed["target"]["source"] == "push"
+        state = json.loads(text(await c.call_tool("get_adapter_environments", {})))
+        assert state["production"]["revision"] == 1 and state["test_selectable"] is False
         assert "test-private-key" not in str(state)
-        restored = json.loads(text(await c.call_tool("rollback_adapter_binding", {
-            "version": version["id"], "revision": 0, "expected_revision": 1, "reason": "恢复",
-        })))
-        assert restored["target"]["revision"] == 2 and restored["target"]["binding"] is None
+        binding["config"]["published_version"] = "48"
+        await c.call_tool("update_test_adapter", {
+            "binding": binding, "expected_revision": 1, "reason": "升级"})
+        await c.call_tool("push_adapter_to_production", {"test_revision": 2})
+        restored = json.loads(text(await c.call_tool("rollback_production_adapter", {"revision": 1})))
+        assert restored["target"]["revision"] == 3
+        assert restored["target"]["binding"]["config"]["published_version"] == "47"
+
+
+async def test_chat_with_test_environment_is_sent_to_the_server(mock_server):
+    server, api = mock_server
+    sess = api.post("/sessions").mock(return_value=httpx.Response(
+        201, json={"session": {"id": "ses_1", "version_seq": 2, "agent_name": "support"}}))
+    api.post("/sessions/ses_1/turns").mock(return_value=httpx.Response(
+        200, json={"turn_id": "t", "stream_url": "", "turn": {"id": "t", "status": "ok", "output": {
+            "final": {"role": "assistant", "content": "好"}, "messages": []}}}))
+    async with Client(server) as c:
+        await c.call_tool("chat", {"message": "hi", "version": "v2", "environment": "test"})
+    assert json.loads(sess.calls[0].request.content) == {"version_id": "support:v2", "environment": "test"}
+
+
+async def test_chat_and_run_eval_accept_environment(project_dir):
+    schemas = {t.name: t.input_schema["properties"] for t in (await _tools(project_dir))}
+    for name in ("chat", "run_eval", "replay_session"):
+        assert schemas[name]["environment"]["default"] == "production"
+        assert schemas[name]["environment"]["enum"] == ["production", "test"]
+
+
+async def _tools(project_dir):
+    async with Client(build_server(project_dir=project_dir)) as c:
+        return (await c.list_tools()).tools
 
 
 async def test_push_and_list_versions_against_real_app(project_dir, client, provider):

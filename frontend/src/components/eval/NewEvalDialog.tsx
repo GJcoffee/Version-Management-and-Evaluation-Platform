@@ -8,6 +8,7 @@ import type { EvalCreateRequest, EvalEstimate } from '@/api/evalTypes'
 import { useVersions } from '@/api/queries/versions'
 import type { VersionSummary } from '@/api/types'
 import { AssetRefPicker } from '@/components/AssetRefPicker'
+import { EnvironmentSwitch, environmentBody, useEnvironmentChoice } from '@/components/EnvironmentSwitch'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Dialog } from '@/components/ui/Dialog'
@@ -89,6 +90,7 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
   const [estimate, setEstimate] = useState<{ key: string; data: EvalEstimate } | null>(null)
   const [showErrors, setShowErrors] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const env = useEnvironmentChoice()
 
   const ds = useDatasetInfo(dataset)
   const tags = useMemo(() => {
@@ -134,6 +136,7 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
       repeats: repeatsN!,
       concurrency: concurrencyN!,
       budget: Object.keys(budget).length > 0 ? budget : undefined,
+      ...environmentBody(env.environment),
     }
   }
   const currentKey = JSON.stringify(buildRequest())
@@ -307,6 +310,7 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
 
         <section className="space-y-3">
           <h3 className="text-sm font-semibold">4. 运行参数</h3>
+          <EnvironmentSwitch {...env} onChange={env.setEnvironment} />
           <div className="grid grid-cols-3 gap-3">
             <Field label="名称" htmlFor="ne-name" hint="可选；缺省为 Agent + 版本">
               <Input id="ne-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="v13 回归" />

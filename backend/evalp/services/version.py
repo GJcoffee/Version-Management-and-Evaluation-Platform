@@ -107,8 +107,13 @@ class VersionService:
 
     # ------------------------------------------------------------ 供其他模块使用
 
-    async def get_resolved(self, version_id: str, *, session: AsyncSession | None = None) -> ResolvedVersion:
-        """按 id 读取已固化的版本 Spec（会话、评测模块使用）；不存在抛 NotFound。"""
+    async def get_resolved(
+        self, version_id: str, *, session: AsyncSession | None = None, environment: str | None = None
+    ) -> ResolvedVersion:
+        """按 id 读取已固化的版本 Spec（会话、评测模块使用）；不存在抛 NotFound。
+
+        给出 ``environment`` 时，``transport: adapter`` 的版本带上该环境当前的接入快照。
+        """
 
         async def run(s: AsyncSession) -> ResolvedVersion:
             v = await s.get(Version, version_id)
@@ -116,9 +121,11 @@ class VersionService:
                 raise NotFound(f"版本不存在: {version_id}", {"id": version_id})
             a = await s.get(Agent, v.agent_id)
             assert a is not None
-            from evalp.services.adapter import AdapterService
+            snapshot = None
+            if environment is not None:
+                from evalp.services.adapter import AdapterService
 
-            snapshot = await self.ctx.svc(AdapterService).snapshot(s, v)
+                snapshot = await self.ctx.svc(AdapterService).snapshot(s, v.spec, environment)
             return ResolvedVersion(
                 id=v.id,
                 agent_id=a.id,
@@ -324,13 +331,7 @@ class VersionService:
         async with self.ctx.db.write() as s:
             v = await self.resolve_ref_orm(s, version_ref)
             spec = unresolve(v.spec)
-            from evalp.services.adapter import AdapterService
-
-            snapshot = await self.ctx.svc(AdapterService).snapshot(s, v)
-            if snapshot["binding"] is not None:
-                spec["adapter"] = snapshot["binding"]
-            else:
-                spec.pop("adapter", None)
+            spec.pop("adapter", None)  # 历史版本的接入字段已取消，接入由环境提供
             draft = (
                 await s.execute(select(Draft).where(Draft.agent_id == v.agent_id, Draft.name == draft_name))
             ).scalar_one_or_none()

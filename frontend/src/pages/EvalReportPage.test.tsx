@@ -102,6 +102,27 @@ function setup(r: EvalRunDetailOut, extra: Record<string, unknown> = {}) {
   return api
 }
 
+describe('EvalReportPage：适配器环境', () => {
+  const snapshot = {
+    environment: 'test', revision: 4, reason: '升级发布版本',
+    binding: { id: 'hiagent', version: '1.0.0', credential_ref: 'c', config: { published_version: '48' } },
+  } as EvalRunDetailOut['adapter_snapshot']
+
+  it('transport=adapter 的评测显示所用环境与存档号，悬停显示适配器与存档说明', async () => {
+    setup(run({ adapter_snapshot: snapshot }))
+    const badge = await screen.findByTestId('adapter-badge')
+    expect(badge).toHaveTextContent('测试 · 存档 #4')
+    expect(badge.getAttribute('title')).toContain('发布版本 48')
+    expect(badge.getAttribute('title')).toContain('升级发布版本')
+  })
+
+  it('没有接入快照的评测不显示', async () => {
+    setup(run())
+    await screen.findByTestId('eval-title')
+    expect(screen.queryByTestId('adapter-badge')).toBeNull()
+  })
+})
+
 describe('EvalReportPage：运行控制', () => {
   it('部分失败：可以重跑失败项（重新订阅实时进度）和重新评分；不显示暂停', async () => {
     const api = setup(run())

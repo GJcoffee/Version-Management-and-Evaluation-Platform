@@ -422,7 +422,7 @@ def _pairing_problems(events: list[AgentEvent]) -> list[str]:
 async def run_adapter_check(ctx: AppContext, version_id: str) -> CheckReport:
     """对一个版本执行 Adapter 自检，返回报告。版本不存在抛 NotFound，其余失败都写进报告。"""
     t_all = time.monotonic()
-    version = await ctx.svc(VersionService).get_resolved(version_id)
+    version = await ctx.svc(VersionService).get_resolved(version_id, environment="production")
     report = CheckReport(version_id=version.id, agent_name=version.agent_name)
     spec_dict = version.spec if isinstance(getattr(version, "spec", None), dict) else {}
     report.kind = spec_dict.get("kind")

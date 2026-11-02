@@ -1,16 +1,17 @@
-"""适配器注册项、凭据引用、版本覆盖与恢复。"""
+"""适配器注册项、凭据引用，以及生产 / 测试两套接入配置。"""
 
 from fastapi import APIRouter, Depends
 
 from evalp.api.deps import get_ctx
 from evalp.context import AppContext
 from evalp.runtime.adapters.registry import list_adapters
+from evalp.schemas.adapter import Environment
 from evalp.services.adapter import (
     AdapterService,
-    BindingBatch,
-    BindingRollback,
-    BindingUpdate,
     CredentialCreate,
+    EnvironmentPush,
+    EnvironmentRollback,
+    EnvironmentUpdate,
 )
 from evalp.spec.models import AdapterBinding
 
@@ -41,21 +42,26 @@ async def check_connection(body: AdapterBinding, ctx: AppContext = Depends(get_c
     return await HiAgentAdapter(binding, ctx).healthcheck()
 
 
-@router.post("/adapters/bindings/batch")
-async def batch(body: BindingBatch, ctx: AppContext = Depends(get_ctx)):
-    return await ctx.svc(AdapterService).batch(body)
+@router.get("/adapter-environments")
+async def environments(ctx: AppContext = Depends(get_ctx)):
+    return await ctx.svc(AdapterService).get()
 
 
-@router.get("/versions/{ref}/adapter-binding")
-async def get_binding(ref: str, ctx: AppContext = Depends(get_ctx)):
-    return await ctx.svc(AdapterService).get(ref)
+@router.get("/adapter-environments/{name}/revisions")
+async def revisions(name: Environment, ctx: AppContext = Depends(get_ctx)):
+    return await ctx.svc(AdapterService).revisions(name)
 
 
-@router.put("/versions/{ref}/adapter-binding")
-async def update_binding(ref: str, body: BindingUpdate, ctx: AppContext = Depends(get_ctx)):
-    return await ctx.svc(AdapterService).update(ref, body)
+@router.put("/adapter-environments/test")
+async def update_test(body: EnvironmentUpdate, ctx: AppContext = Depends(get_ctx)):
+    return await ctx.svc(AdapterService).update_test(body)
 
 
-@router.post("/versions/{ref}/adapter-binding/rollback")
-async def rollback_binding(ref: str, body: BindingRollback, ctx: AppContext = Depends(get_ctx)):
-    return await ctx.svc(AdapterService).rollback(ref, body)
+@router.post("/adapter-environments/production/push")
+async def push_to_production(body: EnvironmentPush, ctx: AppContext = Depends(get_ctx)):
+    return await ctx.svc(AdapterService).push(body)
+
+
+@router.post("/adapter-environments/production/rollback")
+async def rollback_production(body: EnvironmentRollback, ctx: AppContext = Depends(get_ctx)):
+    return await ctx.svc(AdapterService).rollback(body)

@@ -291,8 +291,13 @@ class SessionService:
         source_session_id: str | None = None,
         replay_mode: str | None = None,
         adapter_snapshot: dict[str, Any] | None = None,
+        environment: str = "production",
     ) -> SessionOut:
-        """创建会话。``version_id`` 必须是版本 id（agent+tag 先用 ``VersionService.resolve_ref`` 解析）。"""
+        """创建会话。``version_id`` 必须是版本 id（agent+tag 先用 ``VersionService.resolve_ref`` 解析）。
+
+        ``transport: adapter`` 的版本按 ``environment``（production | test）固化接入快照；
+        评测等已有快照的调用方用 ``adapter_snapshot`` 直接沿用。
+        """
         await self._ensure_recovered()
         if mode not in MODES:
             raise ValidationFailed(
@@ -316,7 +321,7 @@ class SessionService:
 
             snapshot = (
                 adapter_snapshot if adapter_snapshot is not None
-                else await self.ctx.svc(AdapterService).snapshot(s, version)
+                else await self.ctx.svc(AdapterService).snapshot(s, version.spec, environment)
             )
             row = Session(
                 id=new_id("ses"),
@@ -603,10 +608,7 @@ class SessionService:
                         f"锚定的轮次不存在: {anchored_from_turn_id}", {"id": anchored_from_turn_id}
                     )
             resolved = await self.ctx.svc(VersionService).get_resolved(version_id)
-            # NULL 历史记录只允许原 Spec 中的绑定；绝不采用后续覆盖。
-            resolved.adapter_snapshot = adapter_snapshot or {
-                "revision": 0, "binding": resolved.spec.get("adapter"), "source": "legacy",
-            }
+            resolved.adapter_snapshot = adapter_snapshot
             slot.middleware_snapshot = await self.ctx.svc(MiddlewareService).freeze(
                 sess, msg, middlewares or [], adapter_snapshot=resolved.adapter_snapshot,
             )

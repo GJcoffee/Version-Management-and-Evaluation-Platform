@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 from collections.abc import Callable, Coroutine
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, TypeVar
 
@@ -23,6 +24,18 @@ DataDirOpt = Annotated[
 ]
 AgentOpt = Annotated[
     str | None, typer.Option("--agent", help="agent 名称（默认取 .evalp.toml 中 agent 段的 name）")
+]
+
+
+
+class Environment(StrEnum):
+    production = "production"
+    test = "test"
+
+
+EnvOpt = Annotated[
+    Environment,
+    typer.Option("--env", help="适配器接入环境：production（默认）或 test；测试未配置或与生产相同时落到生产"),
 ]
 
 T = TypeVar("T")

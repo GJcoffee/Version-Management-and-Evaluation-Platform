@@ -91,12 +91,7 @@ async def validate_spec(
         return report
     report.spec = spec
     if spec.adapter is not None:
-        from evalp.services.adapter import AdapterService
-
-        try:
-            await ctx.svc(AdapterService).validate(spec.adapter)
-        except ValidationFailed as exc:
-            report.error("adapter", exc.message)
+        report.error("adapter", "adapter 字段已取消：接入配置在 设置 → 适配器 的生产 / 测试环境里维护")
 
     result = await resolve_spec(s, spec)
     report.resolved, report.refs = result.resolved, result.refs

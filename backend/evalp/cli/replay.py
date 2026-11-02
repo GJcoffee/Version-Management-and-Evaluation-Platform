@@ -7,7 +7,17 @@ from typing import Annotated
 import typer
 
 from evalp import actions, render
-from evalp.cli.common import AgentOpt, DataDirOpt, cli_errors, console, err_console, open_client, run
+from evalp.cli.common import (
+    AgentOpt,
+    DataDirOpt,
+    Environment,
+    EnvOpt,
+    cli_errors,
+    console,
+    err_console,
+    open_client,
+    run,
+)
 from evalp.cli.eval import emit
 from evalp.workspace_client import WorkspaceError
 
@@ -38,6 +48,7 @@ def replay(
     ] = None,
     wait: Annotated[bool, typer.Option("--wait", help="等待重放结束并显示逐轮对比摘要")] = False,
     poll_interval: Annotated[float, typer.Option("--poll-interval", hidden=True)] = 1.0,
+    env: EnvOpt = Environment.production,
     agent: AgentOpt = None,
     data_dir: DataDirOpt = None,
 ) -> None:
@@ -50,7 +61,9 @@ def replay(
 
     async def go() -> int:
         async with open_client(project, data_dir) as c:
-            out = await actions.replay_session(c, session_id, to, agent=agent_, turns=selected, mode=mode)
+            out = await actions.replay_session(
+                c, session_id, to, agent=agent_, turns=selected, mode=mode, environment=env.value
+            )
             new_id, compare_id = out["session_id"], out["compare_id"]
             console.print(f"[green]已创建重放[/green] 新会话 {new_id}（对比组 {compare_id}）")
             console.print(f"  {c.web_url('/compare/' + compare_id)}")

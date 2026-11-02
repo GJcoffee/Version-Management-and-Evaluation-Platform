@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from evalp.schemas.adapter import Environment, EnvironmentDescription
 from evalp.schemas.asset import CaseFilter
 
 RunStatus = Literal[
@@ -39,6 +40,7 @@ class EvalCreate(BaseModel):
     seed: int | None = None
     cache_policy: Literal["reuse", "refresh"] = "reuse"
     budget: Budget = Field(default_factory=Budget)
+    environment: Environment = Field("production", description=EnvironmentDescription)
     dry_run: bool = False
     via: Literal["ui", "cli", "mcp", "api"] = "api"
 
@@ -86,6 +88,9 @@ class EvalRunOut(BaseModel):
     seed: int | None = None
     cache_policy: str
     budget: dict[str, Any]
+    adapter_snapshot: dict[str, Any] | None = Field(
+        None, description="所用适配器环境与存档号（transport=adapter）"
+    )
     status: RunStatus
     pause_reason: str | None = None
     progress: dict[str, Any]
