@@ -5,7 +5,7 @@ import { formatCost, formatDuration, formatTokens } from '@/lib/format'
 import { useNow } from '@/lib/useNow'
 import type { TurnMetrics } from './sessionState'
 import { turnTiming, turnTtftMs, type TimedTurn } from './turnTiming'
-import { exactSeconds, upstreamTiming } from './upstreamTiming'
+import { exactSeconds, localTimeTitle, traceStatus, upstreamTiming } from './upstreamTiming'
 
 function Item({ icon, label, title, children }: { icon: ReactNode; label: string; title: string; children: ReactNode }) {
   return (
@@ -40,6 +40,7 @@ export function TurnMetricsBar({
   const now = useNow(running, 500)
   const elapsed = turnElapsedMs(turn, now)
   const upstream = upstreamTiming(turn.events ?? [])
+  const trace = traceStatus(turn.events ?? [])
   const metricEvents = turn.events?.filter((e) => e.type === 'metrics') ?? []
   const unified = metricEvents.length
     ? Object.assign({}, ...metricEvents.map((e) => e.payload)) as Record<string, unknown> : undefined
@@ -62,22 +63,22 @@ export function TurnMetricsBar({
       {usage && <span>观测{usage.observation_status === 'complete' ? '完整' : '部分缺失'}</span>}
       {unified && !upstream && [
         ['upstream_run_ms', '上游整轮'], ['llm_api_ms', 'LLM累计'],
-        ['tool_execution_ms', '工具累计'], ['adapter_query_ms', '查询'],
+        ['tool_execution_ms', '工具累计'], ['trace_fetch_ms', 'Trace补齐'],
       ].map(([key, label]) => typeof unified[key] === 'number' && <span key={key}
         title="后端记录的原始范围；并发调用累计时间可能重叠">{label} {exactSeconds(unified[key] as number)}</span>)}
       {upstream && (
         <Item icon={<Clock className="h-3 w-3" />} label="upstream_latency"
-          title="HiAgent原始Trace整轮运行耗时；不含本地配置查询、轨迹查询与结果消费">
-          HiAgent {exactSeconds(upstream.runMs)}
+          title="HiAgent原始Trace记录的整轮运行耗时（远端用时）；不含本地传输与Trace补齐">
+          HiAgent 远端用时 {exactSeconds(upstream.runMs)}
         </Item>
       )}
-      <Item icon={<Clock className="h-3 w-3" />} label="latency"
-        title={upstream ? '本地平台端到端耗时，包含远端执行、传输、查询及结果消费；与HiAgent运行耗时不是同一口径' : '本轮总耗时'}>
-        {upstream ? `本地端到端 ${elapsed === null ? '—' : exactSeconds(elapsed)}` : formatDuration(elapsed)}
+      <Item icon={<Clock className="h-3 w-3" />} label="latency" title={localTimeTitle(upstream)}>
+        {upstream ? `本地用时 ${elapsed === null ? '—' : exactSeconds(elapsed)}` : formatDuration(elapsed)}
       </Item>
       {upstream && [
         ['llm_time', 'LLM累计', upstream.llmMs, '真实LLM调用耗时之和，不含工具、查询及传输；并发时可能重叠'],
         ['tool_time', '工具累计', upstream.toolMs, '真实工具执行耗时之和；并发时可能重叠'],
+        ['trace_fetch_time', 'Trace补齐', upstream.traceFetchMs, '回答完成后补查Trace的耗时；不计入本地用时'],
         ['query_time', '查询', upstream.queryMs, '运行前配置、运行后配置及完整轨迹查询耗时之和'],
         ['sse_time', 'SSE接收', upstream.transportMs, '从发起发布API流式请求到收到message_end的本地耗时；包含远端执行，不可与其相加'],
       ].map(([key, label, value, title]) => typeof value === 'number' && (
@@ -93,8 +94,9 @@ export function TurnMetricsBar({
       <Item icon={<Coins className="h-3 w-3" />} label="cost" title="成本">
         {usage && unified?.cost == null ? '未提供' : formatCost(m.cost)}
       </Item>
-      <Item icon={<Bot className="h-3 w-3" />} label="llm_calls" title="LLM 调用次数">
-        {usage && m.llmCalls === 0 ? 'LLM 调用数未收齐' : `LLM ×${m.llmCalls}`}
+      <Item icon={<Bot className="h-3 w-3" />} label="llm_calls"
+        title={trace?.note ? `LLM 调用次数；Trace ${trace.status === 'unavailable' ? '未取得' : '部分核验'}：${trace.note}` : 'LLM 调用次数'}>
+        {trace?.status === 'unavailable' || (usage && m.llmCalls === 0) ? 'LLM 调用 未取得' : `LLM ×${m.llmCalls}`}
       </Item>
       <Item icon={<Wrench className="h-3 w-3" />} label="tool_calls" title="工具调用次数">
         ×{m.toolCalls}

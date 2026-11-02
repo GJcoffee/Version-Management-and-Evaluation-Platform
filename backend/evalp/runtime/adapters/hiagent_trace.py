@@ -64,7 +64,8 @@ def trace_events(
     """逐 span 补齐；Trace 未收齐时抛 TraceNotReady，其余问题只记录在指标里。"""
     tid = trace.get("TraceID")
     items = page.get("Items") or []
-    if not tid or not trace.get("EndTime") or page.get("HasMore") is not False or page.get("Total") != len(items):
+    if (not tid or not trace.get("EndTime")
+            or page.get("HasMore") is not False or page.get("Total") != len(items)):
         raise TraceNotReady("Trace 尚未完整")
     skipped: list[dict] = []
     spans: list[tuple[dict, dict, dict, str, int]] = []

@@ -525,6 +525,29 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 兼容运行器仍读取受保护本机凭据文件，
 尚未改为由平台 SecretStore 注入业务运行器。
 
+## 适配器统一接入 — 对真实 HiAgent 联调后的修正
+
+对上文「适配器统一接入」的修订，针对接入真实 HiAgent 后出现的问题：
+
+- **多段输出**：`PubAgentJump` 会产生多个 `message_output_start`，最终消息按顺序拼接全部正文段（原先只留最后一段），与流式显示一致。
+- **Trace 逐 span 处理**：只有 TraceID 与 message_id 必须一致；应用 / 版本写法不同仍展示，在 `llm.request` / `llm.response` 的 `upstream.identity_mismatch` 里标注差异。
+  单个 span 不合格（ID 缺失 / 重复、message_id 不符、时间无效）只跳过该 span，原因进入 `metrics.trace_skipped`。
+  JSON 里的 `null` 一律当缺失处理。`llm.request` 带上从 span 的 `input` / `prompt` / `messages` 解码出的输入
+  （消息数组原样保留，纯文本作为一条 user 消息）。
+  明细 token 之和与整轮不等时不丢弃明细：整轮以 SSE 为准，差异写入 `metrics.token_detail_mismatch`，观测状态为 `partial`。
+- **Trace 采集失败不影响本轮成败**：只有「Trace 尚未生成 / 尚未完整」、网络错误与上游 5xx / 429 才在观测窗口内重试；确定性情况
+  （鉴权失败、无模型调用、解析失败等）不重试。拿不到 Trace 时发 `metrics.trace_status=unavailable` 与 `trace_note`（原因），
+  前端把 LLM 调用数显示为「未取得」并在悬停给出原因，不再静默隐藏。`trace_status` 取值 `complete | partial | unavailable`。
+- **本轮用时口径**：`TurnResult.latency_ms` 在成功轮次算到收到最终回复（`message.assistant`）为止，其后适配器的补查不计入；
+  失败 / 超时 / 取消轮次仍算到结束。这是通用规则，不含 HiAgent 专用逻辑。Trace 补齐耗时单独记为 `metrics.trace_fetch_ms`
+  （取代 `adapter_query_ms`，旧事件里的旧字段不再被前端读取）。会话页与 Trace 面板显示「本地用时」与「HiAgent 远端用时」（`upstream_run_ms`），
+  悬停说明 Trace 补齐不计入；等待补查时轮次计时停在最终回复到达的时刻。
+- **工具调用去重键**：`(step_id, call_id)`。提供方没给 id 时 LLM 客户端在每一步内使用 `call_{idx}`，仅按 call_id 去重会让不同步骤撞号少计。
+- **锚定重放与直接 HiAgent 接入不兼容**：目标版本绑定了直接 HiAgent 适配器（没有 `business_bridge`）时，锚定重放返回 400
+  `ANCHORED_REPLAY_UNSUPPORTED`；自由重放不变。
+- **业务桥构造共用**：`healthcheck()` 与 `run_turn()` 共用 `business_bridge()` 与 `credential()`；桥接检查按 `spec_hash` 找到被固定的版本，带上该版本 spec 的请求头。
+- **会话页适配器标签**：统一为「HiAgent 发布版本 N · 接入修订 R」，悬停显示该修订的来源与说明（来自接入历史）。
+
 ## 轮间中间件 — 保存实际输入与固定产物（迁移 0007）
 
 按用户确认的实施范围，普通会话新增按轮显式启用的 `json_artifact@1.0.0`。

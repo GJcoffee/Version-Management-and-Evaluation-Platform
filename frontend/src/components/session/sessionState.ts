@@ -336,6 +336,8 @@ function applyEventToTurn(turn: TurnState, ev: EventEnvelope): TurnState {
       break
     }
     case 'llm.request': {
+      // 上游 Trace 补齐的模型调用只进 Trace（t.events 已记录），回复正文已在对话区显示，不再生成气泡
+      if (ev.payload.source === 'hiagent_trace') break
       const stepId = ev.step_id ?? null
       const i = findMessageIndex(t, stepId)
       const info: LlmInfo = {
@@ -359,6 +361,7 @@ function applyEventToTurn(turn: TurnState, ev: EventEnvelope): TurnState {
     }
     case 'llm.response': {
       const p = ev.payload
+      if (p.source === 'hiagent_trace') break
       const stepId = ev.step_id ?? null
       let i = findMessageIndex(t, stepId)
       let messages = t.messages

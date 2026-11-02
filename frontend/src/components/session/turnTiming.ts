@@ -44,7 +44,8 @@ export function turnTtftMs(turn: TimedTurn): number | null {
   return turn.metrics.ttftMs
 }
 
-/** 展示口径：录制轮次用原始执行总耗时，普通轮次用 turn.end，运行中按当前时间累计。 */
+/** 展示口径：录制轮次用原始执行总耗时，普通轮次用 turn.end，运行中按当前时间累计；
+ *  最终回复已到达、仍在补查观测数据（如 Trace）时，计时停在回复到达的时刻。 */
 export function turnTiming(turn: TimedTurn, now?: number): TurnTiming {
   const recorded = recordedTurnTiming(turn.events ?? [])
   if (recorded) return recorded
@@ -53,7 +54,8 @@ export function turnTiming(turn: TimedTurn, now?: number): TurnTiming {
   let durationMs = turn.metrics.latencyMs
   if (durationMs === null && startedAt) {
     const start = Date.parse(startedAt)
-    const end = turn.ended ? (endedAt ? Date.parse(endedAt) : NaN) : now
+    const answered = turn.events?.find((e) => e.type === 'message.assistant')
+    const end = turn.ended ? (endedAt ? Date.parse(endedAt) : NaN) : answered ? Date.parse(answered.ts) : now
     if (Number.isFinite(start) && end !== undefined && Number.isFinite(end)) {
       durationMs = Math.max(0, end - start)
     }

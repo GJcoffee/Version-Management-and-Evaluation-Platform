@@ -889,6 +889,8 @@ export interface TurnStartPayload {
   has_middleware?: boolean
 }
 export interface LlmRequestPayload {
+  /** hiagent_trace：上游 Trace 补齐的调用，只在 Trace 中展示 */
+  source?: string
   provider: string | null
   model: string
   params: Record<string, unknown>
@@ -909,6 +911,8 @@ export interface LlmDeltaPayload {
   tool_call_delta?: ToolCallDelta
 }
 export interface LlmResponsePayload {
+  /** hiagent_trace：上游 Trace 补齐的调用，只在 Trace 中展示 */
+  source?: string
   content: string | null
   tool_calls: ToolCall[] | null
   finish_reason: string | null

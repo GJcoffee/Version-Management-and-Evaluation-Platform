@@ -10,6 +10,8 @@ export interface AdapterBinding {
 export interface BindingSnapshot {
   revision: number
   binding: AdapterBinding | null
+  /** spec = 版本规范内置，override = 接入覆盖，legacy = 旧数据 */
+  source?: string
   fingerprint?: string
   upstream?: Record<string, unknown>
   reason?: string

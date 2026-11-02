@@ -56,9 +56,11 @@ function stubViewport(narrow: boolean) {
   )
 }
 
-function renderPage() {
-  mockApi({ 'GET /api/v1/sessions/ses_1': { session, turns: [], events: null } })
-  return render(
+function renderPage(over: Partial<Session> = {}, routes: Record<string, unknown> = {}) {
+  const api = mockApi({
+    'GET /api/v1/sessions/ses_1': { session: { ...session, ...over }, turns: [], events: null }, ...routes,
+  })
+  render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <MemoryRouter initialEntries={['/sessions/ses_1']} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <Routes>
@@ -67,6 +69,7 @@ function renderPage() {
       </MemoryRouter>
     </QueryClientProvider>,
   )
+  return api
 }
 
 beforeEach(() => {
@@ -223,5 +226,37 @@ describe('SessionPage Trace 轮次切换', () => {
     await screen.findByTestId('trace-turn')
     await userEvent.click(within(turnEl(0)).getByTestId('select-turn'))
     expect(screen.getByTestId('trace-turn')).toHaveTextContent('第 1 / 2 轮')
+  })
+})
+
+
+describe('SessionPage 适配器标签', () => {
+  const hiagent = {
+    revision: 3, source: 'override',
+    binding: { id: 'hiagent', version: '1.0.0', credential_ref: 'cred_1', config: { published_version: '47' } },
+  }
+
+  it('绑定适配器：统一显示「HiAgent 发布版本 · 接入修订 N」，悬停显示该修订的来源与说明', async () => {
+    stubViewport(false)
+    const { find } = renderPage({ adapter_snapshot: hiagent } as Partial<Session>, {
+      'GET /api/v1/versions/ver_1/adapter-binding': {
+        version_id: 'ver_1', current: hiagent,
+        history: [{ ...hiagent, reason: '切换到新发布的桥接' }, { revision: 2, source: 'override', reason: '旧说明', binding: null }],
+      },
+    })
+    const badge = await screen.findByTestId('adapter-badge')
+    expect(badge).toHaveTextContent('HiAgent 发布版本 47 · 接入修订 3')
+    await vi.waitFor(() => expect(badge.getAttribute('title')).toContain('切换到新发布的桥接'))
+    expect(badge.getAttribute('title')).toContain('来源：覆盖')
+    expect(badge.getAttribute('title')).not.toContain('旧说明')
+    expect(find('GET', /adapter-binding/)).toHaveLength(1)
+  })
+
+  it('未绑定适配器的会话保持原样，也不请求接入历史', async () => {
+    stubViewport(false)
+    const { find } = renderPage()
+    await screen.findByTestId('agent-link')
+    expect(screen.queryByTestId('adapter-badge')).toBeNull()
+    expect(find('GET', /adapter-binding/)).toHaveLength(0)
   })
 })
