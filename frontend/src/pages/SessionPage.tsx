@@ -11,6 +11,7 @@ import { Select } from '@/components/ui/Select'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { SessionCompareActions } from '@/components/compare/SessionCompareActions'
 import {
+  AdapterBadge,
   ChatPane,
   EditableTitle,
   MessageInput,
@@ -29,7 +30,7 @@ import { useIsNarrow } from '@/lib/useMediaQuery'
 import { toast } from '@/stores/toast'
 import { MODE_LABEL, sessionTitle, versionLabel } from './session/sessionUtils'
 import { SessionStatusBadge } from './session/SessionList'
-import { exactSeconds, upstreamTiming, upstreamTotalMs } from '@/components/session/upstreamTiming'
+import { exactSeconds, traceStatus, upstreamTiming, upstreamTotalMs } from '@/components/session/upstreamTiming'
 
 const TRACE_KEY = 'evalp.session.trace-open'
 const TRACE_WIDE_KEY = 'evalp.session.trace-wide'
@@ -180,6 +181,10 @@ function SessionView({ sessionId }: { sessionId: string }) {
   }
   const upstreamMs = upstreamTotalMs(stream.turns)
   const hasUpstream = stream.turns.some((turn) => upstreamTiming(turn.events) !== null)
+  const llmMissing = stream.turns.flatMap((turn, i) => {
+    const trace = traceStatus(turn.events)
+    return trace?.status === 'unavailable' ? [`第 ${i + 1} 轮：${trace.note ?? '未知原因'}`] : []
+  })
   const spanMs = sessionSpanMs(stream.turns)
   const traceTiming = traceTurn ? turnTiming(traceTurn) : null
   const varCount = Object.keys(session.variables ?? {}).length
@@ -208,11 +213,9 @@ function SessionView({ sessionId }: { sessionId: string }) {
             {versionLabel(session)}
           </Link>
           <Badge variant="outline">{MODE_LABEL[session.mode]}</Badge>
-          {session.adapter_snapshot?.binding && <Badge variant="outline"
-            title={JSON.stringify(session.adapter_snapshot)}>
-            {session.adapter_snapshot.binding.id}@{session.adapter_snapshot.binding.version}
-            {' · 接入修订 '}{session.adapter_snapshot.revision}
-          </Badge>}
+          {session.adapter_snapshot?.binding && (
+            <AdapterBadge versionId={session.version_id} snapshot={session.adapter_snapshot} />
+          )}
           {session.replay_mode && <Badge variant="outline">{session.replay_mode === 'anchored' ? '锚定重放' : '自由重放'}</Badge>}
           <SessionStatusBadge status={running ? 'running' : session.status} />
           {varCount > 0 && (
@@ -234,16 +237,19 @@ function SessionView({ sessionId }: { sessionId: string }) {
             title={`各轮用时之和${spanMs === null ? '（进行中的轮次不计）' : `；首轮开始到末轮结束共 ${formatDuration(spanMs)}`}`}
             data-testid="session-latency"
           >
-            {hasUpstream ? `本地端到端 ${metrics.latencyMs === null ? '—' : exactSeconds(metrics.latencyMs)}` : `总用时 ${formatDuration(metrics.latencyMs)}`}
+            {hasUpstream ? `本地用时 ${metrics.latencyMs === null ? '—' : exactSeconds(metrics.latencyMs)}` : `总用时 ${formatDuration(metrics.latencyMs)}`}
           </span>
           {upstreamMs !== null && (
-            <span title="各轮HiAgent原始Trace运行耗时之和，不含本地外围开销" data-testid="session-upstream-latency">
-              HiAgent {exactSeconds(upstreamMs)}
+            <span title="各轮HiAgent原始Trace记录的运行耗时（远端用时）之和，不含本地外围开销与Trace补齐" data-testid="session-upstream-latency">
+              HiAgent 远端用时 {exactSeconds(upstreamMs)}
             </span>
           )}
           <span title="累计成本">{formatCost(metrics.cost)}</span>
-          <span title="LLM 调用 / 工具调用">
-            LLM ×{metrics.llm} · 工具 ×{metrics.tools}
+          <span
+            title={llmMissing.length ? `Trace 未取得：${llmMissing.join('；')}` : 'LLM 调用 / 工具调用'}
+            data-testid="session-calls"
+          >
+            LLM ×{metrics.llm}{llmMissing.length > 0 && `（${llmMissing.length} 轮未取得）`} · 工具 ×{metrics.tools}
           </span>
           <SessionCompareActions session={session} />
           <Button
@@ -379,6 +385,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
                 startedAt={traceTiming?.startedAt}
                 endedAt={traceTiming?.endedAt}
                 durationMs={traceTiming?.durationMs}
+                upstream={upstreamTiming(traceTurn.events)}
                 running={!traceTurn.ended}
                 selectedStepId={selectedStep}
                 onSelectStep={setSelectedStep}

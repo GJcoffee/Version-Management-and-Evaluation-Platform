@@ -1,6 +1,7 @@
 """真实协议身份、缺失指标、重复更新和当前 Trace 过滤。"""
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -88,24 +89,130 @@ async def test_runner_updates_same_llm_and_mcp_call_without_double_count():
     assert result.usage["prompt_tokens"] == 7  # 整轮范围，不再加明细的 5
 
 
-def test_trace_rejects_other_message_before_emitting_any_updates():
+TRACE = {"TraceID": "tr", "StartTime": "2026-11-01T00:00:00Z",
+         "EndTime": "2026-11-01T00:00:20Z", "Status": {"Code": "OK"}}
+
+
+def llm_span(sid="sp", *, message="current", app="a", version="47", prompt=5, completion=2, **extra):
+    attrs = {"gen_ai.span_type": "llm", "message_id": message, "app_id": app,
+             "gen_ai.agent.version": version, "input_tokens": prompt, "output_tokens": completion,
+             "input": json.dumps([{"role": "user", "content": "你好，帮我查订单"}], ensure_ascii=False),
+             "output": json.dumps({"content": "订单已发货"}, ensure_ascii=False), **extra}
+    return {"Context": {"TraceID": "tr", "SpanID": sid}, "Name": "model",
+            "StartTime": "2026-11-01T00:00:01Z", "EndTime": "2026-11-01T00:00:03Z", "Attributes": attrs}
+
+
+def page(*spans):
+    return {"Items": list(spans), "Total": len(spans), "HasMore": False}
+
+
+def current_mapper():
     m = mapper()
     m.message_id = "current"
-    trace = {"TraceID": "tr", "StartTime": "2026-11-01T00:00:00Z",
-             "EndTime": "2026-11-01T00:00:01Z", "Status": {"Code": "OK"}}
-    span = {"Context": {"TraceID": "tr", "SpanID": "sp"}, "Name": "model",
-            "StartTime": trace["StartTime"], "EndTime": trace["EndTime"],
-            "Attributes": {"gen_ai.span_type": "llm", "message_id": "other",
-                           "app_id": "a", "gen_ai.agent.version": "47",
-                           "input_tokens": 5, "output_tokens": 2, "output": "hi"}}
-    page = {"Items": [span], "Total": 1, "HasMore": False}
-    with pytest.raises(ValueError):
-        trace_events(m.config, m, trace, page)
-    span["Attributes"]["message_id"] = "current"
-    events = trace_events(m.config, m, trace, page)
-    assert len([e for e in events if e.type == "llm.response"]) == 1
-    assert events[-1].payload["llm_api_ms"] == 1000
+    return m
+
+
+def of_type(events, kind):
+    return [e for e in events if e.type == kind]
+
+
+def test_multi_segment_output_keeps_every_segment_in_the_final_message():
+    m = mapper()
+    m.feed({"event": "message_start", "id": "message-1"})
+    m.feed({"event": "message_output_start", "id": "seg-1"})
+    m.feed({"event": "message", "answer": "第一段，"})
+    m.feed({"event": "message_output_start", "id": "seg-2"})
+    m.feed({"event": "message", "answer": "第二段。"})
+    m.feed({"event": "message_end", "id": "message-1"})
+    assert "".join(m.final_parts) == "第一段，第二段。"
+
+
+def test_trace_skips_a_span_of_another_message_but_keeps_the_rest():
+    m = current_mapper()
+    events = trace_events(m.config, m, TRACE, page(llm_span("other", message="other"), llm_span("mine")))
+    assert [e.payload["upstream"]["span_id"] for e in of_type(events, "llm.response")] == ["mine"]
+    skipped = events[-1].payload["trace_skipped"]
+    assert skipped == [{"span_id": "other", "reason": "message_id 与本轮不一致"}]
     assert m.usage["prompt_tokens"] == 5
+
+
+def test_trace_incomplete_is_not_ready_rather_than_failed():
+    from evalp.runtime.adapters.hiagent_trace import TraceNotReady
+
+    m = current_mapper()
+    with pytest.raises(TraceNotReady):
+        trace_events(m.config, m, {**TRACE, "EndTime": None}, page(llm_span()))
+    with pytest.raises(TraceNotReady):
+        trace_events(m.config, m, TRACE, {**page(llm_span()), "HasMore": True})
+
+
+def test_trace_null_fields_are_missing_values_not_crashes():
+    m = current_mapper()
+    tool = {"Context": {"TraceID": "tr", "SpanID": "tool-1"}, "Status": None,
+            "StartTime": "2026-11-01T00:00:03Z", "EndTime": "2026-11-01T00:00:04Z",
+            "Attributes": {"gen_ai.span_type": "tool", "message_id": "current", "call_id": "c1"}}
+    m.calls["c1"] = {"name": "fetch", "arguments": {}, "step": "tool:c1"}
+    spans = [
+        {"Context": None, "Attributes": None},
+        {"Context": {"TraceID": "tr", "SpanID": "no-attrs"}, "Attributes": None},
+        llm_span("null-generations", output=json.dumps({"generations": None})),
+        llm_span("hollow-generations", output=json.dumps({"generations": [[None]]})),
+        tool,
+    ]
+    events = trace_events(m.config, m, {**TRACE, "Status": None}, page(*spans))
+    assert len(of_type(events, "llm.response")) == 2
+    assert of_type(events, "tool.result")[0].payload["is_error"] is False
+
+
+def test_trace_identity_differences_are_annotated_not_dropped():
+    m = current_mapper()
+    events = trace_events(m.config, m, TRACE, page(llm_span(app="other-app", version="v47")))
+    response = of_type(events, "llm.response")[0]
+    assert response.payload["upstream"]["identity_mismatch"] == {
+        "app_id": {"expected": "a", "actual": "other-app"},
+        "version": {"expected": "47", "actual": "v47"},
+    }
+    assert "identity_mismatch" in of_type(events, "llm.request")[0].payload["upstream"]
+
+
+def test_trace_token_details_that_disagree_with_the_turn_total_are_kept():
+    m = current_mapper()
+    m.usage = {"prompt_tokens": 9, "completion_tokens": 3, "source": "hiagent_sse",
+               "observation_status": "partial"}
+    events = trace_events(m.config, m, TRACE, page(llm_span("one"), llm_span("two")))
+    assert len(of_type(events, "llm.response")) == 2
+    assert m.usage["prompt_tokens"] == 9 and m.usage["source"] == "hiagent_sse"
+    metrics = events[-1].payload
+    assert metrics["token_detail_mismatch"] == {
+        "prompt_tokens": {"turn": 9, "details": 10}, "completion_tokens": {"turn": 3, "details": 4},
+    }
+    assert metrics["observation_status"] == "partial"
+
+
+def test_llm_request_carries_the_span_input_and_response_the_output():
+    m = current_mapper()
+    plain = llm_span("plain", input="只有一段提示词")
+    events = trace_events(m.config, m, TRACE, page(llm_span("chat"), plain))
+    requests = {e.step_id: e.payload for e in of_type(events, "llm.request")}
+    assert requests["llm:chat"]["messages"] == [{"role": "user", "content": "你好，帮我查订单"}]
+    assert requests["llm:plain"]["messages"] == [{"role": "user", "content": "只有一段提示词"}]
+    assert of_type(events, "llm.response")[0].payload["content"] == "订单已发货"
+
+
+def test_trace_without_any_model_call_is_reported_not_raised():
+    m = current_mapper()
+    events = trace_events(m.config, m, TRACE, page())
+    metrics = events[-1].payload
+    assert metrics["trace_status"] == "partial" and "模型调用" in metrics["trace_note"]
+
+
+def test_trace_events_emit_expected_totals():
+    m = current_mapper()
+    events = trace_events(m.config, m, TRACE, page(llm_span()))
+    assert len(of_type(events, "llm.response")) == 1
+    assert events[-1].payload["llm_api_ms"] == 2000
+    assert events[-1].payload["upstream_run_ms"] == 20000
+    assert m.usage["prompt_tokens"] == 5 and m.usage["observation_status"] == "complete"
 
 
 async def test_cancel_runner_closes_stream():

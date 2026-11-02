@@ -15,11 +15,12 @@ from sqlalchemy import select, update
 from evalp.context import AppContext
 from evalp.errors import AgentError
 from evalp.runtime.adapters.base import AgentAdapter, HealthResult, RunContext
+from evalp.runtime.adapters.http_adapter import HttpAdapter
 from evalp.runtime.adapters.registry import HiAgentConfig
 from evalp.runtime.events import AgentEvent, ev, redact
 from evalp.runtime.messages import Message
-from evalp.spec.models import AdapterBinding
-from evalp.store.models import Session
+from evalp.spec.models import AdapterBinding, CodeSpec, ConfigSpec, HttpTransport, parse_spec
+from evalp.store.models import Session, Version
 
 
 def decoded(value: Any) -> Any:
@@ -105,7 +106,6 @@ class HiAgentMapper:
         elif kind == "message_output_start":
             identity = frame.get("think_message_id") or frame.get("id")
             self.current = str(identity) if identity else None
-            self.final_parts = []
         elif kind in ("think_message", "think_message_output", "message"):
             identity = frame.get("think_message_id") or self.current
             stage = self.stages.get(str(identity)) if identity else None
@@ -167,32 +167,49 @@ class HiAgentMapper:
         return events
 
 
+def business_bridge(config: HiAgentConfig, spec: ConfigSpec | CodeSpec) -> HttpAdapter:
+    """业务桥 HttpAdapter：保留版本 spec 的参数与请求头，只替换地址和超时；检查与实际调用共用。"""
+    if not isinstance(spec, CodeSpec) or spec.transport != "http":
+        raise AgentError("业务桥接要求保留原 HTTP 业务版本")
+    assert config.business_bridge is not None
+    return HttpAdapter(spec.model_copy(update={
+        "http": HttpTransport(
+            base_url=config.business_bridge.base_url,
+            timeout_s=config.business_bridge.timeout_s,
+            headers=spec.http.headers,
+        ),
+    }))
+
+
 class HiAgentAdapter(AgentAdapter):
     def __init__(self, binding: AdapterBinding, app: AppContext) -> None:
         self.binding, self.app = binding, app
         self.config = HiAgentConfig.model_validate(binding.config)
 
+    async def credential(self) -> tuple[Any, str | None]:
+        """解码后的凭据与其中的 api_key；api_key 不可用时为 None。"""
+        secret = decoded(await self.app.secrets.get(self.binding.credential_ref))
+        key = secret.get("api_key") if isinstance(secret, dict) else secret
+        return secret, key if isinstance(key, str) and key.strip() else None
+
     async def healthcheck(self) -> HealthResult:
         """检查固定实现与凭据可用性，不发起上游模型请求。"""
         if self.config.business_bridge:
-            from evalp.runtime.adapters.http_adapter import HttpAdapter
-            from evalp.spec.models import CodeSpec, HttpTransport
-
-            bridge = HttpAdapter(CodeSpec(
-                transport="http", http=HttpTransport(
-                    base_url=self.config.business_bridge.base_url,
-                    timeout_s=self.config.business_bridge.timeout_s,
-                ),
-            ))
+            # 桥接绑定的是不可变版本：用其 spec_hash 找到与实际调用相同的 spec。
+            async with self.app.db.read() as s:
+                spec = (await s.execute(
+                    select(Version.spec).where(Version.spec_hash == self.config.business_bridge.spec_hash)
+                )).scalars().first()
+            if spec is None:
+                return HealthResult(ok=False, message="业务桥接绑定的版本不存在")
+            bridge = business_bridge(self.config, parse_spec(spec))
             try:
                 return await bridge.healthcheck()
             finally:
                 await bridge.aclose()
-        secret = decoded(await self.app.secrets.get(self.binding.credential_ref))
-        key = secret.get("api_key") if isinstance(secret, dict) else secret
-        ok = isinstance(key, str) and bool(key.strip())
+        _, key = await self.credential()
         return HealthResult(
-            ok=ok, message="配置与凭据可读取，尚未验证上游认证" if ok else "凭据不可用",
+            ok=key is not None, message="配置与凭据可读取，尚未验证上游认证" if key else "凭据不可用",
             details={"adapter": self.binding.id, "version": self.binding.version, "llm_requested": False},
         )
 
@@ -200,31 +217,17 @@ class HiAgentAdapter(AgentAdapter):
         self, ctx: RunContext, history: list[Message], user_input: Message,
     ) -> AsyncIterator[AgentEvent]:
         if self.config.business_bridge:
-            from evalp.runtime.adapters.http_adapter import HttpAdapter
-            from evalp.spec.models import CodeSpec, HttpTransport
-
             if ctx.version.spec_hash != self.config.business_bridge.spec_hash:
                 raise AgentError("业务桥接与固定版本 spec hash 不一致")
-            spec = ctx.version.spec_model()
-            if not isinstance(spec, CodeSpec) or spec.transport != "http":
-                raise AgentError("业务桥接要求保留原 HTTP 业务版本")
-            bridge = HttpAdapter(spec.model_copy(update={
-                "http": HttpTransport(
-                    base_url=self.config.business_bridge.base_url,
-                    timeout_s=self.config.business_bridge.timeout_s,
-                    headers=spec.http.headers,
-                ),
-            }))
+            bridge = business_bridge(self.config, ctx.version.spec_model())
             try:
                 async for event in bridge.run_turn(ctx, history, user_input):
                     yield event
             finally:
                 await bridge.aclose()
             return
-        raw = await self.app.secrets.get(self.binding.credential_ref)
-        secret = decoded(raw)
-        key = secret.get("api_key") if isinstance(secret, dict) else secret
-        if not isinstance(key, str) or not key:
+        secret, key = await self.credential()
+        if key is None:
             raise AgentError("HiAgent 凭据不可用")
         headers = {"Apikey": key, "X-APP-User": self.config.user_id}
         mapper = HiAgentMapper(self.config)
@@ -282,18 +285,18 @@ class HiAgentAdapter(AgentAdapter):
                 final = Message(role="assistant", content=text)
                 ctx.new_messages.append(final)
                 yield ev("message.assistant", message=final)
-                query_t0 = time.monotonic()
-                if self.config.observe_base_url and isinstance(secret, dict):
-                    from evalp.runtime.adapters.hiagent_trace import collect_trace
+                # 回答已完整交付；Trace 补查只补观测，耗时单独记录，不计入本轮用时。
+                from evalp.runtime.adapters.hiagent_trace import collect_trace
 
-                    async for event in collect_trace(self.config, secret, mapper):
-                        yield event
-                query_ms = round((time.monotonic() - query_t0) * 1000)
+                trace_t0 = time.monotonic()
+                async for event in collect_trace(self.config, secret, mapper):
+                    yield event
+                trace_fetch_ms = round((time.monotonic() - trace_t0) * 1000)
                 for identity, stage in mapper.stages.items():
                     yield ev("span.end", step_id=stage["step"], name="上游输出阶段",
                              attrs={"upstream_id": identity, "association": "unknown"})
                 yield ev("metrics", scope="turn", usage=mapper.usage,
-                         transport_ms=transport_ms, adapter_query_ms=query_ms,
+                         transport_ms=transport_ms, trace_fetch_ms=trace_fetch_ms,
                          upstream={"message_id": mapper.message_id, "conversation_id": conversation,
                                    "app_id": self.config.app_id,
                                    "expected_version": self.config.published_version})

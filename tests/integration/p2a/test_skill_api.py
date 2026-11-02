@@ -1,4 +1,6 @@
 # Synthetic fixtures authored by hand; no recorded agent data.
+import json
+
 import pytest
 from evalp.store.models import Asset, AssetRevision, VersionAssetRef
 from evalp.utils.skill_package import package_entries
@@ -139,6 +141,8 @@ async def test_existing_description_search_and_history(api, client, ctx, package
         row = await session.get(AssetRevision, rid)
         row.meta = historical_meta
     await api.asset("skill", "newer-unrelated", '{"Name":"unrelated"}')
+    # 旧修订在第一次读取时补出描述并写回，搜索只查数据库中已有的描述。
+    assert (await client.get(f"{API}/assets/{aid}")).json()["description"] == "unique-purpose"
     for _ in range(2):
         response = await client.get(f"{API}/assets", params={"q": "unique-purpose", "limit": 1})
         assert response.status_code == 200, response.text
@@ -150,8 +154,62 @@ async def test_existing_description_search_and_history(api, client, ctx, package
         assert detail["meta"]["description"] == "unique-purpose"
     async with ctx.db.read() as session:
         row = await session.get(AssetRevision, rid)
-        assert row.meta == historical_meta
+        assert row.meta["origin"] == "snapshot" and row.meta["description"] == "unique-purpose"
     assert (await client.get(f"{API}/assets/revisions/{rid}/raw")).content == data
+
+
+@pytest.fixture
+def blob_reads(ctx, monkeypatch):
+    """记录读取 blob 的次数：补描述时才需要解析包。"""
+    reads = []
+    original = ctx.blobs.get_bytes
+
+    async def get_bytes(blob_hash):
+        reads.append(blob_hash)
+        return await original(blob_hash)
+
+    monkeypatch.setattr(ctx.blobs, "get_bytes", get_bytes)
+    return reads
+
+
+@pytest.mark.parametrize("description", ["unique-purpose", None])
+async def test_legacy_description_is_persisted_once(api, client, ctx, blob_reads, description):
+    body = {"Name": "demo", **({"Description": description} if description else {})}
+    created = await api.asset("skill", "demo", json.dumps(body))
+    rid, aid = created["revision"]["id"], created["asset"]["id"]
+    async with ctx.db.write() as session:
+        (await session.get(AssetRevision, rid)).meta = {"origin": "snapshot"}
+    for _ in range(3):
+        asset = (await client.get(f"{API}/assets/{aid}")).json()
+        assert asset["description"] == description
+        assert (await client.get(f"{API}/assets", params={"kind": "skill"})).json()["items"][0]["id"] == aid
+    assert len(blob_reads) == 1
+    detail = (await client.get(f"{API}/assets/revisions/{rid}")).json()
+    assert detail["meta"].get("description") == description
+    async with ctx.db.read() as session:
+        meta = (await session.get(AssetRevision, rid)).meta
+    assert meta["origin"] == "snapshot" and meta["format"] == "metadata"
+    assert meta["description"] == description
+
+
+async def test_search_uses_stored_description_without_reading_packages(api, client, ctx, blob_reads):
+    legacy = await api.asset("skill", "demo", '{"Name":"demo","Description":"unique-purpose"}')
+    async with ctx.db.write() as session:
+        (await session.get(AssetRevision, legacy["revision"]["id"])).meta = {"origin": "snapshot"}
+    # 描述补入一次后，搜索只查数据库。
+    await client.get(f"{API}/assets/{legacy['asset']['id']}")
+    blob_reads.clear()
+    other = await api.asset("skill", "other", '{"Name":"other"}')
+    found = (await client.get(f"{API}/assets", params={"q": "unique-purpose", "limit": 1})).json()
+    assert [i["id"] for i in found["items"]] == [legacy["asset"]["id"]]
+    assert found["next_cursor"] is None
+    assert (await client.get(f"{API}/assets", params={"q": "nothing-matches"})).json()["items"] == []
+    assert blob_reads == []
+    # 即使有尚未补描述的旧修订，搜索也不解压任何包。
+    async with ctx.db.write() as session:
+        (await session.get(AssetRevision, other["revision"]["id"])).meta = {"origin": "snapshot"}
+    await client.get(f"{API}/assets", params={"q": "unique-purpose"})
+    assert blob_reads == []
 
 
 @pytest.mark.parametrize("packaged", [True, False])
@@ -188,7 +246,8 @@ async def test_agent_skill_list_description_uses_pinned_revision(api, client, ct
     async with ctx.db.read() as session:
         for created in (old, latest):
             revision = await session.get(AssetRevision, created["revision"]["id"])
-            assert revision.meta == meta
+            assert revision.meta["origin"] == "snapshot"
+            assert revision.meta["description"] in ("旧版用途", "新版用途")
 
 
 @pytest.mark.parametrize("data", [b"PKbroken", b'{"name":"only metadata"}'])

@@ -386,3 +386,37 @@ async def test_partial_text_is_truncated():
     adapter = ScriptAdapter([delta("长" * (PARTIAL_TEXT_MAX + 50)), RuntimeError("x")])
     result, _ = await run(adapter)
     assert len(result.partial_text) == PARTIAL_TEXT_MAX + 1 and result.partial_text.endswith("…")
+
+
+async def test_tool_calls_with_the_same_call_id_in_different_steps_are_counted_separately():
+    # 提供方没给 id 时，每个步骤内的 id 都是 call_0，不能互相覆盖。
+    adapter = ScriptAdapter([
+        ev("tool.call", step_id="s1:t0", call_id="call_0", name="f", arguments={}),
+        ev("tool.result", step_id="s1:t0", call_id="call_0", name="f", output=1),
+        ev("tool.call", step_id="s2:t0", call_id="call_0", name="f", arguments={}),
+        ev("tool.result", step_id="s2:t0", call_id="call_0", name="f", output=2),
+        ev("tool.result", step_id="s2:t0", call_id="call_0", name="f", output=2),
+        ev("message.assistant", message=FINAL),
+    ])
+    result, _ = await run(adapter)
+    assert result.usage["tool_calls"] == 2
+
+
+async def test_latency_stops_at_the_final_reply_and_ignores_later_backfill():
+    adapter = ScriptAdapter([
+        0.05,
+        ev("message.assistant", message=FINAL),
+        0.6,  # 回答之后的补查（例如 Trace），不属于本轮用时
+        ev("metrics", scope="turn", trace_fetch_ms=600),
+    ])
+    result, events = await run(adapter)
+    assert result.status == "ok"
+    assert 40 <= result.latency_ms < 400
+    assert events[-1].payload["latency_ms"] == result.latency_ms
+    assert result.usage["trace_fetch_ms"] == 600
+
+
+async def test_latency_of_a_failed_turn_still_covers_the_whole_run():
+    adapter = ScriptAdapter([ev("message.assistant", message=FINAL), 0.2, RuntimeError("补查后失败")])
+    result, _ = await run(adapter)
+    assert result.status == "error" and result.latency_ms >= 200

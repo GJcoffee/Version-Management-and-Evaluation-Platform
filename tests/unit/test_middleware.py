@@ -34,6 +34,13 @@ def test_candidate_formats_and_stable_signature(text):
     assert items[0].id != candidates("other", final, JsonArtifactConfig())[0].id
 
 
+@pytest.mark.parametrize("tail", [".", ",", ";", "!", "?", ":", "?!", "。"])
+def test_bare_link_drops_trailing_sentence_punctuation(tail):
+    url = "https://artifacts.example/story.json"
+    final = Message(role="assistant", content=f"结果见 {url}{tail} 请查收")
+    assert [item.url for item in candidates("source", final, JsonArtifactConfig())] == [url]
+
+
 def test_explicit_link_pointer_and_escaped_keys():
     config = JsonArtifactConfig(url_pointer="/a~1b/~0url")
     final = Message(role="assistant", content=json.dumps({"a/b": {"~url": "https://artifacts.example/file"}}))

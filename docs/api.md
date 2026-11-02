@@ -724,6 +724,8 @@ UTF-8 输入字节计算，不能静默截断。首期不支持额外产物凭�
 历史查看与只读对比可继续使用，评测尚不开放中间件配置。HiAgent 直接接入将实际输入作为本轮
 `Query`，沿用上游会话；业务桥接的组合输入消费尚未验证，首期禁用此接入的中间件。
 
+目标版本绑定了直接 HiAgent 适配器（上游自己维护会话历史、不接受外部历史）时，`mode=anchored` 返回 400 `ANCHORED_REPLAY_UNSUPPORTED`，请改用 `mode=free`。
+
 ### GET /sessions/{id}/stream（SSE）
 先回放库里 `seq > after_seq` 的事件，再订阅实时事件；回放与实时之间不会重复也不会丢失。`after_seq` 与请求头 `Last-Event-ID` 同时给出时取较大者，断线重连时浏览器会自动带上它。
 帧格式：

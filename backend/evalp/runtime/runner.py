@@ -8,8 +8,9 @@
 - 用 ``asyncio.timeout`` 实现超时（``ctx.deadline``）、监听 ``ctx.cancel`` 实现取消，
   超时 / 取消时关闭 Adapter 的事件流（Adapter 在 ``finally`` 里清理连接、子进程等）；
 - 捕获 Adapter 抛出的异常，转成 ``error`` 事件；
-- 从 ``llm.response`` 汇总 usage / cost / llm_calls / tool_calls，计算 ttft（第一个 ``llm.delta`` 或
-  ``llm.response`` 的时间，相对本轮开始）与 latency；
+- 从 ``llm.response`` 汇总 usage / cost / llm_calls / tool_calls（工具调用按 ``(step_id, call_id)`` 去重），
+  计算 ttft（第一个 ``llm.delta`` 或 ``llm.response`` 的时间，相对本轮开始）与 latency；
+  成功轮次的 latency 算到最终回复（``message.assistant``）到达为止，其后的补查（如 Trace）不计入；
 - 累积每次 LLM 调用已流出的文本（``llm.delta``），``llm.response`` 到达后丢弃（那时内容已随事件落库）；
   轮次以取消 / 出错 / 超时结束时，把仍未被 ``llm.response`` 取代的部分文本放进 ``TurnResult.partial_text``，
   由会话服务写入 ``turns.output.partial_text``，并随 ``turn.end`` 事件发布（刷新页面后仍能看到）；
@@ -100,7 +101,8 @@ class _State:
     deltas: dict[str, str] = field(default_factory=dict)  # step_id -> 尚未被 llm.response 取代的流出文本
     notes: list[str] = field(default_factory=list)
     responses: dict[str, dict[str, Any]] = field(default_factory=dict)
-    tools: set[str] = field(default_factory=set)
+    tools: set[tuple[str, str]] = field(default_factory=set)  # (step_id, call_id)：call_id 只在步骤内唯一
+    answer_ms: int | None = None  # 最终回复（message.assistant）到达的时间，相对本轮开始
     metrics: dict[str, Any] = field(default_factory=dict)
     middleware_ms: int | None = None
 
@@ -260,16 +262,17 @@ class Runner:
             state.cost += float(p.get("cost") or 0.0) - float(previous.get("cost") or 0.0)
         elif event.type == "tool.call":
             if p.get("source") != "hiagent_sse":
-                state.tools.add(str(p.get("call_id") or event.step_id))
+                state.tools.add((event.step_id or "", str(p.get("call_id") or "")))
                 state.tool_calls = len(state.tools)
         elif event.type == "tool.result":
-            state.tools.add(str(p.get("call_id") or event.step_id))
+            state.tools.add((event.step_id or "", str(p.get("call_id") or "")))
             state.tool_calls = len(state.tools)
         elif event.type == "metrics":
             state.metrics.update(p)
         elif event.type == "message.assistant":
             try:
                 state.final = Message.model_validate(p.get("message"))
+                state.answer_ms = int((time.monotonic() - state.t0) * 1000)
             except ValueError as e:
                 state.final = None
                 if state.error is None:
@@ -384,6 +387,11 @@ class Runner:
             usage["execution_status"] = "unknown"
         if state.middleware_ms is not None:
             usage["middleware_ms"] = state.middleware_ms
+        # 成功轮次的用时算到最终回复到达为止；之后的观测补查（如 Trace）由 Adapter 单独记录。
+        latency_ms = (
+            state.answer_ms if status == "ok" and state.answer_ms is not None
+            else int((time.monotonic() - state.t0) * 1000)
+        )
         partial = "".join(state.deltas.values()) if status != "ok" else ""
         if len(partial) > PARTIAL_TEXT_MAX:
             partial = partial[:PARTIAL_TEXT_MAX] + "…"
@@ -392,7 +400,7 @@ class Runner:
             output=output,
             usage=usage,
             cost=cost,
-            latency_ms=int((time.monotonic() - state.t0) * 1000),
+            latency_ms=latency_ms,
             ttft_ms=state.ttft_ms,
             error=state.error if status in ("error", "timeout") else None,
             partial_text=partial or None,

@@ -21,7 +21,7 @@ import { formatDuration } from '@/lib/format'
 import { useNow } from '@/lib/useNow'
 import { BlobJson } from './BlobView'
 import { isHighlighted } from './sessionState'
-import { exactSeconds, upstreamTiming } from './upstreamTiming'
+import { exactSeconds, localTimeTitle, type UpstreamTiming } from './upstreamTiming'
 import {
   TRACE_KINDS,
   TRACE_KIND_LABEL,
@@ -45,6 +45,8 @@ export interface TraceViewerProps {
   endedAt?: string | null
   /** 轮次总耗时，与指标条一致；瀑布图可包含外围 Span，范围可能稍大。 */
   durationMs?: number | null
+  /** 上游（HiAgent）远端用时等指标；由轮次的全部事件得出（指标事件不是步骤，不在步骤树里） */
+  upstream?: UpstreamTiming | null
   /** 轮次仍在运行：瀑布图持续刷新 */
   running?: boolean
   /** 受控的选中步骤（节点 id，即 step_id）；不传则内部管理 */
@@ -80,6 +82,7 @@ export function TraceViewer({
   startedAt,
   endedAt,
   durationMs,
+  upstream = null,
   running,
   selectedStepId,
   onSelectStep,
@@ -94,7 +97,6 @@ export function TraceViewer({
   }
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set())
   const [kinds, setKinds] = useState<ReadonlySet<TraceKind>>(new Set())
-  const upstream = upstreamTiming(flattenTree(steps).flatMap((row) => row.node.events))
   const [query, setQuery] = useState('')
 
   const all = useMemo(() => {
@@ -193,8 +195,9 @@ export function TraceViewer({
             )
           })}
           <span className="ml-auto font-mono text-[11px] text-muted-foreground"
-            title={upstream ? '时间轴包含本地查询及传输；HiAgent值仅为远端整轮运行耗时' : '本轮总耗时'} data-testid="trace-duration">
-            {all.length} 步 · {upstream ? `本地端到端 ${exactSeconds(durationMs ?? timeline.totalMs)} · HiAgent ${exactSeconds(upstream.runMs)}` : formatDuration(durationMs ?? timeline.totalMs)}
+            title={upstream ? `${localTimeTitle(upstream)}；时间轴包含回答完成后的 Trace 补齐，HiAgent 远端用时仅为远端整轮运行耗时` : '本轮总耗时'}
+            data-testid="trace-duration">
+            {all.length} 步 · {upstream ? `本地用时 ${exactSeconds(durationMs ?? timeline.totalMs)} · HiAgent 远端用时 ${exactSeconds(upstream.runMs)}` : formatDuration(durationMs ?? timeline.totalMs)}
           </span>
         </div>
       </div>
@@ -390,6 +393,7 @@ export function StepDetail({
               .map((e) => e.type === 'llm.reasoning' ? e.payload.text ?? '' : '').join('')}</p>
           </div>
         )}
+        {node.kind === 'llm' && <LlmIo events={node.events} />}
         {node.kind === 'llm' && !node.events.some((e) => e.type === 'llm.reasoning') &&
           <p className="mb-2 text-xs text-muted-foreground">思考内容未提供</p>}
         {node.events.length > 1 && (
@@ -417,6 +421,41 @@ export function StepDetail({
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+function contentText(content: unknown): string {
+  if (typeof content === 'string') return content
+  return content == null ? '' : JSON.stringify(content)
+}
+
+/** 模型调用的输入消息与输出正文；输入较大被转存为 blob 时只在「请求」页签里按需加载。 */
+function LlmIo({ events }: { events: readonly TraceNode['events'][number][] }) {
+  const request = events.find((e) => e.type === 'llm.request')
+  const response = events.find((e) => e.type === 'llm.response')
+  const messages = request?.type === 'llm.request' && Array.isArray(request.payload.messages) ? request.payload.messages : null
+  const output = response?.type === 'llm.response' ? response.payload.content : null
+  if (!messages?.length && !output) return null
+  return (
+    <div className="mb-3 space-y-2">
+      {!!messages?.length && (
+        <div className="rounded border border-border bg-muted/40 p-2" data-testid="llm-input">
+          <p className="mb-1 text-xs font-medium">输入</p>
+          {messages.map((m, i) => (
+            <p key={i} className="whitespace-pre-wrap text-xs">
+              <span className="mr-1 font-mono text-muted-foreground">{m.role}</span>
+              {contentText(m.content)}
+            </p>
+          ))}
+        </div>
+      )}
+      {!!output && (
+        <div className="rounded border border-border bg-muted/40 p-2" data-testid="llm-output">
+          <p className="mb-1 text-xs font-medium">输出</p>
+          <p className="whitespace-pre-wrap text-xs">{output}</p>
+        </div>
+      )}
     </div>
   )
 }

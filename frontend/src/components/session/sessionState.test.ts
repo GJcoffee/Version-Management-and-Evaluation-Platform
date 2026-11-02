@@ -364,3 +364,23 @@ describe('轮次标题行与会话总计的辅助函数', () => {
     expect(sessionSpanMs(running)).toBeNull()
   })
 })
+
+describe('上游 Trace 补齐的模型调用', () => {
+  it('只进 Trace，不在对话区生成重复的回复气泡', () => {
+    const final = { role: 'assistant', content: '第一段，第二段。' }
+    const state = fold([
+      mk('turn.start', { input: { role: 'user', content: '查订单' } }, { seq: 1 }),
+      mk('message.assistant', { message: final }, { seq: 2, at: 100 }),
+      mk('llm.request', { model: '豆包', source: 'hiagent_trace', messages: [{ role: 'user', content: '查订单' }] },
+        { seq: 3, at: 200, step: 'llm:a' }),
+      mk('llm.response', { content: '第一段，', source: 'hiagent_trace' }, { seq: 4, at: 300, step: 'llm:a' }),
+      mk('llm.request', { model: '豆包', source: 'hiagent_trace' }, { seq: 5, at: 400, step: 'llm:b' }),
+      mk('llm.response', { content: '第二段。', source: 'hiagent_trace' }, { seq: 6, at: 500, step: 'llm:b' }),
+      mk('turn.end', { status: 'completed', output: { final } }, { seq: 7, at: 600 }),
+    ])
+    const turn = state.turns[0]
+    expect(turn.messages.map((m) => m.content)).toEqual(['第一段，第二段。'])
+    expect(turn.steps.flatMap(function names(s): string[] { return [s.id, ...s.children.flatMap(names)] }))
+      .toEqual(expect.arrayContaining(['llm:a', 'llm:b']))
+  })
+})
