@@ -237,3 +237,27 @@ def test_transcript_helpers():
     assert t.final == "d" and t.input_text == "a\nc" and t.tokens == 7 and t.latency_ms == 15
     assert t.tool_calls() == [{"name": "t", "arguments": {"x": 1}, "output": "res"}]
     json.dumps(t.to_dict())
+
+
+async def test_trace_assertions_on_missing_remote_metrics_are_scoring_errors_not_failures():
+    ev_ = [event("llm.response")]
+    usage = {"trace_status": "unavailable", "prompt_tokens": 9, "completion_tokens": 3}
+    missing = Transcript([TurnView(idx=0, input="q", output="a", latency_ms=None, usage=usage)])
+    r = await run({"type": "trace", "assert": {"max_latency_ms": 1000}}, t=missing, events=ev_)
+    assert r.status == "error" and r.passed is None and r.reason == "耗时未取得，无法核对"
+    r = await run({"type": "trace", "assert": {"max_steps": 3}}, t=missing, events=ev_)
+    assert r.status == "error" and r.reason == "步数未取得，无法核对"
+    r = await run({"type": "trace", "assert": {"max_steps": 3, "max_latency_ms": 5, "tool_called": "x"}},
+                  t=missing, events=ev_)
+    assert r.status == "error" and r.reason == "步数、耗时未取得，无法核对"
+    no_tokens = Transcript([TurnView(idx=0, input="q", output="a", latency_ms=500,
+                                     usage={"trace_status": "complete", "llm_calls": 1})])
+    r = await run({"type": "trace", "assert": {"max_tokens": 100}}, t=no_tokens, events=ev_)
+    assert r.status == "error" and r.reason == "token未取得，无法核对"
+    # 没有对应断言时，缺失的指标不影响结果；远端指标齐全时照常判断
+    r = await run({"type": "trace", "assert": {"max_tokens": 100}}, t=missing, events=ev_)
+    assert r.status == "done" and r.passed is True
+    done = {"trace_status": "complete"}
+    slow = Transcript([TurnView(idx=0, input="q", output="a", latency_ms=500, usage=done)])
+    r = await run({"type": "trace", "assert": {"max_latency_ms": 100}}, t=slow, events=ev_)
+    assert r.status == "done" and r.passed is False

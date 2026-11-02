@@ -6,6 +6,7 @@ import type {
   ToolCallDelta,
   TurnEndPayload,
   TurnError,
+  TraceSyncStatus,
   TurnStatus,
   Usage,
 } from '@/api/types'
@@ -89,11 +90,17 @@ export interface AssistantMessageView {
   partial: boolean
 }
 
+/** 有远端数据的轮次（HiAgent）：规范指标以远端为准，由后台 Trace 补齐；null 表示指标就是 agent 自己的测量 */
+export interface TraceSync {
+  status: TraceSyncStatus
+  note: string | null
+}
+
 export interface TurnMetrics {
   promptTokens: number
   completionTokens: number
   totalTokens: number
-  /** 轮次耗时；结束前为 null（界面用 startedAt 现算） */
+  /** 轮次耗时；结束前为 null（界面用 startedAt 现算）。远端为主的轮次是 HiAgent Trace 的运行时长，补齐前 / 未取得为 null */
   latencyMs: number | null
   ttftMs: number | null
   cost: number
@@ -118,6 +125,8 @@ export interface TurnState {
   events: EventEnvelope[]
   error: TurnError | null
   metrics: TurnMetrics
+  /** 远端指标的补齐状态；非 null 时本轮用时 / token / 调用次数以远端为准，本地测量不展示 */
+  trace: TraceSync | null
   startedAt: string | null
   endedAt: string | null
   /** 最近一个事件的时间戳 */
@@ -163,6 +172,7 @@ function newTurn(id: string): TurnState {
     events: [],
     error: null,
     metrics: emptyMetrics(),
+    trace: null,
     startedAt: null,
     endedAt: null,
     lastEventAt: null,
@@ -474,6 +484,29 @@ function applyEventToTurn(turn: TurnState, ev: EventEnvelope): TurnState {
       }
       break
     }
+    case 'metrics': {
+      // 后台补齐的远端指标：用 Trace 的运行时长 / token / 调用次数改写本轮指标（只有带 trace_status 的才是）
+      const p = ev.payload as Record<string, unknown>
+      const status = p.trace_status
+      if (status !== 'complete' && status !== 'partial' && status !== 'unavailable') break
+      const usage = (p.usage ?? {}) as Usage
+      const prompt = usage.prompt_tokens ?? t.metrics.promptTokens
+      const completion = usage.completion_tokens ?? t.metrics.completionTokens
+      t = {
+        ...t,
+        trace: { status, note: typeof p.trace_note === 'string' ? p.trace_note : null },
+        metrics: {
+          ...t.metrics,
+          promptTokens: prompt,
+          completionTokens: completion,
+          totalTokens: prompt + completion,
+          latencyMs: typeof p.upstream_run_ms === 'number' ? p.upstream_run_ms : null,
+          ttftMs: null,
+          llmCalls: typeof p.llm_calls === 'number' ? p.llm_calls : t.metrics.llmCalls,
+        },
+      }
+      break
+    }
     case 'error': {
       t = { ...t, error: { code: ev.payload.code, message: ev.payload.message, retriable: !!ev.payload.retriable } }
       break
@@ -539,18 +572,24 @@ function applyTurnEnd(t: TurnState, p: TurnEndPayload, ts: string): TurnState {
       ]
     }
   }
+  // 远端为主的轮次：用时只认 Trace（metrics 事件已写入）；turn.end 时尚未补齐的标为 pending
+  // 旧版 HiAgent 轮次（transport_ms 只有 HiAgent 适配器写）没有补齐过 Trace：远端用时未取得，不显示本地值
+  const trace: TraceSync | null = t.trace ?? (u.trace_status
+    ? { status: u.trace_status, note: u.trace_note ?? null }
+    : u.transport_ms !== undefined ? { status: 'unavailable', note: '历史数据未取得 Trace' } : null)
   return {
     ...t,
     status,
     messages,
+    trace,
     ended: true,
     endedAt: ts,
     metrics: {
       promptTokens: prompt,
       completionTokens: completion,
       totalTokens: prompt + completion,
-      latencyMs: p.latency_ms ?? null,
-      ttftMs: p.ttft_ms ?? t.metrics.ttftMs,
+      latencyMs: trace ? t.metrics.latencyMs : (p.latency_ms ?? null),
+      ttftMs: trace ? null : (p.ttft_ms ?? t.metrics.ttftMs),
       cost: p.cost ?? t.metrics.cost,
       llmCalls: u.llm_calls ?? t.metrics.llmCalls,
       toolCalls: u.tool_calls ?? t.metrics.toolCalls,
@@ -709,14 +748,28 @@ export interface TotalMetrics {
   cost: number
   llmCalls: number
   toolCalls: number
-  /** 各轮耗时之和（未结束的轮次不计） */
+  /** 各轮耗时之和（未结束的轮次不计）；远端为主的轮次是远端用时，补齐中 / 未取得的轮次不计 */
   latencyMs: number
+  /** 有远端数据的轮次（HiAgent）：用时口径是远端，成本 / 首 token 不适用 */
+  remote: boolean
+  /** 有轮次的远端指标仍在补齐 */
+  syncing: boolean
+  /** 有轮次的远端用时未取得 */
+  missing: boolean
 }
 
 /** 全部轮次的累计指标 */
 export function totalMetrics(turns: readonly TurnState[]): TotalMetrics {
-  const acc: TotalMetrics = { promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0, llmCalls: 0, toolCalls: 0, latencyMs: 0 }
+  const acc: TotalMetrics = {
+    promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0, llmCalls: 0, toolCalls: 0, latencyMs: 0,
+    remote: false, syncing: false, missing: false,
+  }
   for (const t of turns) {
+    if (t.trace) {
+      acc.remote = true
+      if (t.trace.status === 'pending') acc.syncing = true
+      else if (t.ended && t.metrics.latencyMs === null) acc.missing = true
+    }
     acc.promptTokens += t.metrics.promptTokens
     acc.completionTokens += t.metrics.completionTokens
     acc.totalTokens += t.metrics.totalTokens

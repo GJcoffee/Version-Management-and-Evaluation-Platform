@@ -11,7 +11,7 @@ import type {
   EvaluatorOut,
   TraceAssertInput,
 } from '@/api/evalTypes'
-import { formatCost, formatPercent, formatTokens } from '@/lib/format'
+import { formatCost, formatDuration, formatPercent, formatTokens } from '@/lib/format'
 
 export const EVAL_STATUS_LABEL: Record<EvalRunStatusOut, string> = {
   queued: '排队中',
@@ -632,4 +632,24 @@ export function interpretSignTest(p: number | null | undefined, wins: number, lo
 /** 等待人工评审的评分总数（各 human 评估器的 pending_human 之和） */
 export function pendingHumanCount(stats: Pick<EvalStatsOut, 'evaluators'> | null | undefined): number {
   return Object.values(stats?.evaluators ?? {}).reduce((n, e) => n + (e.pending_human ?? 0), 0)
+}
+
+
+type RemoteUsage = { usage?: { trace_status?: string } | null }
+
+/** 有远端数据的执行（HiAgent）：用时 / token 是远端值，成本不适用 */
+export function isRemoteItem(item: RemoteUsage): boolean {
+  return !!item.usage?.trace_status
+}
+
+/** 执行用时的文字：远端指标补齐中显示「同步中」，未取得显示「未取得」，不用本地值顶替 */
+export function itemLatencyText(item: RemoteUsage & { latency_ms: number | null }): string {
+  if (item.usage?.trace_status === 'pending') return '同步中'
+  if (isRemoteItem(item) && item.latency_ms === null) return '未取得'
+  return formatDuration(item.latency_ms)
+}
+
+/** 执行成本的文字：远端不提供成本时不适用 */
+export function itemCostText(item: RemoteUsage & { cost: number | null }): string {
+  return isRemoteItem(item) ? '不适用' : formatCost(item.cost)
 }

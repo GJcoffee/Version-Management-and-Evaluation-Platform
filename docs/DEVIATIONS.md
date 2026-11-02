@@ -604,3 +604,17 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 - CLI `evalp versions` 默认隐藏已归档（`--all` 显示），新增 `evalp milestone <版本> [--title] [--remove]`；MCP `list_versions` 增加 `include_archived`，新增 `set_milestone`。
   取消 / 移出归档只在 Web UI、CLI `--remove` 和 API 提供，MCP 暂不提供。
 
+## HiAgent 指标以远端为主，Trace 后台补齐
+
+- 内置 HiAgent 适配器不再在 `run_turn` 里等 Trace：`message_end` 后立即 `message.assistant` + `turn.end`；Trace 由会话服务在后台消费 `RunContext.late_observe`（适配器设置），补齐事件以原 `turn_id` 追加到事件流。
+  这违背了「每轮事件以 `turn.end` 结尾」的约定，只对远端为主的轮次成立；补齐期间用 `hold_stream` 保持 SSE，完成后才发 `idle`。
+- `turns.usage.trace_status` 取 `pending | complete | partial | unavailable`；服务重启时遗留的 `pending` 启动恢复标为 `unavailable`（补写一条 `metrics` 事件）。
+- 规范字段改写为远端值：`latency_ms` = Trace 运行时长（补齐前 / 未取得为 NULL，不用本地值顶替），`ttft_ms` 恒 NULL，成本不适用；本地测量留在 `usage.local_*` 等诊断字段，界面与统计都不用。
+- 评测：用例各轮执行完后若还有 Trace 在补齐，作业立即结束（释放并发名额），由内存里的等待任务在补齐后重新入队评分；进程在等待期间退出时，启动对账把停在 `scoring` 且没有作业的 Item 重新入队。
+  取舍：等待任务不持久化，靠启动对账兜底；补齐后的评分作业仍占用一个并发名额（只在评分期间）。
+- 评测汇总新增 `remote`、`latency_missing`；`tools` 按工具耗时仍取 `tool.result`（Trace 的覆盖 SSE 的）。
+- 取消了前端旧的 `actual_upstream_trace_timestamps` 日志口径与「本地用时 / SSE接收 / Trace补齐 / 本地首正文」的展示。
+- 迁移 0010 把历史数据回填为远端口径：`usage.upstream_run_ms` 存在的轮次 `latency_ms` 改为它、`ttft_ms` 置空；`adapter_snapshot.binding.id == "hiagent"`（非业务桥接）但没有远端用时的轮次置空并标 `unavailable`（“历史数据未取得 Trace”）；
+  原本地值移入 `usage.local_latency_ms` / `local_ttft_ms`。受影响的评测用例按新规则重算，受影响评测的 `stats` 带 `needs_recompute`，下次启动对账时重算并清除；降级还原本地值（评测统计不回退）。
+- trace 评估器的 `max_latency_ms` / `max_tokens` / `max_steps` 依赖的远端指标未取得（用时为空、HiAgent 未返回 token、Trace 不可用）时，评分记为出错（“…未取得，无法核对”），不判未通过。
+

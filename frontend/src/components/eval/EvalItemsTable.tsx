@@ -8,10 +8,9 @@ import { Badge } from '@/components/ui/Badge'
 import { Input } from '@/components/ui/Input'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { cn } from '@/lib/cn'
-import { formatCost, formatDuration } from '@/lib/format'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { VerdictBadge } from './ItemDetail'
-import { formatScore, itemVerdict, scoreTone } from './evalUtils'
+import { formatScore, itemCostText, itemLatencyText, itemVerdict, scoreTone } from './evalUtils'
 
 const ROW_H = 44
 type Cls = NonNullable<EvalItemFilter['cls']>
@@ -235,8 +234,8 @@ export function EvalItemsTable({
                       {evaluatorKeys.map((k) => (
                         <span key={k}>{pending ? <span className="text-muted-foreground">-</span> : <ScoreCell item={it} evaluatorKey={k} />}</span>
                       ))}
-                      <span className="text-right font-mono text-xs tabular-nums">{formatDuration(it.latency_ms)}</span>
-                      <span className="text-right font-mono text-xs tabular-nums">{formatCost(it.cost)}</span>
+                      <span className="text-right font-mono text-xs tabular-nums">{itemLatencyText(it)}</span>
+                      <span className="text-right font-mono text-xs tabular-nums">{itemCostText(it)}</span>
                     </button>
                   )
                 })}

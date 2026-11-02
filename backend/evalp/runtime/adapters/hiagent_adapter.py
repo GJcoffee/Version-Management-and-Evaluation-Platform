@@ -231,6 +231,10 @@ class HiAgentAdapter(AgentAdapter):
             raise AgentError("HiAgent 凭据不可用")
         headers = {"Apikey": key, "X-APP-User": self.config.user_id}
         mapper = HiAgentMapper(self.config)
+        # 规范指标以 HiAgent Trace 为准：回复结束后由会话服务在后台补齐，不阻塞本轮。
+        from evalp.runtime.adapters.hiagent_trace import collect_trace
+
+        ctx.late_observe = lambda: collect_trace(self.config, secret, mapper)
         submitted = False
         async with httpx.AsyncClient(
             base_url=self.config.base_url, headers=headers,
@@ -285,22 +289,14 @@ class HiAgentAdapter(AgentAdapter):
                 final = Message(role="assistant", content=text)
                 ctx.new_messages.append(final)
                 yield ev("message.assistant", message=final)
-                # 回答已完整交付；Trace 补查只补观测，耗时单独记录，不计入本轮用时。
-                from evalp.runtime.adapters.hiagent_trace import collect_trace
-
-                trace_t0 = time.monotonic()
-                async for event in collect_trace(self.config, secret, mapper):
-                    yield event
-                trace_fetch_ms = round((time.monotonic() - trace_t0) * 1000)
                 for identity, stage in mapper.stages.items():
                     yield ev("span.end", step_id=stage["step"], name="上游输出阶段",
                              attrs={"upstream_id": identity, "association": "unknown"})
-                yield ev("metrics", scope="turn", usage=mapper.usage,
-                         transport_ms=transport_ms, trace_fetch_ms=trace_fetch_ms,
+                yield ev("metrics", scope="turn", usage=dict(mapper.usage), transport_ms=transport_ms,
                          upstream={"message_id": mapper.message_id, "conversation_id": conversation,
                                    "app_id": self.config.app_id,
                                    "expected_version": self.config.published_version})
-                yield ev("turn.end", status="completed", usage=mapper.usage)
+                yield ev("turn.end", status="completed", usage=dict(mapper.usage))
             except asyncio.CancelledError:
                 if submitted and mapper.message_id and not mapper.done:
                     with contextlib.suppress(Exception):

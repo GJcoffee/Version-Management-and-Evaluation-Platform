@@ -341,7 +341,7 @@ class CompareService:
 
     async def _side_signature(self, session_id: str) -> tuple[tuple, bool]:
         """(缓存签名, 是否稳定)。签名 = 会话 last_seq + 各轮 (id, status, finished_at)；
-        有轮次仍在执行（库里 running，或内存里还占着槽位）时不稳定，结果不能缓存。"""
+        有轮次仍在执行（库里 running，或内存里还占着槽位）或远端指标仍在补齐时不稳定，结果不能缓存。"""
         async with self.ctx.db.read() as s:
             sess = await s.get(Session, session_id)
             if sess is None:
@@ -352,7 +352,11 @@ class CompareService:
                     .order_by(Turn.idx)
                 )
             ).all()  # fmt: skip
-        stable = not any(r[1] == "running" for r in rows) and not self.sessions.is_running(session_id)
+        stable = (
+            not any(r[1] == "running" for r in rows)
+            and not self.sessions.is_running(session_id)
+            and not self.sessions.is_observing(session_id)  # 远端指标补齐中，用时等尚未定稿
+        )
         return (session_id, sess.last_seq, tuple(tuple(r) for r in rows)), stable
 
     async def alignment(self, compare_id: str) -> dict[str, Any]:

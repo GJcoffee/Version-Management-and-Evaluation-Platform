@@ -225,6 +225,8 @@ export function buildStepTree(events: readonly EventEnvelope[]): TraceNode[] {
         n.endMs = ms(ev.ts)
         if (n.events.length === 1) n.startMs = lat !== null ? n.endMs - lat : n.endMs
         n.durationMs = lat ?? n.endMs - n.startMs
+        // 上游输出阶段只有本地接收 SSE 的时刻，接收时间差不能冒充上游耗时（远端耗时在补齐的 LLM 步骤上）
+        if ((ev.payload.attrs as Record<string, unknown> | undefined)?.upstream_id && lat === null) n.durationMs = null
         n.status = ['error', 'timeout', 'cancelled'].includes(String(ev.payload.status)) ? 'error' : 'ok'
         break
       }

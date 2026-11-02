@@ -11,8 +11,13 @@
 - 历史拼接（6.1）：只取 ``status=ok`` 的轮次，按 idx 顺序拼接 ``input`` 与 ``output.messages``；
 - 每个会话的事件由 :class:`EventSink` 写入 ``events`` 表（先发布到总线，后批量落库），``turn.end`` 到达前
   ``turns`` 与 ``sessions.stats / status`` 已更新完毕；
+- 远端为主的轮次（Adapter 设置了 ``ctx.late_observe``，如 HiAgent）在 ``turn.end`` 后立即释放会话，
+  规范指标（用时等）由后台任务补齐：补齐事件以该轮的 turn_id 追加到事件流，完成后改写轮次的 usage / 用时
+  并更新会话 stats；补齐期间持有 SSE（``hold_stream``），完成后才发 ``idle``。``wait_trace`` /
+  ``wait_traces`` 等待补齐结束；
 - 进程启动后第一次使用本服务时（或应用启动时显式调用 :meth:`recover`），把遗留的 running 轮次标记为
-  ``error``（code=INTERRUPTED），会话状态改为 idle。
+  ``error``（code=INTERRUPTED），会话状态改为 idle；仍在补齐（``usage.trace_status=pending``）的轮次标记为
+  ``unavailable``。
 """
 
 from __future__ import annotations
@@ -93,6 +98,15 @@ class _Running:
     shared: bool = False  # 允许与同会话的其他 shared 轮次并发（锚定重放）
     released: asyncio.Event = field(default_factory=asyncio.Event)  # turn.end 已落库、会话已可接受下一轮
     middleware_snapshot: dict | None = None
+    release_hold: Callable[[], None] | None = None  # 补齐期间对 SSE 的持有，交给补齐任务后置空
+
+
+@dataclass(eq=False)
+class _Observing:
+    """一个正在后台补齐远端指标的轮次。"""
+
+    session_id: str
+    task: asyncio.Task[None]
 
 
 class _FailingAdapter(AgentAdapter):
@@ -211,6 +225,7 @@ class SessionService:
         self.ctx = ctx
         self._running: dict[str, list[_Running]] = {}  # session_id -> 正在执行的轮次（一般只有一个）
         self._by_turn: dict[str, _Running] = {}
+        self._observations: dict[str, _Observing] = {}  # turn_id -> 后台补齐任务
         self._sinks: dict[str, list[Any]] = {}  # session_id -> [共享的 EventSink, 引用数]
         self._holds: dict[str, int] = {}  # session_id -> SSE 保持打开的持有数（重放期间）
         self._hold_events: dict[str, asyncio.Event] = {}  # 持有数归零时置位，唤醒等待中的 SSE
@@ -275,6 +290,25 @@ class SessionService:
                 .where(Session.status == "running", Session.id.not_in(skip) if skip else True)
                 .values(status="idle", updated_at=now)
             )
+            note = "服务重启，Trace 补齐中断"
+            unfinished = (
+                await s.execute(
+                    select(Turn).where(
+                        Turn.status != "running",
+                        func.json_extract(Turn.usage, "$.trace_status") == "pending",
+                        Turn.id.not_in(list(self._observations)),
+                    )
+                )
+            ).scalars().all()
+            for t in unfinished:
+                t.usage = {**t.usage, "trace_status": "unavailable", "trace_note": note}
+                sess = await s.get(Session, t.session_id)
+                if sess is not None:
+                    metrics = ev("metrics", scope="turn", trace_status="unavailable", trace_note=note)
+                    sess.last_seq += 1
+                    s.add(Event(session_id=sess.id, seq=sess.last_seq, turn_id=t.id, ts=now,
+                                type=metrics.type, payload=metrics.payload))
+                count += 1
         if count:
             log.warning("session.recovered_interrupted_turns", count=count)
         return count
@@ -504,6 +538,10 @@ class SessionService:
     def is_running(self, session_id: str) -> bool:
         return bool(self._running.get(session_id))
 
+    def is_observing(self, session_id: str) -> bool:
+        """该会话是否有轮次的远端指标仍在后台补齐（用时等规范指标尚未定稿）。"""
+        return any(o.session_id == session_id for o in self._observations.values())
+
     # ------------------------------------------------------------ SSE 保持打开（重放期间）
 
     def hold_stream(self, session_id: str) -> Callable[[], None]:
@@ -721,6 +759,8 @@ class SessionService:
             nonlocal finalized
             await self._finalize(slot, result)
             finalized = slot.finalized = True
+            if rctx.late_observe is not None:  # 在 turn.end 发布之前持有 SSE，补齐完成后才发 idle
+                slot.release_hold = self.hold_stream(slot.session_id)
 
         async def prepare_input() -> Message:
             assert slot.middleware_snapshot is not None
@@ -755,6 +795,8 @@ class SessionService:
                 adapter, rctx, history, msg, emit, before_end=before_end,
                 prepare_input=prepare_input if slot.middleware_snapshot else None,
             )
+            if rctx.late_observe is not None and slot.release_hold is not None:
+                self._start_observation(slot, rctx, slot.result, sink)
         except BaseException as e:  # noqa: BLE001 - 兜底：保证轮次与会话状态不会停留在 running
             if not isinstance(e, asyncio.CancelledError):
                 log.exception("session.turn_crashed", turn_id=slot.turn_id, error=f"{type(e).__name__}: {e}")
@@ -768,11 +810,77 @@ class SessionService:
             if isinstance(e, asyncio.CancelledError):
                 raise
         finally:
+            if slot.release_hold is not None:  # 没有交给补齐任务（执行被中断）：不再持有 SSE
+                slot.release_hold()
             if adapter is not None:
                 with contextlib.suppress(Exception):
                     await adapter.aclose()
             await self._release_sink(slot.session_id, sink)
             self._release(slot)
+
+    # ------------------------------------------------------------ 远端指标补齐
+
+    def _start_observation(
+        self, slot: _Running, rctx: RunContext, result: TurnResult, sink: EventSink
+    ) -> None:
+        """启动后台补齐：额外持有一份 EventSink 与 SSE 持有，由补齐任务在结束时归还。"""
+        release, slot.release_hold = slot.release_hold, None
+        assert release is not None
+        self._acquire_sink(slot.session_id, sink.last_seq)
+        task = asyncio.create_task(
+            self._observe(slot, rctx, result, sink, release), name=f"observe-{slot.turn_id}"
+        )
+        self._observations[slot.turn_id] = _Observing(slot.session_id, task)
+
+    async def _observe(
+        self,
+        slot: _Running,
+        rctx: RunContext,
+        result: TurnResult,
+        sink: EventSink,
+        release: Callable[[], None],
+    ) -> None:
+        try:
+            final = await Runner().observe(rctx, result, sink.emit)
+            await self._finalize_observation(slot, result, final)
+            await sink.flush()  # 先落库再放开 SSE，idle 之后库里已是完整数据
+        except Exception as e:  # noqa: BLE001 - 后台任务的失败只记录，不能无声消失
+            log.exception("session.observe_failed", turn_id=slot.turn_id, error=f"{type(e).__name__}: {e}")
+        finally:
+            self._observations.pop(slot.turn_id, None)
+            await self._release_sink(slot.session_id, sink)
+            release()
+
+    async def _finalize_observation(self, slot: _Running, before: TurnResult, after: TurnResult) -> None:
+        """补齐完成：改写轮次的 usage / 规范用时，并把补齐带来的差额累计进会话 stats。"""
+        async with self.ctx.db.write() as s:
+            t = await s.get(Turn, slot.turn_id)
+            assert t is not None
+            t.usage, t.cost = after.usage, after.cost
+            t.latency_ms, t.ttft_ms = after.latency_ms, after.ttft_ms
+            sess = await s.get(Session, slot.session_id)
+            if sess is not None:
+                stats = {**EMPTY_STATS, **(sess.stats or {})}
+                for k in ("prompt_tokens", "completion_tokens", "llm_calls", "tool_calls"):
+                    delta = int(after.usage.get(k, 0) or 0) - int(before.usage.get(k, 0) or 0)
+                    stats[k] = stats.get(k, 0) + delta
+                stats["cost"] = round(float(stats.get("cost", 0.0)) + after.cost - before.cost, 8)
+                sess.stats = stats
+
+    async def wait_trace(self, turn_id: str) -> TurnOut:
+        """等该轮的远端指标补齐结束（没有补齐任务则立即返回），返回补齐后的轮次；等待方被取消不影响补齐。"""
+        await self._ensure_recovered()
+        observing = self._observations.get(turn_id)
+        if observing is not None:
+            await asyncio.wait({observing.task})
+        return await self.get_turn(turn_id)
+
+    async def wait_traces(self, session_id: str) -> None:
+        """等该会话所有轮次的远端指标补齐结束（遗留的 pending 在恢复时已标为 unavailable）。"""
+        await self._ensure_recovered()
+        tasks = [o.task for o in self._observations.values() if o.session_id == session_id]
+        if tasks:
+            await asyncio.wait(tasks)
 
     async def _finalize(self, slot: _Running, result: TurnResult) -> None:
         """写入轮次结果，并累计会话的 stats / status。"""
@@ -833,12 +941,16 @@ class SessionService:
         slots = list(self._by_turn.values())
         for slot in slots:
             slot.cancel.set()
+        observing = [o.task for o in self._observations.values()]
+        for t in observing:  # 补齐中断的轮次在下次启动时标为 unavailable
+            t.cancel()
         tasks = [s.task for s in slots if s.task is not None]
         if tasks:
             _, pending = await asyncio.wait(tasks, timeout=SHUTDOWN_WAIT_S)
             for t in pending:
                 t.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.gather(*observing, return_exceptions=True)
 
     # ------------------------------------------------------------ SSE（7.4）
 
@@ -917,6 +1029,10 @@ class SessionService:
             while True:
                 # 没有重放持有时直接等总线；持有期间还要能被"持有结束"唤醒（轮次之间不发 idle）
                 if pending is None and not self.is_held(session_id):
+                    if not busy_ids and sub.qsize() == 0:  # 补齐的最后一个事件与释放持有同时发生
+                        await self._wait_all_released(session_id)
+                        yield Idle(last)
+                        return
                     try:
                         item = await sub.get()
                     except SubscriptionClosed:

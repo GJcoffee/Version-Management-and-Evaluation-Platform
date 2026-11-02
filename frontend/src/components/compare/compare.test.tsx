@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 import type { AlignTurn, Alignment } from '@/api/compareTypes'
 import { buildSessionState, totalMetrics, TurnMetricsBar } from '@/components/session'
-import { T0, recordedTurnEvents, toolTurnEvents } from '@/components/session/testEvents'
+import { T0, mk, recordedTurnEvents, toolTurnEvents } from '@/components/session/testEvents'
 import { AlignmentPanel } from './AlignmentPanel'
 import { CompareRowView } from './CompareRowView'
 import { MetricsCompare } from './MetricsCompare'
@@ -233,6 +233,58 @@ describe('MetricsCompare 的时间口径', () => {
       unmount()
       vi.useRealTimers()
     }
+  })
+})
+
+describe('HiAgent 轮次的对比以远端为准', () => {
+  const start = { input: { role: 'user', content: '查订单' }, history_len: 0 }
+  const events = (turn: string, extra: ReturnType<typeof mk>[], usage: Record<string, unknown>) => [
+    mk('turn.start', start, { seq: 1, turn, at: 0 }),
+    mk('turn.end', { status: 'completed', output: null, usage: { tool_calls: 1, prompt_tokens: 9, completion_tokens: 3, ...usage },
+      cost: 0, latency_ms: null, ttft_ms: null }, { seq: 2, turn, at: 300 }),
+    ...extra,
+  ]
+  const remoteDone = (turn: string, ms: number) => buildSessionState(events(turn, [
+    mk('metrics', { scope: 'turn', source: 'hiagent_trace', upstream_run_ms: ms, llm_calls: 2, trace_status: 'complete' },
+      { seq: 3, turn, at: 400 }),
+  ], { trace_status: 'pending' })).turns[0]
+  const remotePending = buildSessionState(events('trn_P', [], { trace_status: 'pending' })).turns[0]
+
+  it('用时是远端用时，首 token 与成本不适用，不拿本地值顶替', () => {
+    const left = remoteDone('trn_A', 30_000)
+    const right = remoteDone('trn_B', 20_000)
+    render(<MetricsCompare left={left} right={right} />)
+    const cmp = screen.getByTestId('metrics-compare')
+    expect(cmp.querySelector('[data-metric="latency"] [data-role="baseline"]')).toHaveTextContent('30.0s')
+    expect(cmp.querySelector('[data-metric="latency"] [data-testid="metric-delta"]')).toHaveTextContent('减少10.0s')
+    expect(cmp.querySelector('[data-metric="ttft"] [data-role="baseline"]')).toHaveTextContent('不适用')
+    expect(cmp.querySelector('[data-metric="cost"] [data-role="target"]')).toHaveTextContent('不适用')
+    expect(cmp.querySelector('[data-metric="cost"] [data-testid="metric-delta"]')).toBeNull()
+    expect(cmp.querySelector('[data-metric="llm_calls"] [data-role="target"]')).toHaveTextContent('×2')
+    expect(metricValue(left, 'ttft')).toBeNull()
+    expect(metricValue(left, 'cost')).toBeNull()
+  })
+
+  it('补齐中显示同步中且不计算差值，未取得显示未取得', () => {
+    const done = remoteDone('trn_A', 30_000)
+    const missing = buildSessionState(events('trn_M', [
+      mk('metrics', { scope: 'turn', trace_status: 'unavailable', trace_note: 'x' }, { seq: 3, turn: 'trn_M', at: 400 }),
+    ], { trace_status: 'pending' })).turns[0]
+    const { rerender } = render(<MetricsCompare left={done} right={remotePending} />)
+    let cmp = screen.getByTestId('metrics-compare')
+    expect(cmp.querySelector('[data-metric="latency"] [data-role="target"]')).toHaveTextContent('同步中')
+    expect(cmp.querySelector('[data-metric="llm_calls"] [data-role="target"]')).toHaveTextContent('同步中')
+    expect(cmp.querySelector('[data-metric="latency"] [data-testid="metric-delta"]')).toBeNull()
+    expect(cmp.querySelector('[data-metric="tokens"] [data-role="target"]')).not.toHaveTextContent('同步中')
+    rerender(<MetricsCompare left={done} right={missing} />)
+    cmp = screen.getByTestId('metrics-compare')
+    expect(cmp.querySelector('[data-metric="latency"] [data-role="target"]')).toHaveTextContent('未取得')
+    expect(cmp.querySelector('[data-metric="llm_calls"] [data-role="target"]')).toHaveTextContent('未取得')
+  })
+
+  it('汇总头部：远端用时、同步中，不显示成本', () => {
+    expect(totalMetrics([remoteDone('trn_A', 30_000)])).toMatchObject({ remote: true, latencyMs: 30_000, syncing: false })
+    expect(totalMetrics([remotePending])).toMatchObject({ remote: true, syncing: true })
   })
 })
 

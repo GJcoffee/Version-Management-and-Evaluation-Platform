@@ -2,7 +2,7 @@ import { api } from '@/api/client'
 import type { EvalItemDetailOut, EvalItemOut, EvalRunDetailOut } from '@/api/evalTypes'
 import type { Page } from '@/api/types'
 import { formatDateTime } from '@/lib/format'
-import { EVAL_STATUS_LABEL, itemVerdict, runDatasetLabel, runTitle, runVersionLabel, VERDICT_LABEL } from './evalUtils'
+import { EVAL_STATUS_LABEL, isRemoteItem, itemVerdict, runDatasetLabel, runTitle, runVersionLabel, VERDICT_LABEL } from './evalUtils'
 
 export type EvalExportFormat = 'csv' | 'json'
 
@@ -80,7 +80,7 @@ export function evalExportCsv({ exported_at, run, items }: EvalExportData): stri
   const rows = items.map((item) => [
     ...meta, item.id, item.case_key, item.repeat_idx + 1, item.status, VERDICT_LABEL[itemVerdict(item)],
     item.case_detail.input, item.output, item.expected, item.case_detail.rubric, item.turns, item.tags,
-    item.score, item.cached, item.attempts, item.error, item.latency_ms, item.cost,
+    item.score, item.cached, item.attempts, item.error, item.latency_ms, isRemoteItem(item) ? null : item.cost,
     item.usage?.prompt_tokens, item.usage?.completion_tokens, item.session_id, item.scores,
     ...evaluatorKeys.flatMap((key) => {
       const score = item.scores.find((s) => s.evaluator_key === key)

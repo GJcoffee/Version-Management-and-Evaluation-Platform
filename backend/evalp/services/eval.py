@@ -30,7 +30,7 @@ import asyncio
 import json
 import time
 from collections import defaultdict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -76,6 +76,7 @@ from evalp.schemas.eval import (
     RunRef,
     ScoreOut,
 )
+from evalp.schemas.session import TurnOut
 from evalp.services.agent import AgentService
 from evalp.services.dataset import DatasetService
 from evalp.services.eval_stats import (
@@ -882,6 +883,35 @@ class EvalService:
             )
         for rid in ids:
             await self._maybe_finalize(rid)
+        await self._requeue_orphan_scoring()
+        await self._recompute_flagged_stats()
+
+    async def _recompute_flagged_stats(self) -> None:
+        """迁移 0010 回填历史 HiAgent 数据后，受影响评测的统计快照带 ``needs_recompute``，重算并清除。"""
+        async with self.ctx.db.write() as s:
+            runs = (
+                await s.execute(
+                    select(EvalRun).where(func.json_extract(EvalRun.stats, "$.needs_recompute").is_not(None))
+                )
+            ).scalars().all()
+            for run in runs:
+                run.stats = await self._compute_stats(s, run)
+
+    async def _requeue_orphan_scoring(self) -> None:
+        """等待 Trace 补齐时进程退出的 Item：停在 scoring、没有任何待执行的任务，重新排队评分。"""
+        live = select(JobRow.ref_id).where(
+            JobRow.kind.in_((KIND_ITEM, KIND_RESCORE)), JobRow.status.in_(("pending", "running"))
+        )
+        async with self.ctx.db.read() as s:
+            orphans = (
+                await s.execute(
+                    select(EvalItem.run_id, EvalItem.id).where(
+                        EvalItem.status == "scoring", EvalItem.id.not_in(live)
+                    )
+                )
+            ).all()
+        for run_id, item_id in orphans:
+            await self.scheduler.enqueue(KIND_ITEM, item_id, group_id=run_id, priority=0)
 
     async def _on_retry(self, job: Job, exc: BaseException) -> None:
         async with self.ctx.db.write() as s:
@@ -1007,11 +1037,42 @@ class EvalService:
                 )
             item.status = "pending"
         if item.status in ("pending", "running"):
-            if not await self._execute_item(job, item, run, case_row):
+            outs = await self._execute_item(job, item, run, case_row)
+            if outs is None:
                 return
             await self._check_budget(run.id)
+            if any((o.usage or {}).get("trace_status") == "pending" for o in outs):
+                # 评分依赖远端指标：等 Trace 补齐期间不占用并发名额，补齐后重新排队评分
+                self._defer_scoring(run.id, item.id, outs[0].session_id)
+                return
+        elif item.status == "scoring" and not item.reused_from_item_id:
+            await self._refresh_item_metrics(item.id)  # 补齐后的远端指标写回 Item
         await self._score_item(item.id)
         await self._maybe_finalize(run.id)
+
+    def _defer_scoring(self, run_id: str, item_id: str, session_id: str) -> None:
+        task = asyncio.create_task(self._requeue_after_traces(run_id, item_id, session_id))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _requeue_after_traces(self, run_id: str, item_id: str, session_id: str) -> None:
+        await self.ctx.svc(SessionService).wait_traces(session_id)
+        await self.scheduler.enqueue(KIND_ITEM, item_id, group_id=run_id, priority=0)
+
+    async def _refresh_item_metrics(self, item_id: str) -> None:
+        """Trace 补齐结束后，按会话各轮的规范指标（远端为主）重新汇总 Item 的用量、用时与成本。"""
+        async with self.ctx.db.read() as s:
+            item = await s.get(EvalItem, item_id)
+            assert item is not None and item.session_id is not None
+            session_id, prev = item.session_id, item.usage
+        sessions = self.ctx.svc(SessionService)
+        await sessions.wait_traces(session_id)
+        turns = (await sessions.get(session_id)).turns
+        usage, cost, latency = aggregate_turns(turns, prev)
+        async with self.ctx.db.write() as s:
+            it = await s.get(EvalItem, item_id)
+            if it is not None and it.status == "scoring":
+                it.usage, it.cost, it.latency_ms = usage, cost, latency
 
     async def _handle_rescore(self, job: Job) -> None:
         async with self.ctx.db.read() as s:
@@ -1045,8 +1106,11 @@ class EvalService:
         if changed:
             await self._publish_status(run_id)
 
-    async def _execute_item(self, job: Job, item: EvalItem, run: EvalRun, case_row: EvalCase) -> bool:
-        """执行一个 Item：新建 eval 会话，按顺序在同一个会话里跑完各轮。成功返回 True（Item 进入 scoring）。
+    async def _execute_item(
+        self, job: Job, item: EvalItem, run: EvalRun, case_row: EvalCase
+    ) -> list[TurnOut] | None:
+        """执行一个 Item：新建 eval 会话，按顺序在同一个会话里跑完各轮。成功返回各轮（Item 进入 scoring），
+        否则返回 None。
 
         失败：不可重试 -> Item 记为 failed 并返回 False；可重试 -> 记录失败尝试后抛
         Retriable（由调度器退避重试）。
@@ -1061,7 +1125,7 @@ class EvalService:
                 .values(status="running", attempts=job.attempts, started_at=item.started_at or now_iso())
             )
             if ok.rowcount != 1:  # type: ignore[attr-defined]
-                return False  # 刚被取消
+                return None  # 刚被取消
         self._notify_progress(run.id)
         outs: list[Any] = []
         session_id: str | None = None
@@ -1108,34 +1172,14 @@ class EvalService:
             await self._fail_item(item.id, err)
             await self._publish_item_done(item.id, run.id)
             await self._maybe_finalize(run.id)
-            return False
-        usage_sum: dict[str, Any] = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "llm_calls": 0,
-            "tool_calls": 0,
-        }
-        for o in outs:
-            for k in usage_sum:
-                usage_sum[k] += int((o.usage or {}).get(k, 0) or 0)
-        usage_sum["turns"] = len(outs)
-        latency = sum(int(o.latency_ms or 0) for o in outs)
+            return None
         async with self.ctx.db.write() as s:
             it = await s.get(EvalItem, item.id)
             if it is None or it.status != "running":
-                return False
-            prev = it.usage or {}
-            for k in ("failed_attempts", "wasted_cost"):
-                if k in prev:
-                    usage_sum[k] = prev[k]
-            it.status, it.cost, it.usage, it.latency_ms, it.error = (
-                "scoring",
-                round(cost, 8),
-                usage_sum,
-                latency,
-                None,
-            )
-        return True
+                return None
+            usage_sum, cost, latency = aggregate_turns(outs, it.usage)
+            it.status, it.cost, it.usage, it.latency_ms, it.error = "scoring", cost, usage_sum, latency, None
+        return outs
 
     async def _record_failed_attempt(
         self, item_id: str, attempt: int, session_id: str | None, cost: float, err: dict[str, Any]
@@ -2135,10 +2179,11 @@ class EvalService:
             return None if x is None or y is None else y - x
 
         ls, rs = a["stats"], b["stats"]
+        remote = bool(ls.get("remote") or rs.get("remote"))  # 远端不提供成本：成本差值不适用
         metric_deltas = {
             "pass_rate": diff(ls["pass_rate"], rs["pass_rate"]),
             "latency_p50_ms": diff(ls["latency_ms"]["p50"], rs["latency_ms"]["p50"]),
-            "cost": diff(ls["cost"], rs["cost"]),
+            "cost": None if remote else diff(ls["cost"], rs["cost"]),
             "tokens_total": (rs["tokens"]["prompt"] + rs["tokens"]["completion"])
             - (ls["tokens"]["prompt"] + ls["tokens"]["completion"]),
         }
@@ -2221,6 +2266,32 @@ class EvalService:
 
 def _b(v: int | None) -> bool | None:
     return None if v is None else bool(v)
+
+
+TRACE_ORDER = ("pending", "unavailable", "partial", "complete")
+
+
+def aggregate_turns(
+    turns: Sequence[TurnOut], prev: dict[str, Any] | None
+) -> tuple[dict[str, Any], float, int | None]:
+    """各轮的规范指标 -> Item 的 (usage, cost, latency_ms)。
+
+    远端为主的轮次其用时是 Trace 的远端用时：补齐前 / 未取得时为空，Item 用时随之为空（不用本地值顶替，
+    也不把缺失的轮次当 0 累加）。``usage.trace_status`` 取各轮中最差的一个，供界面标注远端口径与未取得。
+    """
+    usage: dict[str, Any] = {
+        k: sum(int((t.usage or {}).get(k, 0) or 0) for t in turns)
+        for k in ("prompt_tokens", "completion_tokens", "llm_calls", "tool_calls")
+    }
+    usage["turns"] = len(turns)
+    statuses = {(t.usage or {}).get("trace_status") for t in turns}
+    if remote := [s for s in TRACE_ORDER if s in statuses]:
+        usage["trace_status"] = remote[0]
+    for k in ("failed_attempts", "wasted_cost"):
+        if prev and k in prev:
+            usage[k] = prev[k]
+    latency = None if any(t.latency_ms is None for t in turns) else sum(t.latency_ms for t in turns)
+    return usage, round(sum(float(t.cost or 0.0) for t in turns), 8), latency
 
 
 def _with_failed_attempt(usage: dict[str, Any] | None, entry: dict[str, Any]) -> dict[str, Any]:
@@ -2316,6 +2387,7 @@ def _tool_deltas(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
 def _metric_deltas(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
     """各项指标的差值（右 - 左）。"""
     keys = [k for k in left["evaluators"] if k in right["evaluators"]]
+    remote = bool(left.get("remote") or right.get("remote"))
     return {
         "pass_rate": _delta(left["pass_rate"], right["pass_rate"]),
         "error_rate": _delta(left["error_rate"], right["error_rate"]),
@@ -2324,7 +2396,7 @@ def _metric_deltas(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any
         },
         "latency_ms": {p: _delta(left["latency_ms"][p], right["latency_ms"][p]) for p in ("p50", "p95")},
         "tokens": {k: _delta(left["tokens"][k], right["tokens"][k]) for k in ("prompt", "completion")},
-        "cost": _delta(left["cost"], right["cost"]),
-        "cost_new": _delta(left["cost_new"], right["cost_new"]),
+        "cost": None if remote else _delta(left["cost"], right["cost"]),
+        "cost_new": None if remote else _delta(left["cost_new"], right["cost_new"]),
         "tools": _tool_deltas(left["tools"], right["tools"]),
     }

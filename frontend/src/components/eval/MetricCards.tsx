@@ -33,12 +33,13 @@ export function MetricCards({ stats }: { stats: EvalStatsOut }) {
         />
       ))}
       <Metric
-        label="延迟 p50 / p95"
+        label={stats.remote ? 'HiAgent 用时 p50 / p95' : '延迟 p50 / p95'}
         value={
           <span className="text-xl">
             {formatDuration(stats.latency_ms?.p50)} / {formatDuration(stats.latency_ms?.p95)}
           </span>
         }
+        hint={stats.latency_missing ? `${stats.latency_missing} 次执行的远端用时未取得，不计入` : undefined}
         testId="metric-latency"
       />
       <Metric
@@ -47,7 +48,9 @@ export function MetricCards({ stats }: { stats: EvalStatsOut }) {
         hint={`输入 ${formatTokens(stats.tokens?.prompt)} · 输出 ${formatTokens(stats.tokens?.completion)}`}
         testId="metric-tokens"
       />
-      <Metric label="成本" value={formatCost(stats.cost)} hint={stats.cached ? `其中缓存命中 ${stats.cached} 次不重复计费` : undefined} testId="metric-cost" />
+      {!stats.remote && (
+        <Metric label="成本" value={formatCost(stats.cost)} hint={stats.cached ? `其中缓存命中 ${stats.cached} 次不重复计费` : undefined} testId="metric-cost" />
+      )}
       <Metric label="错误率" value={formatPercent(stats.error_rate, 1)} hint={`失败 ${stats.failed} / ${stats.items}`} testId="metric-error-rate" />
     </div>
   )

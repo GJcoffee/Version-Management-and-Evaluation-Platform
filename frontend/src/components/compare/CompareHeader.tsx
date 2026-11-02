@@ -44,10 +44,16 @@ function SidePanel({ label, side, summary, testid, baseline }: { label: string; 
       <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-xs text-muted-foreground" data-testid={`${testid}-totals`}>
         <span>{summary.turns} 轮</span>
         <span title="累计 tokens">{formatTokens(t.totalTokens)} tokens</span>
-        <span title="各轮耗时之和">{formatDuration(t.latencyMs || null)}</span>
-        <span title="累计成本">{formatCost(t.cost)}</span>
+        {t.remote ? (
+          <span title={t.syncing ? 'HiAgent Trace 正在后台补齐' : '各轮 HiAgent Trace 的运行时长（远端用时）之和'}>
+            HiAgent 用时 {t.syncing ? '同步中' : t.missing ? '未取得' : formatDuration(t.latencyMs || null)}
+          </span>
+        ) : (
+          <span title="各轮耗时之和">{formatDuration(t.latencyMs || null)}</span>
+        )}
+        {!t.remote && <span title="累计成本">{formatCost(t.cost)}</span>}
         <span title="LLM 调用 / 工具调用">
-          LLM ×{t.llmCalls} · 工具 ×{t.toolCalls}
+          {t.syncing ? 'LLM 同步中' : `LLM ×${t.llmCalls}`} · 工具 ×{t.toolCalls}
         </span>
       </div>
     </div>

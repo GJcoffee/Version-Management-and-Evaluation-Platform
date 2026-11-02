@@ -2,118 +2,146 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
-import { traceStatus, upstreamTiming, upstreamTotalMs } from './upstreamTiming'
-import { buildSessionState } from './sessionState'
+import { buildSessionState, totalMetrics } from './sessionState'
 import { buildStepTree } from './traceTree'
 import { TurnMetricsBar, turnElapsedMs } from './TurnMetricsBar'
 import { TraceViewer } from './TraceViewer'
-import { mk, T0, toolTurnEvents } from './testEvents'
+import { turnTiming, turnTtftMs } from './turnTiming'
+import { remoteBreakdown, remoteTitle, remoteValueText } from './upstreamTiming'
+import { mk, T0 } from './testEvents'
 
-const source = {
-  metric_source: 'actual_upstream_trace_timestamps',
-  upstream_run_ms: 31668, llm_api_ms: 21941, tool_execution_ms: 1082,
-  config_before_query_ms: 1908, trace_query_ms: 3510, config_after_query_ms: 1860,
-  sse_transport_ms: 32007, local_total_ms: 39925,
-}
-const metricLog = mk('log', source, { seq: 100, at: 40000 })
+/**
+ * HiAgent 轮次：规范指标以远端为主。本轮 SSE 阶段结束（turn.end）时 usage.trace_status 为 pending，
+ * 用时为空；后台补齐的 metrics 事件到达后改写为 Trace 的运行时长。本地测量不展示。
+ */
+const start = mk('turn.start', { input: { role: 'user', content: '查订单' }, history_len: 0 }, { seq: 1, at: 0 })
+const answer = mk('message.assistant', { message: { role: 'assistant', content: '已发货' } }, { seq: 2, at: 300 })
+const sse = mk('metrics', { scope: 'turn', source: 'hiagent_sse', usage: { prompt_tokens: 9, completion_tokens: 3 }, transport_ms: 21_000 },
+  { seq: 3, at: 301 })
+const end = (usage: Record<string, unknown> = { trace_status: 'pending', llm_calls: 0, tool_calls: 1, prompt_tokens: 9, completion_tokens: 3 }) =>
+  mk('turn.end', { status: 'completed', output: null, usage, cost: 0, latency_ms: null, ttft_ms: null }, { seq: 4, at: 310 })
+const complete = mk('metrics', {
+  scope: 'turn', source: 'hiagent_trace', usage: { prompt_tokens: 9, completion_tokens: 3 }, llm_calls: 2,
+  llm_api_ms: 15_000, tool_execution_ms: 1_000, upstream_run_ms: 20_000, trace_status: 'complete',
+}, { seq: 5, at: 400 })
+const unavailable = (note: string) => mk('metrics', { scope: 'turn', trace_status: 'unavailable', trace_note: note }, { seq: 5, at: 400 })
+const turnOf = (...events: ReturnType<typeof mk>[]) => buildSessionState(events).turns[0]
+const metric = (name: string) => document.querySelector(`[data-metric="${name}"]`)
 
-describe('HiAgent与本地耗时分开显示', () => {
-  it('采用原始Trace的远端整轮值，独立求和查询，不用LLM累计冒充整轮', () => {
-    expect(upstreamTiming([metricLog])).toEqual({
-      runMs: 31668, llmMs: 21941, toolMs: 1082, queryMs: 7278, transportMs: 32007, adapterMs: 39925,
-    })
-    expect(upstreamTiming([mk('log', { ...source, config_after_query_ms: undefined })])?.queryMs).toBeNull()
-    for (const upstream_run_ms of [-1, NaN, Infinity, '31668']) {
-      expect(upstreamTiming([mk('log', { ...source, upstream_run_ms })])).toBeNull()
-    }
-    expect(upstreamTiming([mk('log', { ...source, metric_source: 'other' })])).toBeNull()
-    expect(upstreamTiming([mk('log', { ...source, source_mode: 'recorded' })])).toBeNull()
-  })
-
-  it('混合来源、未结束或缺失上游指标时不展示误导性的会话合计', () => {
-    const turn = { ended: true, events: [metricLog] }
-    expect(upstreamTotalMs([turn, turn])).toBe(63336)
-    expect(upstreamTotalMs([turn, { ended: true, events: [] }])).toBeNull()
-    expect(upstreamTotalMs([{ ...turn, ended: false }])).toBeNull()
-    expect(upstreamTotalMs([])).toBeNull()
-  })
-
-  it('指标条同时展示各自口径，不改原本地耗时或Token', () => {
-    const turn = buildSessionState([...toolTurnEvents(), metricLog]).turns[0]
+describe('HiAgent 轮次：补齐前显示同步中，不用本地值顶替', () => {
+  it('turn.end 时用时为空、状态 pending；指标条显示同步中，不显示首 token 与成本', () => {
+    const turn = turnOf(start, answer, sse, end())
+    expect(turn.trace).toEqual({ status: 'pending', note: null })
+    expect(turn.metrics.latencyMs).toBeNull()
+    expect(turnTiming(turn, T0 + 60_000).durationMs).toBeNull() // 不会退回本地时间差
     render(<TurnMetricsBar turn={turn} />)
-    expect(screen.getByText('HiAgent 远端用时 31.668s')).toBeInTheDocument()
-    expect(screen.getByText('本地用时 0.575s')).toBeInTheDocument()
-    expect(screen.getByText('LLM累计 21.941s')).toBeInTheDocument()
-    expect(screen.getByText('工具累计 1.082s')).toBeInTheDocument()
-    expect(screen.getByText('查询 7.278s')).toBeInTheDocument()
-    expect(screen.getByText('SSE接收 32.007s')).toBeInTheDocument()
-    expect(turn.metrics.latencyMs).toBe(575)
+    expect(metric('latency')).toHaveTextContent('HiAgent 用时 同步中')
+    expect(metric('llm_calls')).toHaveTextContent('LLM 同步中')
+    expect(metric('tokens')).toHaveTextContent('9')
+    for (const gone of ['ttft', 'cost', 'sse_time', 'trace_fetch_time', 'query_time']) expect(metric(gone)).toBeNull()
+    expect(screen.queryByText(/本地/)).toBeNull()
   })
 
-  it('Trace头部同时显示来源耗时和本地范围', () => {
-    const events = [...toolTurnEvents(), metricLog]
-    render(<TraceViewer steps={buildStepTree(events)} durationMs={40838} upstream={upstreamTiming(events)} />)
-    expect(screen.getByTestId('trace-duration')).toHaveTextContent('本地用时 40.838s · HiAgent 远端用时 31.668s')
+  it('补齐事件到达后改写为远端用时、调用次数，并给出远端 LLM / 工具累计', () => {
+    const turn = turnOf(start, answer, sse, end(), complete)
+    expect(turn.trace).toEqual({ status: 'complete', note: null })
+    expect(turn.metrics).toMatchObject({ latencyMs: 20_000, ttftMs: null, llmCalls: 2, promptTokens: 9, completionTokens: 3 })
+    render(<TurnMetricsBar turn={turn} />)
+    expect(metric('latency')).toHaveTextContent('HiAgent 用时 20.000s')
+    expect(metric('llm_calls')).toHaveTextContent('LLM ×2')
+    expect(metric('llm_time')).toHaveTextContent('LLM累计 15.000s')
+    expect(metric('tool_time')).toHaveTextContent('工具累计 1.000s')
+    expect(metric('ttft')).toBeNull()
+    expect(metric('cost')).toBeNull()
+    expect(screen.queryByText(/SSE|本地|补齐 /)).toBeNull() // 传输、SSE、Trace 补齐耗时只是诊断，界面不显示
+  })
+
+  it('未取得：用时与 LLM 调用显示未取得，悬停给出原因', () => {
+    const turn = turnOf(start, answer, sse, end(), unavailable('Trace 查询 HTTP 401'))
+    expect(turn.trace).toEqual({ status: 'unavailable', note: 'Trace 查询 HTTP 401' })
+    render(<TurnMetricsBar turn={turn} />)
+    expect(metric('latency')).toHaveTextContent('HiAgent 用时 未取得')
+    expect(metric('latency')!.getAttribute('title')).toContain('Trace 查询 HTTP 401')
+    expect(metric('llm_calls')).toHaveTextContent('LLM 调用 未取得')
+    expect(metric('llm_calls')!.getAttribute('title')).toContain('Trace 查询 HTTP 401')
+  })
+
+  it('部分缺失仍用远端用时，原因在悬停里', () => {
+    const partial = mk('metrics', { scope: 'turn', source: 'hiagent_trace', upstream_run_ms: 5000, trace_status: 'partial',
+      trace_note: '1 个 span 未通过核验已跳过', llm_calls: 1 }, { seq: 5, at: 400 })
+    const turn = turnOf(start, answer, sse, end(), partial)
+    render(<TurnMetricsBar turn={turn} />)
+    expect(metric('latency')).toHaveTextContent('HiAgent 用时 5.000s')
+    expect(metric('latency')!.getAttribute('title')).toContain('1 个 span 未通过核验已跳过')
+  })
+
+  it('旧数据（Trace 指标先于 turn.end，turn.end 里是本地用时）也以远端为准', () => {
+    const old = mk('turn.end', { status: 'completed', output: null, usage: { trace_status: 'complete', llm_calls: 2, tool_calls: 1 },
+      cost: 0, latency_ms: 31_000, ttft_ms: 7000 }, { seq: 6, at: 500 })
+    const turn = turnOf(start, answer, complete, old)
+    expect(turn.metrics.latencyMs).toBe(20_000)
+    expect(turn.metrics.ttftMs).toBeNull()
+    expect(turnElapsedMs(turn, T0)).toBe(20_000)
+  })
+
+  it('HiAgent 没有返回整轮 token 时显示未提供，而不是 0', () => {
+    const noTokens = mk('metrics', { scope: 'turn', source: 'hiagent_sse', usage: {} }, { seq: 3, at: 301 })
+    render(<TurnMetricsBar turn={turnOf(start, answer, noTokens, end({ trace_status: 'pending' }))} />)
+    expect(metric('tokens')).toHaveTextContent('未提供')
+  })
+
+  it('没有远端数据的 agent 保持原有指标：用时、首 token、成本', () => {
+    const turn = turnOf(start, answer, mk('turn.end', { status: 'completed', output: null, usage: { llm_calls: 1, tool_calls: 0 },
+      cost: 0.002, latency_ms: 575, ttft_ms: 120 }, { seq: 4, at: 575 }))
+    expect(turn.trace).toBeNull()
+    render(<TurnMetricsBar turn={turn} />)
+    expect(metric('latency')).toHaveTextContent('575ms')
+    expect(metric('ttft')).toHaveTextContent('120ms')
+    expect(metric('cost')).toBeInTheDocument()
+    expect(turnTtftMs(turn)).toBe(120)
   })
 })
 
-const remoteMetrics = mk('metrics', {
-  scope: 'turn', source: 'hiagent_trace', upstream_run_ms: 20_000, llm_api_ms: 15_000,
-  tool_execution_ms: 1_000, trace_status: 'complete',
-}, { seq: 100, at: 560 })
-const fetchMetrics = mk('metrics', { scope: 'turn', transport_ms: 21_000, trace_fetch_ms: 12_000 }, { seq: 101, at: 570 })
-
-describe('本地用时与HiAgent远端用时', () => {
-  const turn = () => buildSessionState([...toolTurnEvents(), remoteMetrics, fetchMetrics]).turns[0]
-
-  it('指标条分别显示本地用时和远端用时，悬停说明 Trace 补齐不计入本地用时', () => {
-    render(<TurnMetricsBar turn={turn()} />)
-    expect(screen.getByText('HiAgent 远端用时 20.000s')).toBeInTheDocument()
-    expect(screen.getByText('本地用时 0.575s')).toBeInTheDocument()
-    const title = document.querySelector('[data-metric="latency"]')!.getAttribute('title')!
-    expect(title).toContain('Trace 补齐 12.000s')
-    expect(title).toContain('不计入')
-    expect(screen.getByText('Trace补齐 12.000s')).toBeInTheDocument()
+describe('会话合计与 Trace 面板的远端口径', () => {
+  it('汇总标出有远端数据、补齐中与未取得', () => {
+    const synced = turnOf(start, answer, sse, end(), complete)
+    const syncing = turnOf(start, answer, sse, end())
+    const missing = turnOf(start, answer, sse, end(), unavailable('x'))
+    expect(totalMetrics([synced])).toMatchObject({ remote: true, syncing: false, missing: false, latencyMs: 20_000 })
+    expect(totalMetrics([synced, syncing])).toMatchObject({ remote: true, syncing: true, latencyMs: 20_000 })
+    expect(totalMetrics([synced, missing])).toMatchObject({ remote: true, missing: true, latencyMs: 20_000 })
+    const local = turnOf(start, mk('turn.end', { status: 'completed', output: null, usage: {}, cost: 0, latency_ms: 100, ttft_ms: 10 },
+      { seq: 4, at: 100 }))
+    expect(totalMetrics([local])).toMatchObject({ remote: false, syncing: false, missing: false, latencyMs: 100 })
   })
 
-  it('Trace头部与指标条同口径', () => {
-    const t = turn()
-    render(<TraceViewer steps={t.steps} durationMs={t.metrics.latencyMs} upstream={upstreamTiming(t.events)} />)
-    expect(screen.getByTestId('trace-duration')).toHaveTextContent('本地用时 0.575s · HiAgent 远端用时 20.000s')
-    expect(screen.getByTestId('trace-duration').getAttribute('title')).toContain('Trace 补齐 12.000s')
+  it('Trace 头部显示远端用时、同步中或未取得，不显示本地用时', () => {
+    const synced = turnOf(start, answer, sse, end(), complete)
+    const { rerender } = render(<TraceViewer steps={synced.steps} durationMs={synced.metrics.latencyMs} trace={synced.trace} />)
+    expect(screen.getByTestId('trace-duration')).toHaveTextContent('HiAgent 用时 20.000s')
+    expect(screen.getByTestId('trace-duration')).not.toHaveTextContent('本地')
+    const syncing = turnOf(start, answer, sse, end())
+    rerender(<TraceViewer steps={syncing.steps} durationMs={null} trace={syncing.trace} />)
+    expect(screen.getByTestId('trace-duration')).toHaveTextContent('HiAgent 用时 同步中')
+    rerender(<TraceViewer steps={syncing.steps} durationMs={null} trace={{ status: 'unavailable', note: '凭据未提供' }} />)
+    expect(screen.getByTestId('trace-duration')).toHaveTextContent('HiAgent 用时 未取得')
+    expect(screen.getByTestId('trace-duration').getAttribute('title')).toContain('凭据未提供')
   })
 
-  it('等待 Trace 补查时，计时停在最终回复到达的时刻', () => {
-    const running = buildSessionState(toolTurnEvents().slice(0, 8)).turns[0] // 到 message.assistant 为止，尚无 turn.end
-    expect(running.ended).toBe(false)
-    expect(turnElapsedMs(running, T0 + 30_000)).toBe(571)
-  })
-})
-
-describe('Trace 未取得时说明原因', () => {
-  const unavailable = (note: string) => mk('metrics', { scope: 'turn', trace_status: 'unavailable', trace_note: note }, { seq: 90, at: 560 })
-
-  it('读取 Trace 状态与原因', () => {
-    expect(traceStatus([unavailable('凭据未提供 observe_headers')])).toEqual({
-      status: 'unavailable', note: '凭据未提供 observe_headers',
-    })
-    expect(traceStatus([remoteMetrics])).toEqual({ status: 'complete', note: null })
-    expect(traceStatus([mk('metrics', { trace_status: 'bogus' })])).toBeNull()
-    expect(traceStatus([])).toBeNull()
+  it('远端明细只取 Trace 汇总里的 LLM / 工具耗时', () => {
+    expect(remoteBreakdown([sse, complete])).toEqual({ llmMs: 15_000, toolMs: 1_000 })
+    expect(remoteBreakdown([sse])).toBeNull()
+    expect(remoteValueText({ status: 'pending', note: null }, null)).toBe('同步中')
+    expect(remoteValueText({ status: 'complete', note: null }, null)).toBe('未取得')
+    expect(remoteTitle({ status: 'pending', note: null }, 'HiAgent 用时')).toContain('后台补齐')
   })
 
-  it('LLM 调用数显示“未取得”并在悬停给出原因，而不是 ×0 或隐藏', () => {
+  it('上游输出阶段的接收时间差不冒充上游耗时', () => {
     const events = [
-      mk('turn.start', { input: { role: 'user', content: '你好' }, history_len: 0 }, { seq: 1, at: 0 }),
-      mk('message.assistant', { message: { role: 'assistant', content: '好' } }, { seq: 2, at: 100 }),
-      mk('metrics', { scope: 'turn', source: 'hiagent_sse', usage: { prompt_tokens: 9, completion_tokens: 3 } }, { seq: 3, at: 101 }),
-      unavailable('Trace 查询 HTTP 401'),
-      mk('turn.end', { status: 'completed', usage: { llm_calls: 0, tool_calls: 0 }, latency_ms: 100 }, { seq: 4, at: 120 }),
+      mk('span.start', { name: '上游输出阶段', attrs: { source: 'hiagent_sse', upstream_id: 'seg-1' } }, { step: 'stage:1', at: 0 }),
+      mk('span.end', { name: '上游输出阶段', attrs: { upstream_id: 'seg-1' } }, { step: 'stage:1', at: 4000 }),
     ]
-    render(<TurnMetricsBar turn={buildSessionState(events).turns[0]} />)
-    const item = document.querySelector('[data-metric="llm_calls"]')!
-    expect(item).toHaveTextContent('LLM 调用 未取得')
-    expect(item.getAttribute('title')).toContain('Trace 查询 HTTP 401')
+    expect(buildStepTree(events)[0].durationMs).toBeNull()
   })
 })
 

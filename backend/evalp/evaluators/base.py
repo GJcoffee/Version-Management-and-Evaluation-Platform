@@ -128,8 +128,25 @@ class Transcript:
         return "\n".join(t.input for t in self.turns)
 
     @property
-    def latency_ms(self) -> int:
-        return sum(t.latency_ms or 0 for t in self.turns)
+    def latency_ms(self) -> int | None:
+        """各轮规范用时之和（远端为主的轮次是远端用时）；任一轮未取得（补齐失败）则整体未知。"""
+        if any(t.latency_ms is None for t in self.turns):
+            return None
+        return sum(t.latency_ms for t in self.turns)
+
+    @property
+    def tokens_missing(self) -> bool:
+        """有远端数据的轮次（``usage.trace_status``）没有返回整轮 token：token 总量未知。"""
+        return any(
+            "trace_status" in t.usage
+            and (t.usage.get("prompt_tokens") is None or t.usage.get("completion_tokens") is None)
+            for t in self.turns
+        )
+
+    @property
+    def llm_calls_missing(self) -> bool:
+        """有轮次的远端 Trace 未取得：模型调用次数 / 步数未知。"""
+        return any(t.usage.get("trace_status") == "unavailable" for t in self.turns)
 
     @property
     def tokens(self) -> int:

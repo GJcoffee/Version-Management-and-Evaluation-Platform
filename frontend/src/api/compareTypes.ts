@@ -113,12 +113,16 @@ export interface ToolArgsDiff {
 }
 
 export interface AlignMetrics {
+  /** 有远端数据的轮次（HiAgent）是远端用时，补齐前 / 未取得为 null */
   latency_ms: number | null
   ttft_ms: number | null
   tokens: number
-  cost: number
+  /** 成本不适用（远端不提供）时为 null */
+  cost: number | null
   llm_calls: number
   tool_calls: number
+  /** 只有远端为主的轮次才有 */
+  trace_status?: 'pending' | 'complete' | 'partial' | 'unavailable'
 }
 
 export interface AlignTurn {

@@ -783,11 +783,19 @@ export interface SessionListParams {
 
 export type TurnStatus = 'running' | 'ok' | 'error' | 'cancelled' | 'timeout'
 
+/** 远端指标（HiAgent Trace）的补齐状态：pending 补齐中 / complete 完整 / partial 部分缺失 / unavailable 未取得 */
+export type TraceSyncStatus = 'pending' | 'complete' | 'partial' | 'unavailable'
+
 export interface Usage {
   prompt_tokens?: number
   completion_tokens?: number
   llm_calls?: number
   tool_calls?: number
+  /** 有远端数据的轮次才有：规范指标（用时等）以远端为准，补齐前为 pending */
+  trace_status?: TraceSyncStatus
+  trace_note?: string
+  /** HiAgent 适配器写入的本地传输耗时（只作诊断，不显示）；旧版 HiAgent 轮次靠它识别 */
+  transport_ms?: number
 }
 
 export interface TurnOutput {
