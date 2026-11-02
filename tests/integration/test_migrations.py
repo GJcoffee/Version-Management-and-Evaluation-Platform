@@ -117,7 +117,7 @@ def _revision(conn, version, number, host, created, reason, binding=True):
 
 
 def test_0008_revisions_are_numbered_oldest_first_and_the_latest_is_current(tmp_path):
-    """多个版本各有修订：按 created_at 从旧到新编为 #1…，最新的一条 = 最大号 = 当前生产；测试为空，旧运行快照不变。"""
+    """多个版本各有修订：按 created_at 从旧到新编为 #1…，最新的一条 = 最大号 = 当前生产；测试为空。"""
     path = tmp_path / "envs.db"
     run_migrations(path, "0007")
     plain = {"kind": "code", "transport": "adapter"}
