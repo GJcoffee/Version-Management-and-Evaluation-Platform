@@ -88,21 +88,21 @@ export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatP
 
   // 只记录手动切换的轮次，异步回放到达的历史也沿用默认折叠状态。
   const [foldStates, setFoldStates] = useState<ReadonlyMap<string, boolean>>(() => new Map())
-  const isCollapsed = (turnId: string) => foldStates.get(turnId) ?? defaultCollapsed
+  // 默认折叠只针对打开页面时已有的历史轮次；页面打开后才开始的轮次（刚发出的消息）默认展开，结束后也不收起。
+  // 历史轮次经 SSE 异步回放，回放途中也会短暂处于进行中，所以按开始时间而不是是否结束来判断。
+  const mountedAt = useRef(Date.now())
+  const isCollapsed = (t: TurnState) =>
+    foldStates.get(t.id) ?? (defaultCollapsed && !(t.startedAt && Date.parse(t.startedAt) >= mountedAt.current - 2000))
   const resetMeasurements = useRef(false)
   const foldScrollAnchor = useRef<{ index: number; offset: number } | null>(null)
   const pauseAutoScroll = useCallback(() => {
     stuckRef.current = false
     lastChangeAt.current = 0
   }, [])
-  const toggleTurn = useCallback((turnId: string) => {
+  const toggleTurn = useCallback((turnId: string, collapsed: boolean) => {
     pauseAutoScroll()
-    setFoldStates((prev) => {
-      const next = new Map(prev)
-      next.set(turnId, !(prev.get(turnId) ?? defaultCollapsed))
-      return next
-    })
-  }, [defaultCollapsed, pauseAutoScroll])
+    setFoldStates((prev) => new Map(prev).set(turnId, !collapsed))
+  }, [pauseAutoScroll])
   const setAllFolded = (folded: boolean) => {
     pauseAutoScroll()
     const pane = scrollRef.current
@@ -151,6 +151,8 @@ export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatP
     () => ({
       scrollToTurn: (turnId) => {
         pendingScroll.current = turnId
+        // 跳转会把目标移进视野，未挂载的轮次也可能被重新测量：和批量开合一样清掉测量缓存，否则落点会漂移
+        resetMeasurements.current = true
         setFoldStates((prev) => {
           if (prev.get(turnId) === false) return prev
           const next = new Map(prev)
@@ -168,6 +170,11 @@ export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatP
     pendingScroll.current = null
     stuckRef.current = false
     if (virtual) {
+      if (resetMeasurements.current) {
+        // 目标原本就是展开的：开合状态没变，上面的测量 effect 没有消费这个标记
+        resetMeasurements.current = false
+        virt.measure()
+      }
       virt.scrollToIndex(
         turns.findIndex((t) => t.id === turnId),
         { align: 'start' },
@@ -286,7 +293,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatP
                 >
                   <TurnView
                     turn={t}
-                    fold={{ ordinal: v.index + 1, collapsed: isCollapsed(t.id), onToggle: () => toggleTurn(t.id) }}
+                    fold={{ ordinal: v.index + 1, collapsed: isCollapsed(t), onToggle: () => toggleTurn(t.id, isCollapsed(t)) }}
                     sessionId={sessionId}
                     selected={selectedTurnId === t.id}
                     onSelectTurn={onSelectTurn}
@@ -304,7 +311,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatP
               <TurnView
                 key={t.id}
                 turn={t}
-                fold={{ ordinal: i + 1, collapsed: isCollapsed(t.id), onToggle: () => toggleTurn(t.id) }}
+                fold={{ ordinal: i + 1, collapsed: isCollapsed(t), onToggle: () => toggleTurn(t.id, isCollapsed(t)) }}
                 sessionId={sessionId}
                 selected={selectedTurnId === t.id}
                 onSelectTurn={onSelectTurn}

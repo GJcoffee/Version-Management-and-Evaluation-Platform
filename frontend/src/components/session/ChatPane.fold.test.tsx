@@ -5,7 +5,7 @@ import { createRef } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ChatPane, type ChatPaneHandle } from './ChatPane'
 import { buildSessionState } from './sessionState'
-import { mk, toolTurnEvents } from './testEvents'
+import { T0, mk, toolTurnEvents } from './testEvents'
 
 function wrap(ui: React.ReactNode) {
   return <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>{ui}</QueryClientProvider>
@@ -42,6 +42,21 @@ describe('ChatPane 按轮折叠', () => {
     expect(screen.getAllByTestId('user-message')).toHaveLength(2)
     await userEvent.click(screen.getByRole('button', { name: '全部折叠' }))
     expect(screen.queryByTestId('user-message')).toBeNull()
+  })
+
+  it('页面打开后才开始的轮次（刚发出的消息）默认展开，结束后也不收起，可手动折叠', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(T0 - 1000) // 页面在这些轮次开始前打开
+    const { rerender } = render(wrap(<ChatPane turns={runningTurn()} defaultCollapsed />))
+    expect(screen.getByTestId('turn')).not.toHaveAttribute('data-collapsed')
+    expect(screen.getByTestId('user-message')).toHaveTextContent('进行中的问题')
+    const ended = buildSessionState([
+      mk('turn.start', { input: { role: 'user', content: '进行中的问题' }, history_len: 2 }, { seq: 40, turn: 'trn_3' }),
+      mk('turn.end', { status: 'completed', usage: {} }, { seq: 41, turn: 'trn_3', at: 500 }),
+    ]).turns
+    rerender(wrap(<ChatPane turns={ended} defaultCollapsed />))
+    expect(screen.getByTestId('turn')).not.toHaveAttribute('data-collapsed')
+    await userEvent.click(screen.getByTestId('turn-header'))
+    expect(screen.getByTestId('turn')).toHaveAttribute('data-collapsed')
   })
 
   it.each(['单轮', '全部'] as const)('%s展开保持滚动位置，媒体加载完成后也不跳到底部', async (mode) => {
