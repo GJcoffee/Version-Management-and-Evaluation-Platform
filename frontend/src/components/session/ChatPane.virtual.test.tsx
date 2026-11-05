@@ -25,6 +25,7 @@ beforeAll(() => {
   Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 800 })
 })
 afterEach(() => {
+  vi.restoreAllMocks()
   delete (HTMLElement.prototype as unknown as { scrollHeight?: number }).scrollHeight
 })
 
@@ -169,6 +170,19 @@ describe('ChatPane 虚拟滚动', () => {
     expect(screen.queryByTestId('user-message')).toBeNull()
     await userEvent.click(screen.getByRole('button', { name: '全部展开' }))
     await waitFor(() => expect(lastGap()).toBe(TURN_H))
+  })
+
+  it('单轮展开的高度测量即使紧跟内容更新，也保持当前位置', async () => {
+    const { rerender } = render(wrap(<ChatPane turns={manyTurns(300)} defaultCollapsed />))
+    const { pane, total, fireScroll } = setupPane()
+    rerender(wrap(<ChatPane turns={manyTurns(301)} defaultCollapsed />))
+    pane.scrollTop = total() - VIEWPORT
+    fireScroll()
+    await screen.findByText('问题 301')
+    const before = pane.scrollTop
+    await userEvent.click(within(screen.getAllByTestId('turn').at(-1)!).getByRole('button', { name: /第 301 轮/ }))
+    expect(pane.scrollTop).toBe(before)
+    expect(screen.getByTestId('user-message')).toHaveTextContent('问题 301')
   })
 
   it('scrollToTurn 用 virtualizer 滚到目标轮次，已折叠的先展开', async () => {

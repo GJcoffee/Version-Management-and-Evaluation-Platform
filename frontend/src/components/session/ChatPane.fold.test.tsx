@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createRef } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -25,6 +25,44 @@ function runningTurn() {
 afterEach(() => vi.restoreAllMocks())
 
 describe('ChatPane 按轮折叠', () => {
+  it('打开会话默认折叠每一轮，异步历史回放同样折叠，并保留用户的展开选择', async () => {
+    const { rerender } = render(wrap(<ChatPane turns={[]} loading defaultCollapsed />))
+    rerender(wrap(<ChatPane turns={twoTurns().slice(0, 1)} defaultCollapsed />))
+    const first = screen.getByTestId('turn')
+    expect(first).toHaveAttribute('data-collapsed')
+    expect(within(first).getByRole('button', { name: /第 1 轮/ })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByTestId('user-message')).toBeNull()
+    await userEvent.click(within(first).getByTestId('turn-header'))
+    rerender(wrap(<ChatPane turns={twoTurns()} defaultCollapsed />))
+    const turns = screen.getAllByTestId('turn')
+    expect(turns[0]).not.toHaveAttribute('data-collapsed')
+    expect(turns[1]).toHaveAttribute('data-collapsed')
+    expect(within(turns[1]).getByTestId('turn-summary')).toHaveTextContent('第二个问题')
+    await userEvent.click(screen.getByRole('button', { name: '全部展开' }))
+    expect(screen.getAllByTestId('user-message')).toHaveLength(2)
+    await userEvent.click(screen.getByRole('button', { name: '全部折叠' }))
+    expect(screen.queryByTestId('user-message')).toBeNull()
+  })
+
+  it.each(['单轮', '全部'] as const)('%s展开保持滚动位置，媒体加载完成后也不跳到底部', async (mode) => {
+    const turns = buildSessionState(toolTurnEvents().map((e) =>
+      e.type === 'llm.response' && e.payload.content
+        ? { ...e, payload: { ...e.payload, content: '![测试图片](https://example.com/image.png)' } }
+        : e,
+    )).turns
+    render(wrap(<ChatPane turns={turns} defaultCollapsed />))
+    const pane = screen.getByTestId('chat-pane')
+    Object.defineProperty(pane, 'clientHeight', { configurable: true, value: 600 })
+    Object.defineProperty(pane, 'scrollHeight', { configurable: true, get: () => screen.queryByTestId('user-message') ? 2400 : 800 })
+    pane.scrollTop = 200
+    fireEvent.scroll(pane)
+    await userEvent.click(mode === '单轮' ? screen.getByRole('button', { name: /第 1 轮/ }) : screen.getByRole('button', { name: '全部展开' }))
+    expect(pane.scrollTop).toBe(200)
+    fireEvent.load(screen.getByRole('img'))
+    expect(pane.scrollTop).toBe(200)
+    expect(pane.style.overflowAnchor).toBe('none')
+  })
+
   it('每轮顶部有标题行：第 N 轮、输入摘要、状态与六项统计', () => {
     render(wrap(<ChatPane turns={twoTurns()} />))
     const headers = screen.getAllByTestId('turn-header')
