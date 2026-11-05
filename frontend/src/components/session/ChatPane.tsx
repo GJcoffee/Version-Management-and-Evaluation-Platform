@@ -43,6 +43,8 @@ export interface ChatPaneProps {
   emptyState?: ReactNode
   /** 新内容到达时自动滚到底部（用户向上滚动后暂停），默认 true */
   autoScroll?: boolean
+  /** 未手动切换过的轮次默认折叠，适用于打开会话查看历史 */
+  defaultCollapsed?: boolean
   className?: string
 }
 
@@ -66,6 +68,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatP
   onSelectStep,
   emptyState,
   autoScroll = true,
+  defaultCollapsed = false,
   className,
 }, ref) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -83,26 +86,62 @@ export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatP
   })
   const totalSize = virtual ? virt.getTotalSize() : 0
 
-  // 折叠的轮次（默认全部展开，所以新到达的流式轮次天然是展开的）
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
-  const toggleTurn = useCallback((turnId: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev)
-      if (!next.delete(turnId)) next.add(turnId)
-      return next
-    })
+  // 只记录手动切换的轮次，异步回放到达的历史也沿用默认折叠状态。
+  const [foldStates, setFoldStates] = useState<ReadonlyMap<string, boolean>>(() => new Map())
+  // 默认折叠只针对打开页面时已有的历史轮次；页面打开后才开始的轮次（刚发出的消息）默认展开，结束后也不收起。
+  // 历史轮次经 SSE 异步回放，回放途中也会短暂处于进行中，所以按开始时间而不是是否结束来判断。
+  const mountedAt = useRef(Date.now())
+  const isCollapsed = (t: TurnState) =>
+    foldStates.get(t.id) ?? (defaultCollapsed && !(t.startedAt && Date.parse(t.startedAt) >= mountedAt.current - 2000))
+  const resetMeasurements = useRef(false)
+  const foldScrollAnchor = useRef<{ index: number; offset: number } | null>(null)
+  const pauseAutoScroll = useCallback(() => {
+    stuckRef.current = false
+    lastChangeAt.current = 0
   }, [])
-  const collapseAll = () => setCollapsed(new Set(turns.map((t) => t.id)))
-  const expandAll = () => setCollapsed(new Set())
+  const toggleTurn = useCallback((turnId: string, collapsed: boolean) => {
+    pauseAutoScroll()
+    setFoldStates((prev) => new Map(prev).set(turnId, !collapsed))
+  }, [pauseAutoScroll])
+  const setAllFolded = (folded: boolean) => {
+    pauseAutoScroll()
+    const pane = scrollRef.current
+    const paneTop = pane?.getBoundingClientRect().top ?? 0
+    const anchor = virtual && pane
+      ? Array.from(pane.querySelectorAll<HTMLElement>('[data-index]')).find((el) => el.getBoundingClientRect().bottom > paneTop)
+      : undefined
+    foldScrollAnchor.current = anchor && pane ? {
+      index: Number(anchor.dataset.index),
+      offset: paneTop + (parseFloat(getComputedStyle(pane).paddingTop) || 0) - anchor.getBoundingClientRect().top,
+    } : null
+    resetMeasurements.current = true
+    setFoldStates(new Map(turns.map((t) => [t.id, folded])))
+  }
+  const collapseAll = () => setAllFolded(true)
+  const expandAll = () => setAllFolded(false)
 
-  // 折叠 / 展开会改变轮次高度：虚拟滚动下清掉测量缓存，并重新测量当前已挂载的轮次
-  const measuredFor = useRef(collapsed)
+  // 单轮开合只重新测量已挂载的内容，保留屏幕上方的高度缓存，避免标题移位；
+  // 批量开合同时影响未挂载的轮次，需要清掉全部测量缓存。
+  const measuredFor = useRef(foldStates)
   useLayoutEffect(() => {
-    if (!virtual || measuredFor.current === collapsed) return
-    measuredFor.current = collapsed
-    virt.measure()
+    if (!virtual || measuredFor.current === foldStates) return
+    measuredFor.current = foldStates
+    if (resetMeasurements.current) {
+      resetMeasurements.current = false
+      virt.measure()
+    }
     scrollRef.current!.querySelectorAll<HTMLElement>('[data-index]').forEach((el) => virt.measureElement(el))
-  }, [collapsed, virtual, virt])
+  }, [foldStates, virtual, virt])
+
+  useLayoutEffect(() => {
+    const anchor = foldScrollAnchor.current
+    // 等新总高度提交到 DOM 后再定位，避免浏览器按旧高度把滚动位置截断。
+    if (!anchor || totalSize !== virt.getTotalSize()) return
+    foldScrollAnchor.current = null
+    const item = virt.measurementsCache[anchor.index]
+    const target = item ? item.start + anchor.offset : null
+    if (target !== null && Math.abs(scrollRef.current!.scrollTop - target) > 0.5) virt.scrollToOffset(target)
+  })
 
   // 滚动到指定轮次：先展开（状态更新），在提交后的布局阶段再滚动，这样量到的是展开后的高度
   const pendingScroll = useRef<string | null>(null)
@@ -112,10 +151,12 @@ export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatP
     () => ({
       scrollToTurn: (turnId) => {
         pendingScroll.current = turnId
-        setCollapsed((prev) => {
-          if (!prev.has(turnId)) return prev
-          const next = new Set(prev)
-          next.delete(turnId)
+        // 跳转会把目标移进视野，未挂载的轮次也可能被重新测量：和批量开合一样清掉测量缓存，否则落点会漂移
+        resetMeasurements.current = true
+        setFoldStates((prev) => {
+          if (prev.get(turnId) === false) return prev
+          const next = new Map(prev)
+          next.set(turnId, false)
           return next
         })
         requestRender()
@@ -129,6 +170,11 @@ export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatP
     pendingScroll.current = null
     stuckRef.current = false
     if (virtual) {
+      if (resetMeasurements.current) {
+        // 目标原本就是展开的：开合状态没变，上面的测量 effect 没有消费这个标记
+        resetMeasurements.current = false
+        virt.measure()
+      }
       virt.scrollToIndex(
         turns.findIndex((t) => t.id === turnId),
         { align: 'start' },
@@ -210,7 +256,12 @@ export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatP
         onScroll={onScroll}
         onLoadCapture={onMediaLoad}
         onLoadedMetadataCapture={onMediaLoad}
+        onClickCapture={(event) => {
+          // 工具卡片等内部内容展开后，异步媒体加载和虚拟高度修正也不应把视野推到底部。
+          if (event.target instanceof Element && event.target.closest('button[aria-expanded]')) pauseAutoScroll()
+        }}
         className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
+        style={{ overflowAnchor: 'none' }}
         data-testid="chat-pane"
       >
         {turns.length === 0 ? (
@@ -242,7 +293,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatP
                 >
                   <TurnView
                     turn={t}
-                    fold={{ ordinal: v.index + 1, collapsed: collapsed.has(t.id), onToggle: () => toggleTurn(t.id) }}
+                    fold={{ ordinal: v.index + 1, collapsed: isCollapsed(t), onToggle: () => toggleTurn(t.id, isCollapsed(t)) }}
                     sessionId={sessionId}
                     selected={selectedTurnId === t.id}
                     onSelectTurn={onSelectTurn}
@@ -260,7 +311,7 @@ export const ChatPane = forwardRef<ChatPaneHandle, ChatPaneProps>(function ChatP
               <TurnView
                 key={t.id}
                 turn={t}
-                fold={{ ordinal: i + 1, collapsed: collapsed.has(t.id), onToggle: () => toggleTurn(t.id) }}
+                fold={{ ordinal: i + 1, collapsed: isCollapsed(t), onToggle: () => toggleTurn(t.id, isCollapsed(t)) }}
                 sessionId={sessionId}
                 selected={selectedTurnId === t.id}
                 onSelectTurn={onSelectTurn}

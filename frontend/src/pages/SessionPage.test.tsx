@@ -79,6 +79,24 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('SessionPage 响应式布局', () => {
+  it('打开会话时每轮默认折叠，只显示标题、摘要和指标', async () => {
+    stubViewport(false)
+    loadTwoTurns()
+    renderPage()
+    await screen.findByTestId('session-page')
+    const turns = screen.getAllByTestId('turn')
+    expect(turns).toHaveLength(2)
+    for (const turn of turns) {
+      expect(turn).toHaveAttribute('data-collapsed')
+      expect(within(turn).getByTestId('turn-header-metrics')).toBeInTheDocument()
+      expect(within(turn).queryByTestId('user-message')).toBeNull()
+    }
+    await userEvent.click(within(turns[0]).getByRole('button', { name: /第 1 轮/ }))
+    expect(within(turns[0]).getByTestId('user-message')).toBeInTheDocument()
+    expect(turns[1]).toHaveAttribute('data-collapsed')
+    expect(screen.getByTestId('trace-turn')).toHaveTextContent('第 2 / 2 轮')
+  })
+
   it('宽屏：Trace 作为右侧栏默认展开，可切换加宽', async () => {
     stubViewport(false)
     renderPage()
@@ -106,6 +124,7 @@ describe('SessionPage 响应式布局', () => {
     stubViewport(true)
     renderPage()
     await screen.findByTestId('session-page')
+    await userEvent.click(screen.getByTestId('turn-header'))
     await userEvent.click(screen.getByTestId('user-message'))
     expect(screen.queryByTestId('trace-panel')).toBeNull()
     await userEvent.click(screen.getByTestId('select-turn'))
@@ -162,7 +181,7 @@ describe('SessionPage 总用时', () => {
     ]).turns
     renderPage()
     expect(await screen.findByTestId('session-latency')).toHaveTextContent(`总用时 ${formatDuration(142_470)}`)
-    for (const bar of screen.getAllByTestId('turn-metrics')) {
+    for (const bar of screen.getAllByTestId('turn-header-metrics')) {
       expect(bar.querySelector('[data-metric="latency"]')).toHaveTextContent(formatDuration(71_235))
     }
     expect(screen.getByTestId('trace-duration')).toHaveTextContent(formatDuration(71_235))
@@ -220,7 +239,6 @@ describe('SessionPage Trace 轮次切换', () => {
     renderPage()
     expect(await screen.findByTestId('trace-turn')).toHaveTextContent('第 2 / 2 轮')
     expect(screen.getByRole('button', { name: '下一轮' })).toBeDisabled()
-    await userEvent.click(within(turnEl(0)).getByTestId('turn-header')) // 折叠第 1 轮
     expect(turnEl(0)).toHaveAttribute('data-collapsed')
 
     await userEvent.click(screen.getByRole('button', { name: '上一轮' }))
@@ -240,7 +258,7 @@ describe('SessionPage Trace 轮次切换', () => {
     renderPage()
     const select = await screen.findByRole('combobox', { name: '跳到指定轮次' })
     expect(within(select).getAllByRole('option').map((o) => o.textContent)).toEqual(['第 1 轮 · 查订单 A001', '第 2 轮 · 第二个问题'])
-    await userEvent.click(within(turnEl(0)).getByTestId('turn-header'))
+    expect(turnEl(0)).toHaveAttribute('data-collapsed')
     await userEvent.selectOptions(select, 'trn_1')
     expect(screen.getByTestId('trace-turn')).toHaveTextContent('第 1 / 2 轮')
     expect(turnEl(0)).not.toHaveAttribute('data-collapsed')
@@ -254,7 +272,7 @@ describe('SessionPage Trace 轮次切换', () => {
     await screen.findByTestId('session-page')
     await userEvent.click(screen.getByTestId('toggle-trace'))
     expect(await screen.findByTestId('trace-panel')).toHaveAttribute('data-layout', 'drawer')
-    await userEvent.click(within(turnEl(0)).getByTestId('turn-header'))
+    expect(turnEl(0)).toHaveAttribute('data-collapsed')
     await userEvent.click(screen.getByRole('button', { name: '上一轮' }))
     expect(screen.getByTestId('trace-turn')).toHaveTextContent('第 1 / 2 轮')
     expect(turnEl(0)).not.toHaveAttribute('data-collapsed')
@@ -265,6 +283,7 @@ describe('SessionPage Trace 轮次切换', () => {
     loadTwoTurns()
     renderPage()
     await screen.findByTestId('trace-turn')
+    await userEvent.click(within(turnEl(0)).getByTestId('turn-header'))
     await userEvent.click(within(turnEl(0)).getByTestId('select-turn'))
     expect(screen.getByTestId('trace-turn')).toHaveTextContent('第 1 / 2 轮')
   })

@@ -286,6 +286,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
             turns={stream.turns}
             sessionId={sessionId}
             loading={stream.loading}
+            defaultCollapsed
             selectedTurnId={traceTurn?.id ?? null}
             onSelectTurn={selectTurn}
             onOpenTrace={(turnId) => {
