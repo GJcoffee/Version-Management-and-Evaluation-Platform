@@ -7,7 +7,7 @@ import type { AdapterBinding, AdapterEnvironments, EnvironmentRevision, Environm
 import { AdapterSection } from './AdapterSection'
 
 const binding = (published: string): AdapterBinding => ({
-  id: 'hiagent', version: '1.0.0', credential_ref: 'adapter:key',
+  adapter: 'hiagent', major: 1, credential_ref: 'adapter:key',
   config: { base_url: 'https://hiagent.example', app_id: 'app-1', user_id: 'u', published_version: published },
 })
 const state = (environment: 'production' | 'test', revision: number, published: string | null): EnvironmentState => ({
@@ -20,18 +20,20 @@ const revision = (n: number, published: string, source: EnvironmentRevision['sou
   reason: `说明 ${published}`, origin: null, created_at: '2026-11-01T00:00:00Z',
 })
 
-function setup(envs: AdapterEnvironments) {
+function setup(envs: AdapterEnvironments, histories?: { production: EnvironmentRevision[]; test: EnvironmentRevision[] }) {
   const get = vi.spyOn(api, 'get').mockImplementation(async (path) => {
     if (path === '/adapter-environments') return envs as never
     if (path === '/adapter-environments/production/revisions') {
-      return [revision(2, '48', 'push', true), revision(1, '47', 'migration')] as never
+      return (histories?.production ?? [revision(2, '48', 'push', true), revision(1, '47', 'migration')]) as never
     }
-    if (path === '/adapter-environments/test/revisions') return [revision(3, '49', 'edit', true)] as never
+    if (path === '/adapter-environments/test/revisions') return (histories?.test ?? [revision(3, '49', 'edit', true)]) as never
     if (path === '/adapters') return [{
-      id: 'hiagent', name: 'HiAgent', version: '1.0.0', capabilities: [],
+      adapter: 'hiagent', major: 1, name: 'HiAgent', capabilities: ['streaming'],
+      impl_digest: 'a'.repeat(64), sunset: null,
       config_schema: { properties: { published_version: { type: 'string' } } },
     }] as never
     if (path === '/adapters/credentials') return [{ ref: 'adapter:key', name: 'key', adapter_id: 'hiagent' }] as never
+    if (path === '/adapters/accounts') return [] as never
     throw new Error(`unexpected GET ${path}`)
   })
   const change = { applied: true, environment: 'production', before: envs.production, target: envs.production }
@@ -50,17 +52,56 @@ const differing: AdapterEnvironments = {
 describe('设置 · 适配器', () => {
   afterEach(() => vi.restoreAllMocks())
 
+  it('历史乱序时默认取最大存档号，生产与测试选择独立', async () => {
+    setup(differing, {
+      production: [revision(1, '47', 'migration'), revision(2, '48', 'push', true)],
+      test: [revision(2, '48', 'edit'), revision(3, '49', 'edit', true)],
+    })
+    const production = await screen.findByTestId('env-history-production')
+    const test = screen.getByTestId('env-history-test')
+    await within(production).findByText('当前')
+    expect(within(production).getAllByRole('row')[1]).toHaveTextContent('#2')
+    expect(within(test).getAllByRole('row')[1]).toHaveTextContent('#3')
+    await userEvent.click(within(production).getByRole('button', { name: /生产存档历史/ }))
+    await userEvent.selectOptions(within(production).getByLabelText('选择生产存档'), '1')
+    expect(within(test).getByRole('button')).toHaveAttribute('aria-expanded', 'false')
+    expect(within(test).getAllByRole('row')[1]).toHaveTextContent('#3')
+    await userEvent.click(within(test).getByRole('button'))
+    await userEvent.selectOptions(within(test).getByLabelText('选择测试存档'), '2')
+    expect(within(production).getAllByRole('row')[1]).toHaveTextContent('#1')
+  })
+
+  it('没有存档时显示空状态，展开也不出现选择器', async () => {
+    setup(differing, { production: [], test: [] })
+    const history = await screen.findByTestId('env-history-production')
+    expect(await within(history).findByText('还没有存档。')).toBeInTheDocument()
+    await userEvent.click(within(history).getByRole('button'))
+    expect(within(history).queryByRole('combobox')).toBeNull()
+  })
+
   it('生产 / 测试两张卡片显示适配器、关键配置、存档号，下面是两个环境的存档历史', async () => {
     setup(differing)
     const production = await screen.findByTestId('env-card-production')
     expect(within(production).getByTestId('env-revision-production')).toHaveTextContent('存档 #2')
-    expect(production).toHaveTextContent('HiAgent 1.0.0 · 发布版本 48 · app app-1')
+    expect(production).toHaveTextContent('HiAgent · 实现 v1 · 发布版本 48 · app app-1')
     expect(production).toHaveTextContent('https://hiagent.example')
     expect(screen.getByTestId('env-card-test')).toHaveTextContent('发布版本 49')
     const history = await screen.findByTestId('env-history-production')
-    await within(history).findByText('迁移')
+    await within(history).findByText('推送')
     expect(within(history).getByText('当前')).toBeInTheDocument()
-    expect(within(history).getAllByRole('row')).toHaveLength(3)
+    expect(within(history).getAllByRole('row')).toHaveLength(2)
+    expect(within(history).queryByText('迁移')).toBeNull()
+    const toggle = within(history).getByRole('button', { name: /生产存档历史/ })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(toggle)
+    await userEvent.selectOptions(within(history).getByLabelText('选择生产存档'), '1')
+    expect(within(history).getByText('迁移')).toBeInTheDocument()
+    expect(within(history).queryByText('当前')).toBeNull()
+    expect(within(history).getAllByRole('row')).toHaveLength(2)
+    await userEvent.click(toggle)
+    expect(within(history).queryByLabelText('选择生产存档')).toBeNull()
+    expect(within(history).getByText('当前')).toBeInTheDocument()
+    expect(within(history).queryByText('迁移')).toBeNull()
     expect(await within(screen.getByTestId('env-history-test')).findByText('编辑')).toBeInTheDocument()
   })
 

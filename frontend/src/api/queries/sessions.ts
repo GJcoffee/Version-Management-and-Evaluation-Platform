@@ -1,4 +1,4 @@
-import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../client'
 import type {
   Page,
@@ -26,6 +26,7 @@ function listQuery(p: SessionListParams, cursor?: string) {
     agent_id: p.agent_id,
     version_id: p.version_id,
     mode: p.mode,
+    include_archived: p.include_archived ?? false,
     q: p.q,
     limit: p.limit ?? 50,
     cursor,
@@ -37,7 +38,6 @@ export function useSessions(params: SessionListParams = {}, opts: { refetchInter
   return useQuery({
     queryKey: sessionKeys.list(params),
     queryFn: () => api.get<Page<Session>>('/sessions', { query: listQuery(params) }),
-    placeholderData: keepPreviousData,
     refetchInterval: opts.refetchInterval,
   })
 }
@@ -49,7 +49,6 @@ export function useInfiniteSessions(params: SessionListParams = {}) {
     queryFn: ({ pageParam }) => api.get<Page<Session>>('/sessions', { query: listQuery(params, pageParam) }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
-    placeholderData: keepPreviousData,
   })
 }
 
@@ -117,6 +116,27 @@ export function useTurn(turnId: string | undefined, enabled = true) {
     queryFn: () => api.get<Turn>(`/turns/${turnId}`),
     enabled: !!turnId && enabled,
     refetchInterval: (query) => query.state.data?.status === 'running' ? 500 : false,
+  })
+}
+
+/** 重新查询该轮 HiAgent Trace（Trace 未取得后可稍后重试）；仍未取得时只更新原因 */
+export interface TraceRefreshOptions {
+  config_source: 'current' | 'original'
+  environment?: 'production' | 'test'
+  credential_ref?: string
+}
+export function refreshTrace(turnId: string, options?: TraceRefreshOptions): Promise<Turn> {
+  return api.post<Turn>(`/turns/${turnId}/trace/refresh`, { body: options })
+}
+
+export function useRefreshTrace() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ turnId, options }: { turnId: string; options?: TraceRefreshOptions }) => refreshTrace(turnId, options),
+    onSettled: (_data, _error, variables) => {
+      void qc.invalidateQueries({ queryKey: sessionKeys.all })
+      void qc.invalidateQueries({ queryKey: ['turn', variables.turnId] })
+    },
   })
 }
 

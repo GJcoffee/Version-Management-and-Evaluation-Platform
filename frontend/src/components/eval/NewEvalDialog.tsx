@@ -4,7 +4,7 @@ import { useAgent, useAgents } from '@/api/queries/agents'
 import { useAssetRevisions, useAssets } from '@/api/queries/assets'
 import { useDatasetCases } from '@/api/queries/datasets'
 import { useCreateEval, useEstimateEval } from '@/api/queries/evals'
-import type { EvalCreateRequest, EvalEstimate } from '@/api/evalTypes'
+import type { EvalCreateRequest, EvalEstimate, EvalTurnMiddlewares } from '@/api/evalTypes'
 import { useVersions } from '@/api/queries/versions'
 import type { VersionSummary } from '@/api/types'
 import { AssetRefPicker } from '@/components/AssetRefPicker'
@@ -13,7 +13,7 @@ import { IncludeArchivedToggle, useArchiveFilter } from '@/components/IncludeArc
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Dialog } from '@/components/ui/Dialog'
-import { Field, Input } from '@/components/ui/Input'
+import { Field, Input, Textarea } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { formatApiError } from '@/lib/apiError'
 import { parseAssetRef } from '@/lib/assetRef'
@@ -89,6 +89,7 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
   const [concurrency, setConcurrency] = useState('8')
   const [maxCost, setMaxCost] = useState('')
   const [maxTokens, setMaxTokens] = useState('')
+  const [middlewareText, setMiddlewareText] = useState('')
   const [estimate, setEstimate] = useState<{ key: string; data: EvalEstimate } | null>(null)
   const [showErrors, setShowErrors] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -115,6 +116,19 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
   const repeatsN = toPositiveInt(repeats)
   const concurrencyN = toPositiveInt(concurrency)
   const problems: string[] = []
+  let middlewarePlan: EvalTurnMiddlewares | undefined
+  if (middlewareText.trim()) {
+    try {
+      const value: unknown = JSON.parse(middlewareText)
+      if (!value || typeof value !== 'object' || Array.isArray(value) ||
+          Object.entries(value).some(([stage, steps]) => !/^[1-9]\d*$/.test(stage) || !Array.isArray(steps))) {
+        throw new Error()
+      }
+      middlewarePlan = value as EvalTurnMiddlewares
+    } catch {
+      problems.push('逐轮中间件须为 JSON 对象，轮号从 1 开始，每轮配置为数组')
+    }
+  }
   if (!agentId) problems.push('请选择 Agent')
   else if (selection.length === 0) problems.push('请至少选择一个版本')
   if (!dataset) problems.push('请选择数据集')
@@ -142,6 +156,7 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
       repeats: repeatsN!,
       concurrency: concurrencyN!,
       budget: Object.keys(budget).length > 0 ? budget : undefined,
+      turn_middlewares: middlewarePlan,
       ...environmentBody(env.environment),
     }
   }
@@ -319,6 +334,20 @@ export function NewEvalDialog({ agentId: fixedAgentId, defaultVersionIds, onClos
         <section className="space-y-3">
           <h3 className="text-sm font-semibold">4. 运行参数</h3>
           <EnvironmentSwitch {...env} onChange={env.setEnvironment} />
+          <details className="rounded-md border p-3">
+            <summary className="cursor-pointer text-sm font-medium">逐轮中间件（可选）</summary>
+            <div className="mt-3 space-y-2">
+              <p className="text-xs text-muted-foreground">
+                轮号从 1 开始。读取本次评测上一轮的真实 JSON，任一轮失败即停止该用例。
+                可同时启用 json_artifact 和 output_contract；用例内的配置按轮覆盖这里的配置。
+              </p>
+              <Field label="中间件计划 JSON" htmlFor="ne-middlewares">
+                <Textarea id="ne-middlewares" mono rows={7} value={middlewareText}
+                  onChange={(e) => setMiddlewareText(e.target.value)}
+                  placeholder={'{\n  "2": [{"id": "json_artifact", "version": "1.0.0", "config": {}}]\n}'} />
+              </Field>
+            </div>
+          </details>
           <div className="grid grid-cols-3 gap-3">
             <Field label="名称" htmlFor="ne-name" hint="可选；缺省为 Agent + 版本">
               <Input id="ne-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="v13 回归" />

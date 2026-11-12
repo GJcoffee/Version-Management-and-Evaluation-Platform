@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from evalp.schemas.agent import AgentOut, Conventions, DraftOut, VersionBrief, VersionSummary
-from evalp.store.models import Agent, Draft, Version
+from evalp.store.models import Agent, Draft, Version, VersionAdapterRoute
 
 
 def version_brief(v: Version) -> VersionBrief:
@@ -38,7 +38,10 @@ def draft_out(d: Draft) -> DraftOut:
     )
 
 
-def version_summary(v: Version, tags: list[str] | None = None, archived_count: int = 0) -> VersionSummary:
+def version_summary(
+    v: Version, tags: list[str] | None = None, archived_count: int = 0,
+    route: VersionAdapterRoute | None = None,
+) -> VersionSummary:
     return VersionSummary(
         id=v.id,
         agent_id=v.agent_id,
@@ -55,4 +58,8 @@ def version_summary(v: Version, tags: list[str] | None = None, archived_count: i
         milestone_title=v.milestone_title,
         archived_into=v.archived_into,
         archived_count=archived_count,
+        runtime_binding={
+            "transport": "adapter", "adapter": route.adapter, "major": route.major,
+            "migration_id": route.migration_id, "execution_blocked_reason": route.execution_blocked_reason,
+        } if route else None,
     )

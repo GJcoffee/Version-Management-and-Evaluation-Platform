@@ -11,10 +11,11 @@
 - 历史拼接（6.1）：只取 ``status=ok`` 的轮次，按 idx 顺序拼接 ``input`` 与 ``output.messages``；
 - 每个会话的事件由 :class:`EventSink` 写入 ``events`` 表（先发布到总线，后批量落库），``turn.end`` 到达前
   ``turns`` 与 ``sessions.stats / status`` 已更新完毕；
-- 远端为主的轮次（Adapter 设置了 ``ctx.late_observe``，如 HiAgent）在 ``turn.end`` 后立即释放会话，
+- 远端为主的轮次（Adapter 设置了 ``ctx.late_observe``）在 ``turn.end`` 后立即释放会话，
   规范指标（用时等）由后台任务补齐：补齐事件以该轮的 turn_id 追加到事件流，完成后改写轮次的 usage / 用时
   并更新会话 stats；补齐期间持有 SSE（``hold_stream``），完成后才发 ``idle``。``wait_trace`` /
-  ``wait_traces`` 等待补齐结束；
+  ``wait_traces`` 等待补齐结束；Trace 未取得后可用 ``refresh_trace`` 按同一上游消息稍后重查
+  （能力由适配器声明）；
 - 进程启动后第一次使用本服务时（或应用启动时显式调用 :meth:`recover`），把遗留的 running 轮次标记为
   ``error``（code=INTERRUPTED），会话状态改为 idle；仍在补齐（``usage.trace_status=pending``）的轮次标记为
   ``unavailable``。
@@ -30,6 +31,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from uuid import uuid4
 
 from sqlalchemy import Text, exists, func, select, type_coerce, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,7 +48,7 @@ from evalp.runtime.llm.ratelimit import PRIORITY_INTERACTIVE
 from evalp.runtime.messages import Message, TurnOutput
 from evalp.runtime.runner import Runner, TurnResult
 from evalp.schemas.middleware import MiddlewareSelection
-from evalp.schemas.session import SessionDetail, SessionOut, TurnError, TurnOut
+from evalp.schemas.session import SessionDetail, SessionOut, TraceRefreshBody, TurnError, TurnOut
 from evalp.services.agent import AgentService
 from evalp.services.event_sink import BLOB_KEY, EventSink, session_topic
 from evalp.services.middleware import MiddlewareService
@@ -226,6 +228,7 @@ class SessionService:
         self._running: dict[str, list[_Running]] = {}  # session_id -> 正在执行的轮次（一般只有一个）
         self._by_turn: dict[str, _Running] = {}
         self._observations: dict[str, _Observing] = {}  # turn_id -> 后台补齐任务
+        self._trace_refreshing: set[str] = set()
         self._sinks: dict[str, list[Any]] = {}  # session_id -> [共享的 EventSink, 引用数]
         self._holds: dict[str, int] = {}  # session_id -> SSE 保持打开的持有数（重放期间）
         self._hold_events: dict[str, asyncio.Event] = {}  # 持有数归零时置位，唤醒等待中的 SSE
@@ -355,7 +358,9 @@ class SessionService:
 
             snapshot = (
                 adapter_snapshot if adapter_snapshot is not None
-                else await self.ctx.svc(AdapterService).snapshot(s, version.spec, environment)
+                else await self.ctx.svc(AdapterService).snapshot(
+                    s, version.spec, environment, version_id=version.id,
+                )
             )
             row = Session(
                 id=new_id("ses"),
@@ -433,6 +438,7 @@ class SessionService:
         version_id: str | None = None,
         mode: str | list[str] | tuple[str, ...] | None = None,
         q: str | None = None,
+        include_archived: bool = False,
         limit: int = 50,
         cursor: str | None = None,
     ) -> Page[SessionOut]:
@@ -445,6 +451,10 @@ class SessionService:
             )
         async with self.ctx.db.read() as s:
             stmt = select(Session).where(Session.mode.in_(modes))
+            if not include_archived:
+                stmt = stmt.join(Version, Session.version_id == Version.id).where(
+                    Version.archived_into.is_(None)
+                )
             if agent_id:
                 agent = await AgentService.find_orm(s, agent_id)
                 stmt = stmt.where(Session.agent_id == (agent.id if agent else agent_id))
@@ -625,6 +635,8 @@ class SessionService:
             for c in list(cur):
                 await self._wait_released(c.turn_id)
         cur = self._running.get(session_id)
+        if session_id in self._trace_refreshing:
+            raise SessionBusy("会话正在重查 Trace，请等待查询完成", {"session_id": session_id})
         if cur and not (concurrent and all(c.shared for c in cur)):
             raise SessionBusy(
                 f"会话 {session_id} 正在执行一轮",
@@ -768,6 +780,17 @@ class SessionService:
                 rctx, msg, slot.middleware_snapshot, emit,
             )
 
+        has_output_step = bool(slot.middleware_snapshot) and any(
+            step.get("phase") == "output" or step.get("id") == "output_contract"
+            for step in slot.middleware_snapshot.get("steps", [])
+        )
+
+        async def verify_output(final: Message) -> None:
+            assert slot.middleware_snapshot is not None
+            await self.ctx.svc(MiddlewareService).verify_output(
+                rctx, final.text(), slot.middleware_snapshot, emit,
+            )
+
         try:
             timeout_s = 300.0
             seed: int | None = None
@@ -790,6 +813,7 @@ class SessionService:
                 deadline=time.monotonic() + timeout_s,
                 cancel=slot.cancel,
                 priority=priority,
+                verify_output=verify_output if has_output_step else None,
             )
             slot.result = await Runner().run(
                 adapter, rctx, history, msg, emit, before_end=before_end,
@@ -881,6 +905,249 @@ class SessionService:
         tasks = [o.task for o in self._observations.values() if o.session_id == session_id]
         if tasks:
             await asyncio.wait(tasks)
+
+    async def refresh_trace(self, turn_id: str, body: TraceRefreshBody | None = None) -> TurnOut:
+        async with self.ctx.db.read() as s:
+            turn = await s.get(Turn, turn_id)
+            if turn is None:
+                raise NotFound(f"轮次不存在: {turn_id}", {"id": turn_id})
+            session_id = turn.session_id
+        if session_id in self._trace_refreshing:
+            raise ValidationFailed("该会话正在重查 Trace，请等待查询完成")
+        self._trace_refreshing.add(session_id)
+        try:
+            return await self._refresh_trace(turn_id, body)
+        finally:
+            self._trace_refreshing.discard(session_id)
+
+    async def _refresh_trace(self, turn_id: str, body: TraceRefreshBody | None = None) -> TurnOut:
+        """Trace 未取得后按同一上游消息重新查询；只补指标，不改本轮回复与成败。
+
+        仅适用于带绑定的平台适配器轮次：是否支持重查由适配器能力决定，未取得时保留原因，
+        之后还可以再试。会话正在执行或该轮仍在补齐时不重查。
+        """
+        await self._ensure_recovered()
+        body = body or TraceRefreshBody()
+        observing = self._observations.get(turn_id)
+        if observing is not None:
+            await asyncio.wait({observing.task})
+        async with self.ctx.db.read() as s:
+            turn = await s.get(Turn, turn_id)
+            if turn is None:
+                raise NotFound(f"轮次不存在: {turn_id}", {"id": turn_id})
+            session = await s.get(Session, turn.session_id)
+            assert session is not None
+            snapshot = dict(session.adapter_snapshot or {})
+            usage = dict(turn.usage or {})
+            status = turn.status
+            running = self.is_running(turn.session_id)
+        if status == "running" or running:
+            raise ValidationFailed("会话正在执行一轮，结束后再重新查询 Trace")
+        binding = snapshot.get("binding")
+        if not isinstance(binding, dict):
+            raise ValidationFailed("该轮没有平台适配器接入，无法重新查询 Trace")
+        if usage.get("trace_status") == "complete" and not body.force:
+            return await self.get_turn(turn_id)
+        message_id = await self._turn_message_id(turn_id, usage)
+        if message_id is None:
+            raise ValidationFailed("本轮没有上游消息 ID，无法重新查询 Trace")
+        from evalp.runtime.adapters.base import TraceRefreshRequest
+        from evalp.runtime.adapters.registry import resolve
+
+        definition, adapter_cls = resolve(binding)
+        if "refresh_trace" not in definition.capabilities:
+            raise ValidationFailed(
+                f"适配器 {definition.adapter}@{definition.major} 不支持重新查询 Trace"
+            )
+        from evalp.runtime.adapters.binding import normalize_binding
+        from evalp.services.adapter import AdapterService, fingerprint_of
+        from evalp.spec.models import AdapterBinding
+
+        original = normalize_binding(binding)
+        selected_environment = body.environment or snapshot.get("environment") or "production"
+        selected_revision = snapshot.get("revision")
+        config = dict(original.config)
+        credential_ref = original.credential_ref
+        if body.config_source == "current":
+            current = await self.ctx.svc(AdapterService).get(original.adapter)
+            chosen = current[selected_environment]
+            if not chosen["configured"]:
+                raise ValidationFailed("所选平台环境未配置，请先更新适配器，或选择原配置重查")
+            current_binding = normalize_binding(chosen["binding"])
+            credential_ref = current_binding.credential_ref
+            for key in adapter_cls.trace_config_keys:
+                if key in current_binding.config:
+                    config[key] = current_binding.config[key]
+                else:
+                    config.pop(key, None)
+            selected_revision = chosen["revision"]
+        if body.credential_ref:
+            credential_ref = body.credential_ref
+        refreshed_binding = await self.ctx.svc(AdapterService).validate(AdapterBinding(
+            adapter=original.adapter, major=original.major, config=config, credential_ref=credential_ref,
+        ))
+        binding = refreshed_binding.model_dump()
+        audit = {
+            "id": str(uuid4()), "queried_at": now_iso(), "config_source": body.config_source,
+            "adapter": original.adapter, "major": original.major, "impl_digest": definition.impl_digest,
+            "environment": selected_environment, "revision": selected_revision,
+            "credential_ref": credential_ref, "binding_fingerprint": fingerprint_of(binding),
+            "message_id": message_id, "original_binding_fingerprint": fingerprint_of(snapshot["binding"]),
+            "observation_config": {key: binding["config"].get(key) for key in adapter_cls.trace_config_keys},
+            "force": body.force,
+        }
+        previous_usage = usage
+        if body.force and usage.get("token_source") == "hiagent_trace":
+            # 已缓存的 Trace 汇总不是原 SSE 自报用量，不能拿它约束修正后的明细。
+            previous_usage = await self._original_sse_usage(turn_id, usage)
+        adapter = adapter_cls(binding, self.ctx)
+        try:
+            request = TraceRefreshRequest(
+                session_id=turn.session_id, turn_id=turn_id, binding=binding,
+                credential=None, message_id=message_id, previous_usage=previous_usage,
+            )
+            collected: list[AgentEvent] = [
+                event.with_turn(turn_id) async for event in adapter.refresh_trace(request)
+            ]
+        finally:
+            await adapter.aclose()
+        metrics = next((e.payload for e in reversed(collected) if e.type == "metrics"), None)
+        if metrics is None:
+            raise ValidationFailed("Trace 查询没有返回指标")
+        audit["result_status"] = metrics.get("trace_status")
+        if metrics.get("trace_auth"):
+            audit["trace_auth"] = metrics["trace_auth"]
+        if (
+            metrics.get("trace_status") == "unavailable"
+            and usage.get("trace_status") in ("partial", "complete")
+        ):
+            # 一次失败不能擦掉上次已取得的明细。
+            audit["error"] = metrics.get("trace_note")
+            metrics["trace_status"] = usage["trace_status"]
+            metrics["usage"] = {
+                key: usage[key] for key in ("prompt_tokens", "completion_tokens") if key in usage
+            }
+            for key in ("upstream_run_ms", "llm_api_ms", "tool_execution_ms", "llm_calls"):
+                if key in usage:
+                    metrics[key] = usage[key]
+            if usage["trace_status"] == "complete":
+                metrics.pop("trace_note", None)  # 失败原因留在本次查询审计，不改写完整结果
+        metrics["trace_refresh"] = audit
+        # 查询可能持续十几秒：写事件前重新取会话进度，避免与会话中新开始的轮次抢同一个 seq。
+        async with self.ctx.db.read() as s:
+            session = await s.get(Session, turn.session_id)
+            assert session is not None
+            last_seq = session.last_seq
+        if self.is_running(turn.session_id):
+            raise ValidationFailed("会话正在执行一轮，Trace 已取得但未写入，请稍后再试")
+        sink = EventSink(self.ctx, turn.session_id, last_seq)
+        try:
+            for event in collected:
+                await sink.emit(event)
+        finally:
+            await sink.close()
+        await self._apply_refreshed_trace(turn_id, turn.session_id, metrics)
+        return await self.get_turn(turn_id)
+
+    async def _original_sse_usage(self, turn_id: str, usage: dict[str, Any]) -> dict[str, Any]:
+        """从本轮原始 SSE 指标恢复用量，避免把旧 Trace 缓存冒充 SSE 总量。"""
+        previous = {k: v for k, v in usage.items() if k not in ("prompt_tokens", "completion_tokens")}
+        async with self.ctx.db.read() as s:
+            payloads = (await s.execute(
+                select(Event.payload).where(Event.turn_id == turn_id, Event.type == "metrics")
+                .order_by(Event.seq)
+            )).scalars().all()
+        for payload in payloads:
+            reported = payload.get("usage") or {}
+            if reported.get("source") == "hiagent_sse":
+                for key in ("prompt_tokens", "completion_tokens"):
+                    previous[key] = reported.get(key)
+        return previous
+
+    async def _turn_message_id(self, turn_id: str, usage: dict[str, Any]) -> str | None:
+        """优先规范指标，旧桥回退到该轮已存的 span；多个不同消息 ID 时拒绝猜测。"""
+        value = usage.get("upstream_message_id") or (usage.get("upstream") or {}).get("message_id")
+        if isinstance(value, str) and value:
+            return value
+        async with self.ctx.db.read() as s:
+            payloads = (
+                await s.execute(
+                    select(Event.payload)
+                    .where(Event.turn_id == turn_id, Event.type == "metrics")
+                    .order_by(Event.seq)
+                )
+            ).scalars().all()
+        for payload in reversed(payloads):
+            upstream = payload.get("upstream") if isinstance(payload, dict) else None
+            if isinstance(upstream, dict):
+                value = upstream.get("message_id")
+                if isinstance(value, str) and value:
+                    return value
+        async with self.ctx.db.read() as s:
+            rows = (await s.execute(select(Event).where(
+                Event.turn_id == turn_id, Event.type.in_(["span.start", "span.end"]),
+            ))).scalars().all()
+        candidates = set()
+        for row in rows:
+            event = await self.resolve_blob(event_out(row))
+            attrs = event.payload.get("attrs") or {}
+            value = attrs.get("message_id") or (attrs.get("upstream") or {}).get("message_id")
+            if isinstance(value, str) and value:
+                candidates.add(value)
+        if len(candidates) > 1:
+            raise ValidationFailed("该历史轮次包含多个上游消息 ID，无法唯一定位 Trace")
+        if candidates:
+            return candidates.pop()
+        return None
+
+    async def _apply_refreshed_trace(
+        self, turn_id: str, session_id: str, metrics: dict[str, Any]
+    ) -> None:
+        """把重新查到的远端指标写回轮次与会话累计；仍未取得时只更新原因。"""
+        async with self.ctx.db.write() as s:
+            t = await s.get(Turn, turn_id)
+            if t is None:
+                raise NotFound(f"轮次不存在: {turn_id}", {"id": turn_id})
+            before = dict(t.usage or {})
+            if metrics.get("trace_refresh", {}).get("result_status") == "unavailable":
+                if before.get("trace_status") == "complete":
+                    t.usage = {**before, "trace_refresh": metrics.get("trace_refresh")}
+                    return
+                note = str(metrics.get("trace_note") or "重新查询仍未取得")
+                t.usage = {**before, "trace_status": metrics["trace_status"], "trace_note": note,
+                           "trace_refresh": metrics.get("trace_refresh")}
+                return
+            reported = metrics.get("usage") or {}
+            usage = dict(before)
+            replace_cached = (
+                metrics.get("trace_refresh", {}).get("force")
+                and before.get("token_source") == "hiagent_trace"
+            )
+            # 强制重查可替换旧 Trace 缓存；原 SSE 总量已在查询前恢复并核验。
+            for key in ("prompt_tokens", "completion_tokens"):
+                current = before.get(key)
+                if (current is None or current == 0 or replace_cached) and reported.get(key) is not None:
+                    usage[key] = reported[key]
+            usage.update({k: v for k, v in metrics.items() if k != "usage"})
+            for key in ("trace_note", "trace_skipped", "token_detail_mismatch"):
+                if key not in metrics:
+                    usage.pop(key, None)
+            usage["observation_status"] = metrics.get(
+                "observation_status", reported.get("observation_status", "partial"),
+            )
+            usage["token_source"] = reported.get("source")
+            run_ms = metrics.get("upstream_run_ms")
+            t.usage = usage
+            t.latency_ms = run_ms if isinstance(run_ms, int) and not isinstance(run_ms, bool) else None
+            t.ttft_ms = None
+            sess = await s.get(Session, session_id)
+            if sess is not None:
+                stats = {**EMPTY_STATS, **(sess.stats or {})}
+                for k in ("prompt_tokens", "completion_tokens", "llm_calls", "tool_calls"):
+                    delta = int(usage.get(k, 0) or 0) - int(before.get(k, 0) or 0)
+                    stats[k] = stats.get(k, 0) + delta
+                sess.stats = stats
+                sess.updated_at = now_iso()
 
     async def _finalize(self, slot: _Running, result: TurnResult) -> None:
         """写入轮次结果，并累计会话的 stats / status。"""

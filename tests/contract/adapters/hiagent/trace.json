@@ -1,0 +1,58 @@
+{
+  "trace": {
+    "TraceID": "tr-1",
+    "StartTime": "2026-11-01T00:00:00Z",
+    "EndTime": "2026-11-01T00:00:20Z",
+    "Status": {"Code": "OK"}
+  },
+  "spans": [
+    {
+      "Context": {"TraceID": "tr-1", "SpanID": "llm-a"},
+      "Name": "model-a",
+      "StartTime": "2026-11-01T00:00:01Z",
+      "EndTime": "2026-11-01T00:00:03Z",
+      "Attributes": {
+        "gen_ai.span_type": "llm",
+        "message_id": "msg-1",
+        "app_id": "app-test",
+        "gen_ai.agent.version": "47",
+        "input_tokens": 4,
+        "output_tokens": 1,
+        "input": "[{\"role\":\"user\",\"content\":\"查一下订单\"}]",
+        "output": "{\"content\":\"第一段，\"}"
+      }
+    },
+    {
+      "Context": {"TraceID": "tr-1", "SpanID": "tool-1"},
+      "Name": "查订单",
+      "StartTime": "2026-11-01T00:00:03Z",
+      "EndTime": "2026-11-01T00:00:04Z",
+      "Attributes": {
+        "gen_ai.span_type": "tool",
+        "message_id": "msg-1",
+        "app_id": "app-test",
+        "gen_ai.agent.version": "47",
+        "call_id": "tool-1",
+        "output": "已发货"
+      }
+    },
+    {
+      "Context": {"TraceID": "tr-1", "SpanID": "llm-b"},
+      "Name": "model-a",
+      "StartTime": "2026-11-01T00:00:04Z",
+      "EndTime": "2026-11-01T00:00:06Z",
+      "Attributes": {
+        "gen_ai.span_type": "llm",
+        "message_id": "msg-1",
+        "app_id": "app-test",
+        "gen_ai.agent.version": "47",
+        "input_tokens": 5,
+        "output_tokens": 2,
+        "input": "[{\"role\":\"user\",\"content\":\"查一下订单\"}]",
+        "output": "{\"content\":\"第二段。\"}"
+      }
+    }
+  ],
+  "total": 3,
+  "has_more": false
+}

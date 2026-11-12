@@ -116,6 +116,123 @@ def of_type(events, kind):
     return [e for e in events if e.type == kind]
 
 
+def test_trace_counts_all_five_core_calls_without_the_two_llm_wrappers():
+    m = current_mapper()
+    counts = [(10950, 116), (11892, 70), (12776, 232), (15679, 2128), (17970, 121)]
+    spans = []
+    for i, (prompt, completion) in enumerate(counts):
+        core = llm_span(f"core-{i}", prompt=str(prompt), completion=str(completion),
+                        **{"gen_ai.span_type": "core_llm"})
+        core["Context"]["ParentSpanID"] = f"http-{i}"
+        transport = {"Context": {"TraceID": "tr", "SpanID": f"http-{i}", "ParentSpanID": f"wrapper-{i}"}}
+        spans.extend([core, transport])
+        if i < 2:
+            wrapper = llm_span(f"wrapper-{i}", prompt=prompt, completion=completion)
+            wrapper["EndTime"] = "2026-11-01T00:00:04Z"  # 包装耗时不与核心耗时重复累计
+            spans.append(wrapper)
+    events = trace_events(m.config, m, TRACE, page(*reversed(spans)))
+    metrics = events[-1].payload
+    assert metrics["llm_calls"] == 5
+    assert metrics["llm_api_ms"] == 10000
+    assert metrics["usage"]["prompt_tokens"] == 69267
+    assert metrics["usage"]["completion_tokens"] == 2667
+    assert metrics["trace_status"] == "complete"
+    responses = of_type(events, "llm.response")
+    assert len(responses) == 5
+    assert {e.step_id for e in responses} == {
+        "llm:wrapper-0", "llm:wrapper-1", "llm:core-2", "llm:core-3", "llm:core-4",
+    }
+    assert {e.payload["upstream"]["span_id"] for e in responses} == {f"core-{i}" for i in range(5)}
+
+
+def test_trace_same_model_and_tokens_without_parent_link_are_separate_calls():
+    m = current_mapper()
+    events = trace_events(m.config, m, TRACE, page(
+        llm_span("wrapper"), llm_span("core", **{"gen_ai.span_type": "core_llm"}),
+    ))
+    assert events[-1].payload["llm_calls"] == 2
+    assert m.usage["prompt_tokens"] == 10 and m.usage["completion_tokens"] == 4
+
+
+def test_trace_multiple_core_children_keep_each_retry_and_drop_wrapper_total():
+    m = current_mapper()
+    wrapper = llm_span("wrapper", prompt=10, completion=4)
+    cores = [llm_span(sid, **{"gen_ai.span_type": "core_llm"}) for sid in ("retry-1", "retry-2")]
+    for core in cores:
+        core["ParentSpanID"] = "wrapper"
+    events = trace_events(m.config, m, TRACE, page(wrapper, *cores))
+    assert {e.step_id for e in of_type(events, "llm.response")} == {"llm:retry-1", "llm:retry-2"}
+    assert events[-1].payload["llm_calls"] == 2
+    assert events[-1].payload["llm_api_ms"] == 4000
+    assert m.usage["prompt_tokens"] == 10 and m.usage["completion_tokens"] == 4
+
+
+def test_trace_core_missing_tokens_stays_partial_instead_of_using_wrapper_total():
+    m = current_mapper()
+    core = llm_span("core", prompt=None, **{"gen_ai.span_type": "core_llm"})
+    core["Context"]["ParentSpanID"] = "wrapper"
+    events = trace_events(m.config, m, TRACE, page(llm_span("wrapper"), core))
+    assert events[-1].payload["llm_calls"] == 1
+    assert events[-1].payload["trace_status"] == "partial"
+    assert of_type(events, "llm.response")[0].payload["usage"]["prompt_tokens"] is None
+    assert m.usage.get("prompt_tokens") is None
+
+
+def test_trace_invalid_core_does_not_suppress_the_valid_wrapper():
+    m = current_mapper()
+    core = llm_span("core", message="other", **{"gen_ai.span_type": "core_llm"})
+    core["Context"]["ParentSpanID"] = "wrapper"
+    events = trace_events(m.config, m, TRACE, page(llm_span("wrapper"), core))
+    assert [e.payload["upstream"]["span_id"] for e in of_type(events, "llm.response")] == ["wrapper"]
+    assert events[-1].payload["trace_status"] == "partial"
+    assert m.usage["prompt_tokens"] == 5
+
+
+def test_trace_duplicate_core_identity_is_not_used_to_merge_with_a_wrapper():
+    m = current_mapper()
+    core = llm_span("core", **{"gen_ai.span_type": "core_llm"})
+    core["Context"]["ParentSpanID"] = "wrapper"
+    events = trace_events(m.config, m, TRACE, page(llm_span("wrapper"), core, core))
+    assert events[-1].payload["llm_calls"] == 2
+    assert events[-1].payload["trace_status"] == "partial"
+    assert events[-1].payload["trace_skipped"] == [{"span_id": "core", "reason": "缺少或重复的 SpanID"}]
+
+
+@pytest.mark.parametrize("invalid_parent", ["foreign-trace", "duplicate-id", "foreign-message"])
+def test_trace_unverified_parent_chain_does_not_merge_calls(invalid_parent):
+    m = current_mapper()
+    core = llm_span("core", **{"gen_ai.span_type": "core_llm"})
+    core["Context"]["ParentSpanID"] = "middle"
+    middle = {"Context": {"TraceID": "tr", "SpanID": "middle", "ParentSpanID": "wrapper"}}
+    extra = []
+    if invalid_parent == "foreign-trace":
+        middle["Context"]["TraceID"] = "another-trace"
+    elif invalid_parent == "duplicate-id":
+        extra.append(middle.copy())
+    else:
+        middle = llm_span("middle", message="other")
+        middle["Context"]["ParentSpanID"] = "wrapper"
+    events = trace_events(m.config, m, TRACE, page(llm_span("wrapper"), middle, core, *extra))
+    assert events[-1].payload["llm_calls"] == 2
+    assert m.usage["prompt_tokens"] == 10
+
+
+def test_trace_tool_parent_resolves_to_the_merged_model_step():
+    m = current_mapper()
+    m.calls["call"] = {"name": "fetch", "step": "tool:call"}
+    core = llm_span("core", **{"gen_ai.span_type": "core_llm"})
+    core["Context"]["ParentSpanID"] = "wrapper"
+    tools = [
+        {"Context": {"TraceID": "tr", "SpanID": f"tool-{parent}", "ParentSpanID": parent},
+         "StartTime": "2026-11-01T00:00:03Z", "EndTime": "2026-11-01T00:00:04Z",
+         "Attributes": {"gen_ai.span_type": "tool", "message_id": "current", "call_id": "call"}}
+        for parent in ("wrapper", "core")
+    ]
+    events = trace_events(m.config, m, TRACE, page(llm_span("wrapper"), core, *tools))
+    assert {e.parent_step_id for e in of_type(events, "tool.result")} == {"llm:wrapper"}
+    assert len(of_type(events, "llm.response")) == 1
+
+
 def test_multi_segment_output_keeps_every_segment_in_the_final_message():
     m = mapper()
     m.feed({"event": "message_start", "id": "message-1"})

@@ -15,17 +15,17 @@ import { sessionKeys } from './sessions'
 
 export const compareKeys = {
   all: ['compare'] as const,
-  list: (limit: number) => [...compareKeys.all, 'list', limit] as const,
+  list: (limit: number, includeArchived = false) => [...compareKeys.all, 'list', limit, includeArchived] as const,
   detail: (id: string) => [...compareKeys.all, 'detail', id] as const,
   /** version 变化时重新拉取（由页面在两侧 turn.start / turn.end 后改变它） */
   alignment: (id: string, version: string) => [...compareKeys.all, 'alignment', id, version] as const,
 }
 
 /** 最近的对比组（新的在前） */
-export function useCompares(limit = 6) {
+export function useCompares(limit = 6, includeArchived = false) {
   return useQuery({
-    queryKey: compareKeys.list(limit),
-    queryFn: () => api.get<Page<CompareGroup>>('/compare', { query: { limit } }),
+    queryKey: compareKeys.list(limit, includeArchived),
+    queryFn: () => api.get<Page<CompareGroup>>('/compare', { query: { limit, include_archived: includeArchived } }),
   })
 }
 

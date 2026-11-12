@@ -301,7 +301,7 @@ describe('SessionPage 适配器标签', () => {
     const { find } = renderPage({ adapter_snapshot: hiagent } as Partial<Session>)
     const badge = await screen.findByTestId('adapter-badge')
     expect(badge).toHaveTextContent('生产 · 存档 #3')
-    expect(badge.getAttribute('title')).toContain('HiAgent 1.0.0 · 发布版本 47 · app app-1')
+    expect(badge.getAttribute('title')).toContain('HiAgent · 实现 v1 · 发布版本 47 · app app-1')
     expect(badge.getAttribute('title')).toContain('说明：切换到新发布的桥接')
     expect(find('GET', /adapter-binding/)).toHaveLength(0)
   })

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from evalp.errors import ValidationFailed
 from evalp.schemas.adapter import Environment, EnvironmentDescription
 from evalp.schemas.asset import CaseFilter
+from evalp.schemas.eval_middleware import TurnMiddlewares, validate_plan
 
 RunStatus = Literal[
     "queued", "running", "paused", "completed", "completed_with_errors", "cancelled", "failed"
@@ -40,9 +42,20 @@ class EvalCreate(BaseModel):
     seed: int | None = None
     cache_policy: Literal["reuse", "refresh"] = "reuse"
     budget: Budget = Field(default_factory=Budget)
+    turn_middlewares: TurnMiddlewares = Field(
+        default_factory=dict, description="按轮号（从1开始）启用中间件；来源为本次会话上一轮"
+    )
     environment: Environment = Field("production", description=EnvironmentDescription)
     dry_run: bool = False
     via: Literal["ui", "cli", "mcp", "api"] = "api"
+
+    @field_validator("turn_middlewares")
+    @classmethod
+    def check_turn_middlewares(cls, value: TurnMiddlewares) -> TurnMiddlewares:
+        try:
+            return validate_plan(value)
+        except ValidationFailed as exc:
+            raise ValueError(exc.message) from None
 
 
 class RunRef(BaseModel):
@@ -88,6 +101,7 @@ class EvalRunOut(BaseModel):
     seed: int | None = None
     cache_policy: str
     budget: dict[str, Any]
+    turn_middlewares: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     adapter_snapshot: dict[str, Any] | None = Field(
         None, description="所用适配器环境与存档号（transport=adapter）"
     )

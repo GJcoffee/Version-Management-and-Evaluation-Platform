@@ -60,6 +60,7 @@ async def list_evals(
     agent: str | None = Query(None, description="同 agent_id（旧名称）"),
     batch: str | None = Query(None, description="同 batch_id（旧名称）"),
     status: str | None = Query(None, description="状态，可用逗号分隔多个"),
+    include_archived: bool = Query(False, description="包括所属版本已归档的评测"),
     p: PageParams = Depends(page_params),
     ctx: AppContext = Depends(get_ctx),
 ):
@@ -69,6 +70,7 @@ async def list_evals(
         version_id=version_id,
         batch=batch_id or batch,
         status=status,
+        include_archived=include_archived,
         limit=p.limit,
         cursor=p.cursor,
     )

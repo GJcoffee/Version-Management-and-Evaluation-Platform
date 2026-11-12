@@ -34,6 +34,7 @@ export interface EvalListParams {
   batch_id?: string
   /** 逗号分隔的多个状态 */
   status?: string
+  include_archived?: boolean
   limit?: number
 }
 
@@ -47,13 +48,13 @@ export function useEvals(params: EvalListParams = {}, opts: { autoRefresh?: numb
           agent_id: params.agent_id,
           batch_id: params.batch_id,
           status: params.status,
+          include_archived: params.include_archived ?? false,
           limit: params.limit ?? 50,
           cursor: pageParam,
         },
       }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
-    placeholderData: keepPreviousData,
     refetchInterval: (query) => {
       if (!opts.autoRefresh) return false
       const pages = query.state.data?.pages ?? []

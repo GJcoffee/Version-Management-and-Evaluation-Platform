@@ -283,12 +283,39 @@ class SnapshotSpec(_Model):
 
 
 class AdapterBinding(_Model):
-    """一套接入配置（生产或测试环境）；凭据只保存引用。"""
+    """一套接入配置（生产或测试环境）；凭据只保存引用。
 
-    id: str = Field(min_length=1)
-    version: str = Field(min_length=1)
+    只保存 ``adapter + major``：实现由平台统一维护，agent 版本属于 ``config.published_version``。
+    旧的 ``{id, version}`` 仍可读取，读取时映射到新字段。
+    """
+
+    adapter: str = Field(min_length=1)
+    major: int = Field(default=1, ge=1)
     config: dict[str, Any] = Field(default_factory=dict)
     credential_ref: str = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_form(cls, data: Any) -> Any:
+        """兼容 ``{id, version}``；两种写法不能混用。"""
+        if not isinstance(data, dict):
+            return data
+        has_new, has_old = "adapter" in data, ("id" in data or "version" in data)
+        if has_new and has_old:
+            raise ValueError("adapter 写法不能与 id/version 混用")
+        if has_new or not has_old:
+            return data
+        value = dict(data)
+        adapter = value.pop("id", None)
+        version = value.pop("version", "1.0.0")
+        if not adapter:
+            return data
+        try:
+            value["adapter"] = adapter
+            value["major"] = int(str(version).split(".")[0])
+        except (ValueError, IndexError):
+            raise ValueError(f"适配器版本不合法: {version}") from None
+        return value
 
 
 class _SpecBase(_Model):
@@ -321,6 +348,12 @@ class CodeSpec(_SpecBase):
 
     kind: Literal["code"] = "code"
     transport: Literal["http", "subprocess", "adapter"]
+    platform: str | None = Field(
+        None, pattern=r"^[a-z][a-z0-9_-]*$", description="transport=adapter 的平台；旧版本默认 hiagent",
+    )
+    native_deployment_required: bool = Field(
+        False, description="旧桥内容迁入原生接入后，需发布并核实对应业务内容才能执行",
+    )
     http: HttpTransport | None = None
     subprocess: SubprocessTransport | None = None
     source: SourceSpec = Field(default_factory=SourceSpec)

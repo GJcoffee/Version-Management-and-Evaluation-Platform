@@ -13,9 +13,21 @@ from evalp.services.adapter import (
     EnvironmentRollback,
     EnvironmentUpdate,
 )
+from evalp.services.adapter_migration import AdapterMigrationService, BindingMigrationRequest
 from evalp.spec.models import AdapterBinding
 
 router = APIRouter(tags=["adapters"])
+
+
+@router.post("/adapters/binding-migrations")
+async def migrate_bindings(body: BindingMigrationRequest, ctx: AppContext = Depends(get_ctx)):
+    """显式迁移历史接入，支持干跑与独立审计。"""
+    return await ctx.svc(AdapterMigrationService).migrate(body)
+
+
+@router.get("/adapters/binding-migrations/{migration_id}")
+async def binding_migration(migration_id: str, ctx: AppContext = Depends(get_ctx)):
+    return await ctx.svc(AdapterMigrationService).get(migration_id)
 
 
 @router.get("/adapters")
@@ -35,33 +47,42 @@ async def create_credential(body: CredentialCreate, ctx: AppContext = Depends(ge
 
 @router.post("/adapters/check-connection")
 async def check_connection(body: AdapterBinding, ctx: AppContext = Depends(get_ctx)):
-    """只检查配置与凭据，不自动执行 LLM 请求。"""
-    from evalp.runtime.adapters.hiagent_adapter import HiAgentAdapter
+    """检查配置、凭据与只读上游认证，不执行 LLM 请求。"""
+    from evalp.runtime.adapters.registry import resolve
 
     binding = await ctx.svc(AdapterService).validate(body)
-    return await HiAgentAdapter(binding, ctx).healthcheck()
+    _, adapter_cls = resolve(binding)
+    adapter = adapter_cls(binding, ctx)
+    try:
+        return await adapter.healthcheck()
+    finally:
+        await adapter.aclose()
 
 
 @router.get("/adapter-environments")
-async def environments(ctx: AppContext = Depends(get_ctx)):
-    return await ctx.svc(AdapterService).get()
+async def environments(adapter: str = "hiagent", ctx: AppContext = Depends(get_ctx)):
+    return await ctx.svc(AdapterService).get(adapter)
 
 
 @router.get("/adapter-environments/{name}/revisions")
-async def revisions(name: Environment, ctx: AppContext = Depends(get_ctx)):
-    return await ctx.svc(AdapterService).revisions(name)
+async def revisions(name: Environment, adapter: str = "hiagent", ctx: AppContext = Depends(get_ctx)):
+    return await ctx.svc(AdapterService).revisions(name, adapter)
 
 
 @router.put("/adapter-environments/test")
-async def update_test(body: EnvironmentUpdate, ctx: AppContext = Depends(get_ctx)):
-    return await ctx.svc(AdapterService).update_test(body)
+async def update_test(body: EnvironmentUpdate, adapter: str = "hiagent", ctx: AppContext = Depends(get_ctx)):
+    return await ctx.svc(AdapterService).update_test(body, adapter)
 
 
 @router.post("/adapter-environments/production/push")
-async def push_to_production(body: EnvironmentPush, ctx: AppContext = Depends(get_ctx)):
-    return await ctx.svc(AdapterService).push(body)
+async def push_to_production(
+    body: EnvironmentPush, adapter: str = "hiagent", ctx: AppContext = Depends(get_ctx),
+):
+    return await ctx.svc(AdapterService).push(body, adapter)
 
 
 @router.post("/adapter-environments/production/rollback")
-async def rollback_production(body: EnvironmentRollback, ctx: AppContext = Depends(get_ctx)):
-    return await ctx.svc(AdapterService).rollback(body)
+async def rollback_production(
+    body: EnvironmentRollback, adapter: str = "hiagent", ctx: AppContext = Depends(get_ctx),
+):
+    return await ctx.svc(AdapterService).rollback(body, adapter)

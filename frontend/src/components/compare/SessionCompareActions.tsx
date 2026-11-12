@@ -192,11 +192,15 @@ export function CompareSessionDialog({ session, onClose }: { session: Session; o
   const navigate = useNavigate()
   // 候选默认不含重放产生的会话（它们是对比的副产品，容易把真正想比的会话挤出列表）
   const [withReplays, setWithReplays] = useState(false)
-  const list = useSessions({ agent_id: session.agent_id, mode: withReplays ? 'chat,replay' : 'chat', limit: 100 })
+  const [includeArchived, setIncludeArchived] = useState(false)
+  const list = useSessions({
+    agent_id: session.agent_id, mode: withReplays ? 'chat,replay' : 'chat', limit: 100,
+    include_archived: includeArchived,
+  })
   const create = useCreateCompare()
   const [other, setOther] = useState('')
   const candidates = useMemo(() => (list.data?.items ?? []).filter((s) => s.id !== session.id), [list.data, session.id])
-  const otherId = other || candidates[0]?.id || ''
+  const otherId = candidates.some((s) => s.id === other) ? other : candidates[0]?.id || ''
 
   const submit = async () => {
     if (!otherId) return
@@ -227,7 +231,10 @@ export function CompareSessionDialog({ session, onClose }: { session: Session; o
         </>
       }
     >
-      <label className="mb-3 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+      <div className="mb-3 flex flex-wrap items-center gap-3">
+      <IncludeArchivedToggle includeArchived={includeArchived} label="包括已归档会话"
+        setIncludeArchived={(value) => { setIncludeArchived(value); setOther('') }} />
+      <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
         <input
           type="checkbox"
           className="h-4 w-4 accent-primary"
@@ -237,6 +244,7 @@ export function CompareSessionDialog({ session, onClose }: { session: Session; o
         />
         包含重放会话
       </label>
+      </div>
       <Field label="基线会话" htmlFor="compare-other">
         {list.isLoading ? (
           <LoadingBlock className="py-2" />

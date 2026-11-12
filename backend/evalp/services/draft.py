@@ -20,7 +20,7 @@ from evalp.spec.canonical import canonicalize
 from evalp.spec.git import capture_git
 from evalp.spec.resolve import unresolve
 from evalp.spec.validate import validate_spec
-from evalp.store.models import Agent, Draft, Version, VersionAssetRef
+from evalp.store.models import Agent, Draft, Version, VersionAdapterRoute, VersionAssetRef
 from evalp.utils.time import now_iso
 
 log = get_logger(__name__)
@@ -76,6 +76,11 @@ class DraftService:
                 if v.agent_id != agent.id:
                     raise NotFound("该版本不属于这个 agent", {"version_id": body.from_version_id})
                 spec, base = unresolve(v.spec), v.id
+                route = await s.get(VersionAdapterRoute, v.id)
+                if route:
+                    from evalp.services.adapter_migration import native_spec
+
+                    spec = native_spec(spec, route.adapter)
             elif body.spec is not None:
                 spec = check_draft_spec(body.spec, agent.kind)
             else:

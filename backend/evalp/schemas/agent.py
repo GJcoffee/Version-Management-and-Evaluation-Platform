@@ -184,6 +184,7 @@ class VersionSummary(BaseModel):
     milestone_title: str | None = Field(None, description="阶段名，如“第一阶段：语气优化”")
     archived_into: str | None = Field(None, description="归档到的里程碑版本 id；未归档为 null")
     archived_count: int = Field(0, description="里程碑下归档了多少个版本；非里程碑为 0")
+    runtime_binding: dict[str, Any] | None = Field(None, description="迁移后有效接入；原始 Spec 保持不变")
 
 
 class VersionAssetRefOut(BaseModel):

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, Field
 
+from evalp.errors import AgentError
 from evalp.runtime.events import AgentEvent
 from evalp.runtime.llm.ratelimit import PRIORITY_INTERACTIVE
 from evalp.runtime.messages import Message
@@ -36,6 +37,7 @@ class RunContext:
     - ``late_observe``：Adapter 声明本轮的规范指标来自远端、需要在轮次结束后异步补齐时设置。它返回事件流
       （llm.request / llm.response / tool.result / metrics 等），由会话服务在后台消费并以该轮的 turn_id 追加到
       事件流；补齐前本轮的用时等规范指标为空，``usage.trace_status`` 为 ``pending``。
+    - ``verify_output``：最终回复已确定、轮次状态仍为 ok 时调用；抛异常则本轮转为 error（如输出契约校验）。
     """
 
     session_id: str
@@ -50,6 +52,7 @@ class RunContext:
     priority: int = PRIORITY_INTERACTIVE
     new_messages: list[Message] = field(default_factory=list)
     late_observe: Callable[[], AsyncIterator[AgentEvent]] | None = None
+    verify_output: Callable[[Message], Awaitable[None]] | None = None
 
 
 class HealthResult(BaseModel):
@@ -59,6 +62,19 @@ class HealthResult(BaseModel):
     message: str = ""
     latency_ms: int | None = None
     details: dict[str, Any] = Field(default_factory=dict)
+
+
+@dataclass
+class TraceRefreshRequest:
+    """Trace 重查所需的上下文；由平台层组装，适配器只读取。"""
+
+    session_id: str
+    turn_id: str
+    binding: Any
+    credential: Any
+    message_id: str
+    previous_usage: dict[str, Any] = field(default_factory=dict)
+    wait_s: float | None = None
 
 
 class AgentAdapter(ABC):
@@ -84,19 +100,48 @@ class AgentAdapter(ABC):
         """释放 Adapter 持有的资源。"""
 
 
+class PlatformAdapter(AgentAdapter):
+    """平台适配器：一个平台一个实现，只做协议翻译。
+
+    ``adapter`` / ``major`` 用于注册表定位；agent 版本属于绑定配置，不属于实现版本。
+    没有能力的平台直接继承默认实现，平台层据此返回 ``CAPABILITY_UNAVAILABLE``。
+    """
+
+    adapter: ClassVar[str] = ""
+    major: ClassVar[int] = 1
+    capabilities: ClassVar[frozenset[str]] = frozenset()
+    config_model: ClassVar[type[BaseModel] | None] = None
+    trace_config_keys: ClassVar[frozenset[str]] = frozenset()
+
+    async def refresh_trace(  # noqa: B027 - 默认能力不可用
+        self, request: TraceRefreshRequest,
+    ) -> AsyncIterator[AgentEvent]:
+        """重查当前轮 Trace；默认不支持，由具体平台覆盖。"""
+        if False:  # pragma: no cover - 让函数成为异步生成器
+            yield
+        raise AgentError("当前适配器不支持重新查询 Trace", code="CAPABILITY_UNAVAILABLE")
+
+
 def build_adapter(version: ResolvedVersion, app: AppContext) -> AgentAdapter:
-    """构造 Adapter：运行快照带接入配置 -> HiAgentAdapter；否则 config -> ConfigAdapter，
+    """构造 Adapter：运行快照带绑定 -> 平台适配器；否则 config -> ConfigAdapter，
     code + http / subprocess -> 对应 Adapter。"""
     from evalp.runtime.adapters.config_adapter import ConfigAdapter
     from evalp.runtime.adapters.http_adapter import HttpAdapter
     from evalp.runtime.adapters.subprocess_adapter import SubprocessAdapter
 
     binding = (version.adapter_snapshot or {}).get("binding")
+    blocked = (
+        (version.adapter_snapshot or {}).get("execution_blocked_reason") or version.execution_blocked_reason
+    )
+    if blocked or version.spec.get("native_deployment_required"):
+        raise AgentError(
+            blocked or "请先发布并核实对应原生业务内容", code="NATIVE_DEPLOYMENT_REQUIRED",
+        )
     if binding:
-        from evalp.runtime.adapters.hiagent_adapter import HiAgentAdapter
-        from evalp.runtime.adapters.registry import validate_binding
+        from evalp.runtime.adapters.registry import resolve
 
-        return HiAgentAdapter(validate_binding(binding), app)
+        _, adapter_cls = resolve(binding)
+        return adapter_cls(binding, app)
     spec = version.spec_model()
     if isinstance(spec, ConfigSpec):
         return ConfigAdapter(spec, app)

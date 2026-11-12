@@ -602,7 +602,7 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
   `milestone` / `milestone_title` / `archived_into` / `archived_count`。`unarchive` 对里程碑调用 = 其下全部移出归档（未单设“全部”接口）。
 - 前端版本页默认只列里程碑与未归档版本，各处选版本的下拉 / 勾选默认同样隐藏已归档（已选中的版本始终保留），可“包括已归档”。Agent 详情页版本列表一次取 200 条以便把归档分组。
 - CLI `evalp versions` 默认隐藏已归档（`--all` 显示），新增 `evalp milestone <版本> [--title] [--remove]`；MCP `list_versions` 增加 `include_archived`，新增 `set_milestone`。
-  取消 / 移出归档只在 Web UI、CLI `--remove` 和 API 提供，MCP 暂不提供。
+  取消阶段性成果在 Web UI、CLI `--remove` 和 API 提供；MCP 移出归档工具见文末「MCP — 移出归档工具」。
 
 ## HiAgent 指标以远端为主，Trace 后台补齐
 
@@ -626,3 +626,44 @@ tests/conftest.py 仅追加了 `pytest_plugins = ["tests.fixtures.fake_openai"]`
 手动开合轮次、工具卡片及批量展开时暂停自动贴底，并禁用浏览器的滚动锚定，避免展开、虚拟高度修正或媒体加载把视野推到末尾。
 单轮开合保留其他轮次的高度缓存；批量开合重新测量后恢复当前可见轮次及其相对位置。
 Trace 主动切换轮次仍会展开目标并滚到其顶部，用户滚回底部后仍可继续自动跟随新内容。
+
+## MCP — 移出归档工具
+
+按用户要求新增 `unarchive_version(version, agent?)`，复用 `POST /versions/{ref}/unarchive` 和已有版本引用解析。
+普通归档版本只移出自身；指定阶段性成果时移出其下全部版本，并保留阶段性成果与阶段名。
+未归档的普通版本、无效引用沿用 API 的中文错误并返回 MCP `isError`，版本内容、标签、会话与评测数据不变。
+无需新增迁移或改变归档规则；取消阶段性成果仍使用 Web UI / CLI / API。
+
+## 接入迁移 — 历史版本与有效接入分离
+
+历史版本迁入统一适配器时，直接改写旧 Spec 会破坏内容 hash 与资产历史；
+0013 新增 `version_adapter_routes` 保存有效平台和 major，`adapter_binding_migrations` 保存迁移审计。
+版本详情与列表新增 `runtime_binding`，原 Spec、资产引用、输出、评分与评测缓存键保持不变。
+会话、评测与配置存档统一为 `adapter + major`，移除 `business_bridge`，原值存入独立审计。
+旧 HTTP 草稿只迁接入字段并增加 revision；从迁移版本创建草稿同样沿用原生接入。
+
+旧版本依赖录制数据或桥内业务补丁，仅有应用／发布名称不足以证明原生入口运行的是该历史内容。
+迁移后的历史版本与草稿标记需要核实原生部署，执行返回 `NATIVE_DEPLOYMENT_REQUIRED`，
+避免静默使用当前生产内容。读取与按原消息 ID 重查 Trace 可继续，多个候选消息 ID 时拒绝猜测。
+旧桥配置存档标为停用，不能回滚为当前环境。0013 存在迁移审计时拒绝降级丢弃数据。
+新增 MCP `migrate_adapter_bindings`（默认干跑）与 `get_adapter_binding_migration`；
+接口为 `POST /adapters/binding-migrations`、`GET /adapters/binding-migrations/{id}`。
+
+## Trace 账号管理与自动重登（0014）
+
+用户授权按讨论方案实现。0014 新增 `platform_accounts` 与 `platform_account_sessions`，
+密码和完整 Cookie 属性只存 SecretStore 的加密正文，数据库保存引用、状态、配置修订及不可变登录态修订。
+账号身份固定为平台、站点、租户、用户名；名称／密码／启停通过带 expected_revision 的更新接口修改。
+密码留空保留原值，变更密码使旧登录态不再使用，停用保留所有历史。
+存在账号数据时迁移拒绝降级丢弃；原凭据、环境存档、版本和会话快照不改写。
+
+运行时新增 CredentialsManager：按账号互斥、定期探活、到期提前检查、认证失败后确认失效再登录，
+最多重放一次只读 Observe 查询。协议独立在 runtime/hiagent_auth.py，参考 hiagentctl 的
+checkLogin/GetCaptcha/AES 登录与登录后回读；OCR 懒加载，最多三次验证码尝试，不启动 CLI、不写验证码文件。
+网络失败冷却一分钟；密码错误或额外验证停止自动重试，用户可修改密码或手动补充已登录 Cookie／CSRF。
+后台任务随应用生命周期启动和停止，取消释放锁。新增 ddddocr 1.6.1 及其运行依赖。
+
+HiAgent observe_account_ref 优先于旧 observe_headers，要求站点匹配；首次 Trace、旧轮次重查和认证检查
+共用管理器。trace_auth 记录实际账号与登录态修订，重查审计同步保存；重查失败仍保留已取得指标。
+当前配置移除账号时，重查不会继续带入旧快照中的账号引用。发布 API Key 保持独立，不自动轮换。
+设置页新增账号创建／编辑／检查／重登／停用、人工登录态核验及修订历史，密码均以隐藏输入呈现。

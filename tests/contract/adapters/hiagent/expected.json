@@ -1,0 +1,26 @@
+{
+  "event_counts": {
+    "llm.delta": 2,
+    "llm.request": 2,
+    "llm.response": 2,
+    "metrics": 3,
+    "source.raw": 8,
+    "tool.call": 1,
+    "tool.result": 2
+  },
+  "llm_calls": 2,
+  "text": "第一段，第二段。",
+  "tool_calls": 1,
+  "turn": {
+    "llm_api_ms": 4000,
+    "llm_calls": 2,
+    "observation_status": "complete",
+    "tool_execution_ms": 1000,
+    "trace_status": "complete",
+    "upstream_run_ms": 20000
+  },
+  "usage": {
+    "completion_tokens": 3,
+    "prompt_tokens": 9
+  }
+}

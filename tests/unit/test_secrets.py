@@ -92,3 +92,11 @@ async def test_file_value_is_found_when_keyring_empty(tmp_path, mem_keyring):
     assert await store.set("k", "new") == "keyring"
     assert store._file_get("k") is None
     assert await store.get("k") == "new"
+
+
+def test_machine_id_can_be_overridden_for_shared_container_secrets(monkeypatch):
+    """容器与宿主共用 secrets.enc 时，用 EVALP_MACHINE_ID 固定派生参数。"""
+    from evalp.secrets import _machine_id
+
+    monkeypatch.setenv("EVALP_MACHINE_ID", "fixed-machine")
+    assert _machine_id() == "fixed-machine"

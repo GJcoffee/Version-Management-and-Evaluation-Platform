@@ -8,6 +8,7 @@ import {
   FileText,
   Loader2,
   MessageSquareText,
+  RefreshCw,
   ScrollText,
   Search,
   Wrench,
@@ -48,6 +49,11 @@ export interface TraceViewerProps {
   durationMs?: number | null
   /** 有远端数据的轮次（HiAgent）的补齐状态：头部显示远端用时 / 同步中 / 未取得，不显示本地用时 */
   trace?: TraceSync | null
+  /** Trace 未取得时重新查询（仅平台原生 HiAgent 轮次）；取得后用时、token、调用次数按远端口径回填 */
+  onRefreshTrace?: () => void
+  refreshUnavailableReason?: string
+  /** 重新查询进行中 */
+  refreshingTrace?: boolean
   /** 轮次仍在运行：瀑布图持续刷新 */
   running?: boolean
   /** 受控的选中步骤（节点 id，即 step_id）；不传则内部管理 */
@@ -75,6 +81,23 @@ const KIND_BAR: Record<TraceKind, string> = {
   final: 'bg-success',
 }
 
+/** Trace 未取得时重新查询；取得后用时、token 与调用次数按远端口径回填。 */
+function RefreshTraceButton({ onClick, refreshing }: { onClick: () => void; refreshing?: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={refreshing}
+      title="选择最新适配器配置与凭据，重新获取原轮次的 Trace"
+      data-testid="refresh-trace"
+      className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent disabled:opacity-60"
+    >
+      {refreshing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+      {refreshing ? '查询中' : '重新获取 Trace'}
+    </button>
+  )
+}
+
 /** 按 step_id / parent_step_id 组织的步骤树 + 右侧时间瀑布图 + 点击查看详情；可按类型筛选、按文本搜索 */
 export function TraceViewer({
   steps,
@@ -84,6 +107,9 @@ export function TraceViewer({
   endedAt,
   durationMs,
   trace = null,
+  onRefreshTrace,
+  refreshUnavailableReason,
+  refreshingTrace,
   running,
   selectedStepId,
   onSelectStep,
@@ -155,7 +181,15 @@ export function TraceViewer({
   if (all.length === 0) {
     return (
       <div className={cn('flex min-h-0 flex-col', className)} data-testid="trace-viewer">
-        <EmptyState icon={Waypoints} title="暂无 Trace" description={running ? '等待第一个步骤…' : '这一轮没有记录任何步骤。'} />
+        <EmptyState
+          icon={Waypoints}
+          title="暂无 Trace"
+          description={running ? '等待第一个步骤…' : '这一轮没有记录任何步骤。'}
+          action={trace && ['unavailable', 'partial'].includes(trace.status) && onRefreshTrace
+            ? <RefreshTraceButton onClick={onRefreshTrace} refreshing={refreshingTrace} />
+            : undefined}
+        />
+        {refreshUnavailableReason && <p className="px-3 text-xs text-muted-foreground">{refreshUnavailableReason}</p>}
       </div>
     )
   }
@@ -200,7 +234,13 @@ export function TraceViewer({
             data-testid="trace-duration">
             {all.length} 步 · {trace ? `HiAgent 用时 ${remoteValueText(trace, durationMs ?? null)}` : formatDuration(durationMs ?? timeline.totalMs)}
           </span>
+          {trace && ['unavailable', 'partial'].includes(trace.status) && onRefreshTrace && (
+            <RefreshTraceButton onClick={onRefreshTrace} refreshing={refreshingTrace} />
+          )}
         </div>
+        {trace && ['unavailable', 'partial'].includes(trace.status) && <p className="text-xs text-muted-foreground">
+          {trace.note}{refreshUnavailableReason ? ` · ${refreshUnavailableReason}` : ''}
+        </p>}
       </div>
 
       {/* 树 + 瀑布图 */}

@@ -5,6 +5,7 @@ import { ClipboardCheck, GitCompare, OctagonX, WifiOff } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import type { EvalItemOut, EvalRunDetailOut } from '@/api/evalTypes'
 import { evalKeys, useCancelEval, useEval, useEvals, type EvalItemFilter } from '@/api/queries/evals'
+import { IncludeArchivedToggle } from '@/components/IncludeArchivedToggle'
 import { EvalExportButton } from '@/components/eval/EvalExportButton'
 import { EvalItemDrawer } from '@/components/eval/EvalItemDrawer'
 import { EvalItemsTable } from '@/components/eval/EvalItemsTable'
@@ -92,7 +93,8 @@ function ReportView({ run }: { run: EvalRunDetailOut }) {
   const openedLive = opened ? (live.items[opened.id] ?? opened) : null
 
   const evaluatorKeys = useMemo(() => run.evaluators.map((e) => e.key), [run.evaluators])
-  const others = useEvals({ batch_id: run.batch_id }, { autoRefresh: 3000 })
+  const [includeArchived, setIncludeArchived] = useState(false)
+  const others = useEvals({ batch_id: run.batch_id, include_archived: includeArchived }, { autoRefresh: 3000 })
   const batchRuns = (others.data?.pages.flatMap((p) => p.items) ?? []).filter((r) => r.id !== run.id)
 
   const doCancel = async () => {
@@ -183,6 +185,14 @@ function ReportView({ run }: { run: EvalRunDetailOut }) {
             </Badge>
           ))}
         </div>
+        {run.turn_middlewares && Object.keys(run.turn_middlewares).length > 0 && (
+          <details className="text-xs">
+            <summary className="cursor-pointer text-muted-foreground">逐轮中间件配置</summary>
+            <pre className="mt-2 max-h-64 overflow-auto rounded-md bg-muted/50 p-3">
+              {JSON.stringify(run.turn_middlewares, null, 2)}
+            </pre>
+          </details>
+        )}
       </div>
 
       <PauseNotice status={status} reason={pauseReason} budget={run.budget} progress={progress} />
@@ -209,10 +219,11 @@ function ReportView({ run }: { run: EvalRunDetailOut }) {
         </Card>
       )}
 
-      {batchRuns.length > 0 && (
+      {(batchRuns.length > 0 || (run.batch_runs?.length ?? 0) > 1) && (
         <Card data-testid="batch-runs">
           <CardHeader>
             <CardTitle>同批次的其他 run</CardTitle>
+            <IncludeArchivedToggle includeArchived={includeArchived} setIncludeArchived={setIncludeArchived} label="包括已归档评测" />
           </CardHeader>
           <CardContent>
             <ul className="divide-y divide-border">

@@ -339,3 +339,101 @@ async def test_set_milestone_archives_earlier_versions_and_list_versions_hides_t
 
         r = await c.call_tool("set_milestone", {"version": "v1"})  # 已归档的不能设为阶段性成果
         assert r.is_error and "已归档" in text(r)
+
+
+@pytest.fixture
+async def archived_versions(real_server, project_dir, client, provider):
+    """四个版本中，v1、v2 归档到阶段性成果 v3，v4 未归档。"""
+    async with Client(real_server) as c:
+        for n in range(1, 5):
+            (project_dir / "prompts" / "system.md").write_text(f"第 {n} 版\n", encoding="utf-8")
+            r = await c.call_tool("publish_version", {"notes": f"第{n}版", "tag": f"stage-{n}"})
+            assert not r.is_error, text(r)
+        r = await c.call_tool("set_milestone", {"version": "v3", "title": "第一阶段"})
+        assert not r.is_error, text(r)
+    page = (await client.get("/api/v1/agents/support/versions")).json()
+    return {v["seq"]: v for v in page["items"]}
+
+
+async def test_unarchive_version_restores_one_and_keeps_other_versions_archived(
+    real_server, archived_versions, client
+):
+    async with Client(real_server) as c:
+        r = await c.call_tool("unarchive_version", {"version": "v1"})
+        assert not r.is_error
+        out = text(r)
+        assert "已将 v1 移出归档" in out
+        assert archived_versions[1]["id"] in out
+        assert f"/agents/{archived_versions[1]['agent_id']}?tab=versions" in out
+        visible = text(await c.call_tool("list_versions", {}))
+        assert "| v1 |" in visible and "| v2 |" not in visible
+        assert "已归档 1 个版本" in visible
+        r = await c.call_tool("unarchive_version", {"version": "v1"})
+        assert r.is_error and "没有被归档" in text(r)
+        # 工具返回业务错误后仍可继续使用；未指定的归档版本不受影响。
+        versions = (await client.get("/api/v1/agents/support/versions")).json()["items"]
+        current = {v["seq"]: v for v in versions}
+        assert current[1]["archived_into"] is None
+        assert current[2]["archived_into"] == archived_versions[3]["id"]
+        assert current[3]["milestone"] and current[3]["archived_count"] == 1
+        for n in current:
+            assert current[n]["spec_hash"] == archived_versions[n]["spec_hash"]
+            assert current[n]["tags"] == archived_versions[n]["tags"]
+
+
+async def test_unarchive_milestone_releases_all_but_keeps_milestone(
+    real_server, archived_versions, client
+):
+    async with Client(real_server) as c:
+        r = await c.call_tool("unarchive_version", {"version": "stage-3"})
+        assert not r.is_error
+        assert "v3 下的版本全部移出归档" in text(r)
+        assert "阶段性成果「第一阶段」保留" in text(r)
+        visible = text(await c.call_tool("list_versions", {}))
+        assert all(f"| v{n} |" in visible for n in range(1, 5))
+        assert "★ 第一阶段" in visible and "已隐藏" not in visible
+        versions = (await client.get("/api/v1/agents/support/versions")).json()["items"]
+        assert all(v["archived_into"] is None for v in versions)
+        milestone = next(v for v in versions if v["seq"] == 3)
+        assert milestone["milestone"] and milestone["milestone_title"] == "第一阶段"
+        assert milestone["archived_count"] == 0
+        # 空里程碑再次调用沿用 API 的幂等语义。
+        assert not (await c.call_tool("unarchive_version", {"version": "v3"})).is_error
+
+
+@pytest.mark.parametrize(
+    ("version", "agent"),
+    [("id", None), ("support:v1", None), ("v1", "support"), ("1", "support"), ("stage-1", "support")],
+)
+async def test_unarchive_version_refs_without_project(archived_versions, client, tmp_path, version, agent):
+    """全局版本 id、完整引用可独立使用；短引用通过显式 agent 解析。"""
+    server = build_server(project_dir=tmp_path, client_factory=lambda p: EvalpClient(http=client))
+    ref = archived_versions[1]["id"] if version == "id" else version
+    params = {"version": ref}
+    if agent:
+        params["agent"] = agent
+    async with Client(server) as c:
+        r = await c.call_tool("unarchive_version", params)
+        assert not r.is_error and "已将 v1 移出归档" in text(r)
+    restored = (await client.get(f"/api/v1/versions/{archived_versions[1]['id']}")).json()
+    assert restored["archived_into"] is None
+    milestone = (await client.get(f"/api/v1/versions/{archived_versions[3]['id']}")).json()
+    assert milestone["archived_count"] == 1
+
+
+async def test_unarchive_version_reports_invalid_state_and_missing_reference(
+    real_server, archived_versions, client, tmp_path
+):
+    async with Client(real_server) as c:
+        r = await c.call_tool("unarchive_version", {"version": "v4"})
+        assert r.is_error and "没有被归档" in text(r)
+        r = await c.call_tool("unarchive_version", {"version": "v99"})
+        assert r.is_error and "版本不存在" in text(r)
+        r = await c.call_tool("unarchive_version", {})
+        assert r.is_error
+    outside = build_server(project_dir=tmp_path, client_factory=lambda p: EvalpClient(http=client))
+    async with Client(outside) as c:
+        r = await c.call_tool("unarchive_version", {"version": "v1"})
+        assert r.is_error and "需要指定 agent" in text(r)
+    milestone = (await client.get(f"/api/v1/versions/{archived_versions[3]['id']}")).json()
+    assert milestone["archived_count"] == 2

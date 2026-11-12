@@ -24,6 +24,9 @@ from evalp.cli.common import (
     run,
 )
 from evalp.client import EvalpClient
+from evalp.errors import ValidationFailed
+from evalp.schemas.eval_middleware import dump_plan, validate_plan
+from evalp.workspace_client import WorkspaceError
 
 app = typer.Typer(help="评测：发起、状态、报告、对比、CI 门禁", no_args_is_help=True)
 
@@ -84,6 +87,9 @@ def eval_run(
         ),
     ] = None,
     name: Annotated[str | None, typer.Option("--name", help="评测名称")] = None,
+    turn_middlewares: Annotated[
+        Path | None, typer.Option("--turn-middlewares", help="逐轮中间件 JSON 配置文件，轮号从 1 开始")
+    ] = None,
     wait: Annotated[bool, typer.Option("--wait", help="等待评测结束，显示进度条和报告摘要")] = False,
     poll_interval: Annotated[float, typer.Option("--poll-interval", hidden=True)] = 1.0,
     env: EnvOpt = Environment.production,
@@ -107,6 +113,14 @@ def eval_run(
         baseline=baseline,
         concurrency=concurrency,
     )
+    plan = None
+    if turn_middlewares:
+        try:
+            plan = dump_plan(validate_plan(json.loads(turn_middlewares.read_text(encoding="utf-8"))))
+        except (OSError, ValueError, ValidationFailed) as exc:
+            raise WorkspaceError(
+                f"逐轮中间件配置读取失败：{getattr(exc, 'message', None) or str(exc)}"
+            ) from None
 
     async def go() -> int:
         async with open_client(project, data_dir) as c:
@@ -121,6 +135,7 @@ def eval_run(
                 concurrency=args.concurrency,
                 name=name,
                 environment=env.value,
+                turn_middlewares=plan,
             )
             console.print(f"[green]已发起评测[/green] 批次 {batch.batch_id}")
             for rid, ref in zip(batch.run_ids, batch.version_refs, strict=True):

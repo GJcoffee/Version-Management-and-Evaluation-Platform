@@ -37,7 +37,16 @@ from evalp.spec.diff import diff_specs, identity_paths
 from evalp.spec.models import CodeSpec, ConfigSpec, parse_spec
 from evalp.spec.resolve import iter_pins, unresolve
 from evalp.spec.validate import validate_spec
-from evalp.store.models import Agent, Asset, AssetRevision, Draft, Version, VersionAssetRef, VersionTag
+from evalp.store.models import (
+    Agent,
+    Asset,
+    AssetRevision,
+    Draft,
+    Version,
+    VersionAdapterRoute,
+    VersionAssetRef,
+    VersionTag,
+)
 from evalp.utils.skill_package import SkillPackage, open_package
 from evalp.utils.time import now_iso
 
@@ -60,6 +69,7 @@ class ResolvedVersion:
     spec: dict[str, Any]
     source: dict[str, Any]
     adapter_snapshot: dict[str, Any] | None = None
+    execution_blocked_reason: str | None = None
 
     def spec_model(self) -> ConfigSpec | CodeSpec:
         """把 spec 解析为 ConfigSpec / CodeSpec（引用位置是 ResolvedRef 模型）。"""
@@ -122,10 +132,13 @@ class VersionService:
             a = await s.get(Agent, v.agent_id)
             assert a is not None
             snapshot = None
+            route = await s.get(VersionAdapterRoute, v.id)
             if environment is not None:
                 from evalp.services.adapter import AdapterService
 
-                snapshot = await self.ctx.svc(AdapterService).snapshot(s, v.spec, environment)
+                snapshot = await self.ctx.svc(AdapterService).snapshot(
+                    s, v.spec, environment, version_id=v.id,
+                )
             return ResolvedVersion(
                 id=v.id,
                 agent_id=a.id,
@@ -136,6 +149,7 @@ class VersionService:
                 spec=v.spec,
                 source=v.source or {},
                 adapter_snapshot=snapshot,
+                execution_blocked_reason=route.execution_blocked_reason if route else None,
             )
 
         if session is not None:
@@ -175,7 +189,8 @@ class VersionService:
     async def summary_in_session(self, s: AsyncSession, v: Version) -> VersionSummary:
         """版本摘要（含标签与归档数）。"""
         tags = (await self._tags_of(s, [v.id])).get(v.id)
-        return version_summary(v, tags, (await self._archived_counts(s, [v])).get(v.id, 0))
+        return version_summary(v, tags, (await self._archived_counts(s, [v])).get(v.id, 0),
+                               await s.get(VersionAdapterRoute, v.id))
 
     async def out_in_session(self, s: AsyncSession, v: Version) -> VersionOut:
         """版本详情（含标签与引用的资产）。"""
@@ -202,7 +217,8 @@ class VersionService:
             )
             for ref, rev in rows
         ]
-        summary = version_summary(v, tags, (await self._archived_counts(s, [v])).get(v.id, 0))
+        summary = version_summary(v, tags, (await self._archived_counts(s, [v])).get(v.id, 0),
+                                  await s.get(VersionAdapterRoute, v.id))
         return VersionOut(**summary.model_dump(), spec=v.spec, assets=assets)
 
     async def get(self, ref: str) -> VersionOut:
@@ -230,7 +246,8 @@ class VersionService:
                 )
             ).all()
             tags = await self._tags_of(s, [v.id])
-            summary = version_summary(v, tags.get(v.id), (await self._archived_counts(s, [v])).get(v.id, 0))
+            summary = version_summary(v, tags.get(v.id), (await self._archived_counts(s, [v])).get(v.id, 0),
+                                      await s.get(VersionAdapterRoute, v.id))
             xpaths = identity_paths(v.spec)
         # 每个资产在各版本使用的修订（版本从新到旧）：asset_id -> [(版本, 修订)]
         history: dict[str, list[tuple[Version, AssetRevision]]] = {}
@@ -297,7 +314,12 @@ class VersionService:
             versions: list[Version] = page.items
             tags = await self._tags_of(s, [v.id for v in versions])
             counts = await self._archived_counts(s, versions)
-            items = [version_summary(v, tags.get(v.id), counts.get(v.id, 0)) for v in versions]
+            routes = {r.version_id: r for r in (await s.execute(select(VersionAdapterRoute).where(
+                VersionAdapterRoute.version_id.in_([v.id for v in versions]),
+            ))).scalars()}
+            items = [
+                version_summary(v, tags.get(v.id), counts.get(v.id, 0), routes.get(v.id)) for v in versions
+            ]
         return Page[VersionSummary](items=items, next_cursor=page.next_cursor)
 
     async def list_tags(self, agent_ref: str) -> list[TagOut]:
@@ -440,6 +462,11 @@ class VersionService:
         async with self.ctx.db.write() as s:
             v = await self.resolve_ref_orm(s, version_ref)
             spec = unresolve(v.spec)
+            route = await s.get(VersionAdapterRoute, v.id)
+            if route:
+                from evalp.services.adapter_migration import native_spec
+
+                spec = native_spec(spec, route.adapter)
             spec.pop("adapter", None)  # 历史版本的接入字段已取消，接入由环境提供
             draft = (
                 await s.execute(select(Draft).where(Draft.agent_id == v.agent_id, Draft.name == draft_name))

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -33,6 +33,35 @@ const estimate = {
   exceeds_budget: true,
   per_version: [],
 }
+
+it('逐轮中间件默认折叠，配置随预估和发起提交，修改配置使预估过期', async () => {
+  const { api } = setup()
+  await userEvent.click(await screen.findByTestId('pick-dataset'))
+  const summary = screen.getByText('逐轮中间件（可选）')
+  expect(summary.closest('details')).not.toHaveAttribute('open')
+  await userEvent.click(summary)
+  const plan = { '2': [{ id: 'json_artifact', version: '1.0.0', config: {} }] }
+  fireEvent.change(screen.getByLabelText('中间件计划 JSON'), { target: { value: JSON.stringify(plan) } })
+  await userEvent.click(screen.getByTestId('estimate-eval'))
+  await screen.findByTestId('estimate-panel')
+  expect(api.find('POST', /\/evals/)[0].body).toMatchObject({ turn_middlewares: plan })
+  fireEvent.change(screen.getByLabelText('中间件计划 JSON'), { target: { value: '{}' } })
+  expect(screen.getByTestId('estimate-panel')).toHaveAttribute('data-stale', 'true')
+  await userEvent.click(screen.getByTestId('submit-eval'))
+  await waitFor(() => expect(api.find('POST', /\/evals/)).toHaveLength(2))
+  expect(api.find('POST', /\/evals/)[1].body).toMatchObject({ turn_middlewares: {} })
+})
+
+it('非法逐轮中间件 JSON 阻止预估和发起', async () => {
+  const { api } = setup()
+  await userEvent.click(await screen.findByTestId('pick-dataset'))
+  await userEvent.click(screen.getByText('逐轮中间件（可选）'))
+  fireEvent.change(screen.getByLabelText('中间件计划 JSON'), { target: { value: '[]' } })
+  await userEvent.click(screen.getByTestId('estimate-eval'))
+  await userEvent.click(screen.getByTestId('submit-eval'))
+  expect(api.find('POST', /\/evals/)).toHaveLength(0)
+  expect(screen.getByText(/逐轮中间件须为 JSON 对象/)).toBeInTheDocument()
+})
 
 function setup(testSelectable = false, versions: unknown[] = [version], defaults = ['ver_1']) {
   const api = mockApi({

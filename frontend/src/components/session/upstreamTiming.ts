@@ -6,7 +6,7 @@ export function exactSeconds(ms: number): string {
   return `${(ms / 1000).toFixed(3)}s`
 }
 
-function duration(value: unknown): number | null {
+export function duration(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
 }
 
@@ -15,11 +15,25 @@ export interface RemoteBreakdown {
   toolMs: number | null
 }
 
+/** 历史普通 HTTP 业务桥接：原始日志里已携带核验过的整轮 Trace 用时。 */
+export function bridgeTraceMetrics(value: object): Record<string, unknown> | null {
+  const payload = value as Record<string, unknown>
+  const runMs = duration(payload.upstream_run_ms)
+  if (payload.metric_source !== 'actual_upstream_trace_timestamps' || runMs === null) return null
+  return {
+    scope: 'turn', source: 'hiagent_trace', trace_status: 'complete',
+    metric_source: payload.metric_source, upstream_run_ms: Math.trunc(runMs),
+    llm_api_ms: duration(payload.llm_api_ms), tool_execution_ms: duration(payload.tool_execution_ms),
+  }
+}
+
 /** 远端 Trace 汇总里的 LLM 调用 / 工具执行耗时（各调用之和，并发时可能重叠）；本地测量不在其中。 */
 export function remoteBreakdown(events: readonly EventEnvelope[]): RemoteBreakdown | null {
   const metrics = events.filter((e) => e.type === 'metrics' && e.payload.source === 'hiagent_trace').at(-1)
-  if (!metrics) return null
-  const p = metrics.payload as Record<string, unknown>
+  const historical = events.filter((e) => e.type === 'log' && bridgeTraceMetrics(e.payload)).at(-1)
+  const p = metrics?.payload as Record<string, unknown> | undefined ??
+    (historical ? bridgeTraceMetrics(historical.payload) : null)
+  if (!p) return null
   return { llmMs: duration(p.llm_api_ms), toolMs: duration(p.tool_execution_ms) }
 }
 

@@ -1,8 +1,10 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { GitCompareArrows } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import type { CompareGroup, CompareSide } from '@/api/compareTypes'
 import { useCompares } from '@/api/queries/compare'
+import { IncludeArchivedToggle } from '@/components/IncludeArchivedToggle'
 import { Badge } from '@/components/ui/Badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -29,7 +31,8 @@ function CompareItem({ g }: { g: CompareGroup }) {
 
 /** 首页的“最近对比”卡片（GET /compare） */
 export function RecentComparesCard() {
-  const { data, isLoading, error } = useCompares(6)
+  const [includeArchived, setIncludeArchived] = useState(false)
+  const { data, isLoading, error } = useCompares(6, includeArchived)
   const items = data?.items ?? []
   return (
     <Card>
@@ -38,6 +41,7 @@ export function RecentComparesCard() {
           <GitCompareArrows className="h-4 w-4 text-muted-foreground" />
           最近对比
         </CardTitle>
+        <IncludeArchivedToggle includeArchived={includeArchived} setIncludeArchived={setIncludeArchived} label="包括已归档会话" />
       </CardHeader>
       <CardContent>
         {isLoading ? (

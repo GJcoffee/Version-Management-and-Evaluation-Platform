@@ -40,6 +40,21 @@ def invoke(*args: str, input: str | None = None):
     return runner.invoke(app, list(args), input=input)
 
 
+def test_eval_turn_middlewares_file_and_invalid_config(cli_env, api):
+    target = cli_env / "plan.json"
+    target.write_text(json.dumps({"2": [{"id": "json_artifact", "config": {}}]}))
+    post = api.post("/evals").mock(return_value=httpx.Response(
+        201, json={"batch_id": "evb_1", "runs": [{"id": "evr_1", "version_id": "ver_1"}]},
+    ))
+    result = invoke("eval", "run", "--dataset", "ds", "--turn-middlewares", str(target))
+    assert result.exit_code == 0, result.output
+    assert json.loads(post.calls.last.request.content)["turn_middlewares"]["2"][0]["id"] == "json_artifact"
+    target.write_text('{"1": [{"id": "json_artifact"}]}')
+    result = invoke("eval", "run", "--dataset", "ds", "--turn-middlewares", str(target))
+    assert result.exit_code == 1 and "第 1 轮" in result.output
+    assert post.call_count == 1
+
+
 def draft_json(rev: int) -> dict:
     return {"id": "drf_1", "name": "main", "revision": rev, "spec": {}}
 

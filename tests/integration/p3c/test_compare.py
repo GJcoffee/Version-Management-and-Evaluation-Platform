@@ -11,6 +11,30 @@ from sqlalchemy import select
 from .conftest import API
 
 
+async def test_compare_archive_filter_checks_both_sides_before_pagination(cw):
+    old = await cw.config_version(name="archive-compare")
+    draft = (await cw.client.post(f"{API}/versions/{old['id']}/to-draft", json={})).json()["draft"]
+    draft = (await cw.api.save(draft, {**draft["spec"], "prompts": {"system": "阶段成果"}}))["draft"]
+    latest = (await cw.api.publish(draft))["version"]
+    visible = [await cw.new_compare(latest, latest), await cw.new_compare(latest, latest)]
+    hidden = [await cw.new_compare(old, latest), await cw.new_compare(latest, old)]
+    r = await cw.client.post(f"{API}/versions/{latest['id']}/milestone", json={})
+    assert r.status_code == 200, r.text
+    page = (await cw.client.get(f"{API}/compare?limit=1")).json()
+    assert [g["id"] for g in page["items"]] == [visible[1]["id"]]
+    second = (await cw.client.get(f"{API}/compare", params={
+        "limit": 1, "cursor": page["next_cursor"],
+    })).json()
+    assert [g["id"] for g in second["items"]] == [visible[0]["id"]]
+    assert second["next_cursor"] is None
+    all_groups = (await cw.client.get(f"{API}/compare?include_archived=true")).json()["items"]
+    assert {g["id"] for g in all_groups} == {g["id"] for g in visible + hidden}
+    for g in hidden:
+        assert (await cw.client.get(f"{API}/compare/{g['id']}")).status_code == 200
+    assert (await cw.client.delete(f"{API}/versions/{latest['id']}/milestone")).status_code == 200
+    assert len((await cw.client.get(f"{API}/compare")).json()["items"]) == 4
+
+
 async def test_live_compare_alignment(cw):
     vs = await cw.setup_versions()
     cmp = await cw.new_compare(vs["P"], vs["T1"], title="P vs T1")

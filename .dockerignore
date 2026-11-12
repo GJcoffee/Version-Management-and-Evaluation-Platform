@@ -69,3 +69,9 @@ evals
 **/test-results
 **/playwright-report
 **/.DS_Store
+
+# 本机编辑器配置、临时草稿与业务过程记录。
+**/.trae
+draft_*_folder
+test.md
+v77第五轮修复说明.md

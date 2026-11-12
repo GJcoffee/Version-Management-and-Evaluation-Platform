@@ -257,6 +257,11 @@ export function VersionsTab({
               </TableCell>
               <TableCell>
                 <IdText value={v.spec_hash} />
+                {v.runtime_binding && (
+                  <p className="mt-1 text-xs text-muted-foreground" title={v.runtime_binding.execution_blocked_reason}>
+                    {v.runtime_binding.adapter} · 历史内容待发布
+                  </p>
+                )}
               </TableCell>
               <TableCell>
                 <div className="flex flex-wrap items-center gap-1">
@@ -291,13 +296,14 @@ export function VersionsTab({
                     variant="outline"
                     onClick={() => void startChat(v)}
                     loading={chatting === v.id}
-                    disabled={chatting !== null}
+                    disabled={chatting !== null || Boolean(v.runtime_binding?.execution_blocked_reason)}
                     data-testid={`chat-v${v.seq}`}
                   >
                     {chatting !== v.id && <MessageSquarePlus className="h-3.5 w-3.5" />}
                     对话
                   </Button>
-                  <Button size="sm" variant="outline" onClick={() => setEvalFor(v)} data-testid={`eval-v${v.seq}`}>
+                  <Button size="sm" variant="outline" onClick={() => setEvalFor(v)} data-testid={`eval-v${v.seq}`}
+                    disabled={Boolean(v.runtime_binding?.execution_blocked_reason)}>
                     <FlaskConical className="h-3.5 w-3.5" />
                     评测
                   </Button>

@@ -1,6 +1,5 @@
-"""适配器接入配置：全平台只有生产 / 测试两套，每次变化存档；运行快照与不可变业务版本分离。"""
+"""按平台维护生产 / 测试连接配置；运行快照与不可变业务版本分离。"""
 
-from copy import deepcopy
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
@@ -10,14 +9,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from evalp.context import AppContext
 from evalp.errors import Conflict, NotFound, ValidationFailed
 from evalp.ids import new_id
-from evalp.runtime.adapters.registry import validate_binding
+from evalp.runtime.adapters.binding import normalize_binding
+from evalp.runtime.adapters.registry import definitions, validate_binding
+from evalp.runtime.credentials import CredentialsManager
+from evalp.runtime.hiagent_auth import AccountAuthError
 from evalp.schemas.adapter import Environment
 from evalp.spec.models import AdapterBinding
-from evalp.store.models import AdapterCredential, AdapterEnvironment, AdapterEnvironmentRevision
+from evalp.store.models import (
+    AdapterCredential,
+    AdapterEnvironment,
+    AdapterEnvironmentRevision,
+    VersionAdapterRoute,
+)
 from evalp.utils.canonical import canonical_json, sha256_hex
 from evalp.utils.time import now_iso
 
 NO_CHANGE = "内容未变化"
+
+
+def environment_key(name: str, adapter: str) -> str:
+    """HiAgent 沿用旧键，其他平台的存档相互隔离。"""
+    if adapter not in {d.adapter for d in definitions()}:
+        raise ValidationFailed(f"适配器不可用: {adapter}")
+    return name if adapter == "hiagent" else f"{adapter}:{name}"
 
 
 class EnvironmentUpdate(BaseModel):
@@ -46,8 +60,20 @@ class CredentialCreate(BaseModel):
     secret: SecretStr
 
 
+def _canonical_binding(binding: dict | None) -> dict[str, Any] | None:
+    """读取时统一成新结构；旧存档只做展示与运行，不重写历史。"""
+    if binding is None:
+        return None
+    normalized = normalize_binding(binding)
+    return {
+        "adapter": normalized.adapter, "major": normalized.major,
+        "config": normalized.config, "credential_ref": normalized.credential_ref,
+    }
+
+
 def fingerprint_of(binding: dict | None) -> str | None:
-    return sha256_hex(canonical_json(binding)) if binding is not None else None
+    canonical = _canonical_binding(binding)
+    return sha256_hex(canonical_json(canonical)) if canonical is not None else None
 
 
 class AdapterService:
@@ -58,69 +84,87 @@ class AdapterService:
 
     @staticmethod
     def _out(name: str, env: AdapterEnvironment, row: AdapterEnvironmentRevision | None) -> dict[str, Any]:
+        binding = _canonical_binding(row.binding) if row else None
         return {
             "environment": name, "configured": row is not None, "revision": env.revision,
-            "binding": deepcopy(row.binding) if row else None,
-            "fingerprint": fingerprint_of(row.binding) if row else None,
+            "binding": binding,
+            "fingerprint": fingerprint_of(binding),
             "source": row.source if row else None, "reason": row.reason if row else None,
             "origin": row.origin if row else None, "created_at": row.created_at if row else None,
             "updated_at": env.updated_at,
         }
 
-    async def _state(self, s: AsyncSession, name: str) -> dict[str, Any]:
-        env = await s.get(AdapterEnvironment, name)
-        assert env is not None
-        row = await s.get(AdapterEnvironmentRevision, (name, env.revision)) if env.revision else None
-        return self._out(name, env, row)
+    async def _state(self, s: AsyncSession, name: str, adapter: str = "hiagent") -> dict[str, Any]:
+        key = environment_key(name, adapter)
+        env = await s.get(AdapterEnvironment, key)
+        if env is None:
+            env = AdapterEnvironment(name=key, revision=0)
+        row = await s.get(AdapterEnvironmentRevision, (key, env.revision)) if env.revision else None
+        return {**self._out(name, env, row), "adapter": adapter}
 
-    async def get(self) -> dict[str, Any]:
+    async def get(self, adapter: str = "hiagent") -> dict[str, Any]:
         """两个环境的当前配置；``test_selectable`` 表示测试已配置且与生产不同，界面才提供测试选项。"""
         async with self.ctx.db.read() as s:
-            production, test = await self._state(s, "production"), await self._state(s, "test")
+            production = await self._state(s, "production", adapter)
+            test = await self._state(s, "test", adapter)
         return {
             "production": production, "test": test,
             "test_selectable": test["configured"] and test["fingerprint"] != production["fingerprint"],
         }
 
-    async def revisions(self, name: Environment) -> list[dict[str, Any]]:
-        """环境的存档历史，新的在前。"""
+    async def revisions(self, name: Environment, adapter: str = "hiagent") -> list[dict[str, Any]]:
+        """环境的存档历史，新的在前；旧存档读取时归一化，不重写数据库。"""
         async with self.ctx.db.read() as s:
-            env = await s.get(AdapterEnvironment, name)
-            assert env is not None
+            key = environment_key(name, adapter)
+            env = await s.get(AdapterEnvironment, key)
+            if env is None:
+                return []
             rows = (await s.execute(
-                select(AdapterEnvironmentRevision).where(AdapterEnvironmentRevision.environment == name)
+                select(AdapterEnvironmentRevision).where(AdapterEnvironmentRevision.environment == key)
                 .order_by(AdapterEnvironmentRevision.created_at.desc(),
                           AdapterEnvironmentRevision.revision.desc())
             )).scalars().all()
             return [{
-                "revision": r.revision, "current": r.revision == env.revision, "binding": r.binding,
+                "revision": r.revision, "current": r.revision == env.revision,
+                "binding": _canonical_binding(r.binding),
                 "fingerprint": fingerprint_of(r.binding), "source": r.source, "reason": r.reason,
                 "origin": r.origin, "created_at": r.created_at,
             } for r in rows]
 
     async def snapshot(
-        self, s: AsyncSession, spec: dict[str, Any], environment: str
+        self, s: AsyncSession, spec: dict[str, Any], environment: str, *, version_id: str | None = None,
     ) -> dict[str, Any] | None:
         """事务内固化一次运行用的接入：只有 ``transport: adapter`` 的版本使用环境配置。
 
         要测试但测试未配置、或与生产内容相同时，落到生产并在 ``requested_environment`` 里留下请求的环境。
         """
-        if spec.get("transport") != "adapter":
+        route = await s.get(VersionAdapterRoute, version_id) if version_id else None
+        if spec.get("transport") != "adapter" and route is None:
             return None
-        production = await self._state(s, "production")
+        adapter = route.adapter if route else spec.get("platform") or "hiagent"
+        production = await self._state(s, "production", adapter)
         chosen = production
         if environment == "test":
-            test = await self._state(s, "test")
+            test = await self._state(s, "test", adapter)
             if test["configured"] and test["fingerprint"] != production["fingerprint"]:
                 chosen = test
         if not chosen["configured"]:
             raise ValidationFailed("生产环境尚未配置适配器，请先在 设置 → 适配器 中配置并推送到生产")
+        if chosen["binding"]["config"].get("business_bridge"):
+            raise ValidationFailed("旧桥环境已停用，请先配置原生平台接入")
+        if route and chosen["binding"]["major"] != route.major:
+            raise ValidationFailed("版本接入与环境的适配器 major 不兼容")
         out = {
-            "environment": chosen["environment"], "revision": chosen["revision"],
+            "adapter": adapter, "environment": chosen["environment"], "revision": chosen["revision"],
             "binding": chosen["binding"], "fingerprint": chosen["fingerprint"], "reason": chosen["reason"],
         }
         if chosen["environment"] != environment:
             out["requested_environment"] = environment
+        if route:
+            out["migration_id"] = route.migration_id
+            out["execution_blocked_reason"] = route.execution_blocked_reason
+        elif spec.get("native_deployment_required"):
+            out["execution_blocked_reason"] = "请先发布并核实该草稿对应的原生业务内容"
         return out
 
     # ------------------------------------------------------------ 校验
@@ -129,67 +173,85 @@ class AdapterService:
         binding = validate_binding(binding)
         async with self.ctx.db.read() as s:
             row = await s.get(AdapterCredential, binding.credential_ref)
-            if row is None or row.adapter_id != binding.id:
+            if row is None or row.adapter_id != binding.adapter:
                 raise ValidationFailed("凭据引用不存在或不适用于该适配器")
         if not await self.ctx.secrets.get(binding.credential_ref):
             raise ValidationFailed("凭据正文不可用，请重新保存凭据")
+        if binding.config.get("observe_account_ref"):
+            try:
+                await self.ctx.svc(CredentialsManager).account(
+                    binding.config["observe_account_ref"], binding.config.get("observe_base_url", ""),
+                )
+            except (AccountAuthError, NotFound) as exc:
+                raise ValidationFailed(str(exc)) from None
         return binding
 
     # ------------------------------------------------------------ 变更
 
     async def _append(
         self, s: AsyncSession, name: str, binding: dict[str, Any], source: str, reason: str,
-        origin: dict[str, Any] | None,
+        origin: dict[str, Any] | None, adapter: str = "hiagent",
     ) -> dict[str, Any]:
         """追加存档并设为当前；内容与当前相同则不追加。"""
-        before = await self._state(s, name)
+        key = environment_key(name, adapter)
+        before = await self._state(s, name, adapter)
         if before["fingerprint"] == fingerprint_of(binding):
             return {"environment": name, "before": before, "target": before, "applied": False,
                     "message": NO_CHANGE}
         latest = (await s.execute(
             select(func.max(AdapterEnvironmentRevision.revision))
-            .where(AdapterEnvironmentRevision.environment == name)
+            .where(AdapterEnvironmentRevision.environment == key)
         )).scalar_one_or_none() or 0
         now = now_iso()
+        env = await s.get(AdapterEnvironment, key)
+        if env is None:
+            env = AdapterEnvironment(name=key, revision=0)
+            s.add(env)
+            await s.flush()
         s.add(AdapterEnvironmentRevision(
-            environment=name, revision=latest + 1, binding=binding, source=source, reason=reason,
+            environment=key, revision=latest + 1, binding=binding, source=source, reason=reason,
             origin=origin, created_at=now,
         ))
-        env = await s.get(AdapterEnvironment, name)
-        assert env is not None
         env.revision, env.updated_at = latest + 1, now
         await s.flush()
-        return {"environment": name, "before": before, "target": await self._state(s, name), "applied": True}
+        return {"environment": name, "before": before,
+                "target": await self._state(s, name, adapter), "applied": True}
 
-    async def update_test(self, body: EnvironmentUpdate) -> dict[str, Any]:
+    async def update_test(self, body: EnvironmentUpdate, adapter: str = "hiagent") -> dict[str, Any]:
         binding = await self.validate(body.binding)
+        if binding.adapter != adapter:
+            raise ValidationFailed("绑定平台与所选平台不一致")
         if binding.config.get("business_bridge"):
             raise ValidationFailed("业务桥接绑定的是某个固定版本，不能用于全平台的环境配置")
         async with self.ctx.db.write() as s:
-            current = await self._state(s, "test")
+            current = await self._state(s, "test", adapter)
             if current["revision"] != body.expected_revision:
                 raise Conflict("测试配置已被修改，请刷新后重试", {"current_revision": current["revision"]})
-            return await self._append(s, "test", binding.model_dump(), "edit", body.reason, None)
+            return await self._append(s, "test", binding.model_dump(), "edit", body.reason, None, adapter)
 
-    async def push(self, body: EnvironmentPush) -> dict[str, Any]:
+    async def push(self, body: EnvironmentPush, adapter: str = "hiagent") -> dict[str, Any]:
         """把测试的当前配置复制为生产的新存档。"""
         async with self.ctx.db.write() as s:
-            test = await self._state(s, "test")
+            test = await self._state(s, "test", adapter)
             if test["revision"] != body.test_revision:
                 raise Conflict("测试配置已被修改，请刷新后重试", {"current_revision": test["revision"]})
             reason = f"推送自测试存档 #{test['revision']}" + (f"：{body.reason}" if body.reason else "")
             return await self._append(s, "production", test["binding"], "push", reason,
-                                      {"environment": "test", "revision": test["revision"]})
+                                      {"environment": "test", "revision": test["revision"]}, adapter)
 
-    async def rollback(self, body: EnvironmentRollback) -> dict[str, Any]:
+    async def rollback(self, body: EnvironmentRollback, adapter: str = "hiagent") -> dict[str, Any]:
         """生产回到某个历史存档：把它的配置追加为新存档，不改动历史。"""
         async with self.ctx.db.write() as s:
-            target = await s.get(AdapterEnvironmentRevision, ("production", body.revision))
+            target = await s.get(
+                AdapterEnvironmentRevision, (environment_key("production", adapter), body.revision),
+            )
             if target is None:
                 raise NotFound("生产存档不存在")
+            if (target.origin or {}).get("retired_bridge") or target.binding["config"].get("business_bridge"):
+                raise ValidationFailed("该存档对应已停用的旧桥，不能恢复为平台生产接入")
             reason = f"回滚到存档 #{body.revision}" + (f"：{body.reason}" if body.reason else "")
-            return await self._append(s, "production", target.binding, "rollback", reason,
-                                      {"environment": "production", "revision": body.revision})
+            return await self._append(s, "production", _canonical_binding(target.binding), "rollback", reason,
+                                      {"environment": "production", "revision": body.revision}, adapter)
 
     # ------------------------------------------------------------ 凭据
 
@@ -200,7 +262,8 @@ class AdapterService:
 
     async def create_credential(self, body: CredentialCreate) -> dict[str, str]:
         """创建不可变凭据引用，更新凭据时创建新引用，历史运行不随之变化。"""
-        if body.adapter_id != "hiagent" or not body.secret.get_secret_value().strip():
+        known = {d.adapter for d in definitions()}
+        if body.adapter_id not in known or not body.secret.get_secret_value().strip():
             raise ValidationFailed("适配器或凭据不合法")
         ref = f"adapter:{new_id('prv')}"
         await self.ctx.secrets.set(ref, body.secret.get_secret_value())

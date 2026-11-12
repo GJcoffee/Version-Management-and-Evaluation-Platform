@@ -108,9 +108,12 @@ Cursor 不一定在项目目录启动 MCP 进程，所以用 `--project-dir` 显
 | `get_conventions` | `agent?` | agent 生效的**发布规范**（服务端强制）和快照 `map` 规则说明；当前项目的规则里缺 `id` 的会被标出。**发布、推送前先调用**（MCP 服务说明里也写了这一点） |
 | `publish_version` | `notes?`、`tag?` | 先 push 再发布（标签与版本在服务端原子创建）；返回版本号、是否已存在（内容相同不会新建）、相对父版本的变更摘要。违反规范时返回服务端的中文说明 |
 | `list_versions` | `agent?`、`limit?`、`include_archived?` | 版本列表：版本号、标签、阶段（阶段性成果标 ★ 并给出阶段名和已归档数）、时间、来源、备注。已归档到阶段性成果下的版本默认隐藏，`include_archived=true` 显示 |
-| `set_milestone` | `version`、`title?`、`agent?` | 把版本标记为阶段性成果，并把它之前未归档的过程版本全部归档到它名下（只影响列表展示，已归档版本照常可对话、评测、diff 和引用）；已归档的版本不能设为阶段性成果。取消或移出归档请用 Web UI / `evalp milestone --remove` |
+| `set_milestone` | `version`、`title?`、`agent?` | 把版本标记为阶段性成果，并把它之前未归档的过程版本全部归档到它名下（只影响列表展示，已归档版本照常可对话、评测、diff 和引用）；已归档的版本不能设为阶段性成果。移出归档用 `unarchive_version`，取消阶段性成果用 Web UI / `evalp milestone --remove` |
+| `unarchive_version` | `version`、`agent?` | 把指定版本移出归档，重新显示在默认版本列表中；指定阶段性成果时，将其下版本全部移出归档，保留阶段性成果和阶段名。未归档的普通版本返回错误。支持 `vN`、标签、版本 id 和 `agent:vN` |
 | `diff_versions` | `left`、`right`、`agent?`、`max_lines?` | 两个版本的变更列表 + 文本 diff（默认截断到 200 行）。版本可写 `v3`、标签或版本 id |
-| `chat` | `message`、`version?`、`session_id?`、`agent?` | 和某个已发布版本对话一轮；返回回复、工具调用摘要、`session_id`（继续对话时传回） |
+| `list_middlewares` | 无 | 查询可用轮间中间件、版本与配置定义 |
+| `get_artifact_candidates` | `session_id`、`source_turn_id`、`url_pointer?` | 解析已成功结束轮次的 JSON 产物候选链接，不下载产物；多个候选须明确选择 |
+| `chat` | `message`、`version?`、`session_id?`、`agent?`、`environment?`、`middlewares?` | 和某个已发布版本对话一轮；返回回复、工具调用摘要、`session_id`（继续对话时传回）和 `turn_id`。`middlewares` 按轮启用 JSON 产物处理 |
 | `run_eval` | `dataset`、`versions?`、`evaluators?`、`repeats?`、`baseline?`、`wait?` | 发起评测。`wait` 默认 true，最多等 10 分钟，返回报告摘要和与基线的对比；`false` 时只返回 run id |
 | `get_eval_report` | `run_id`、`failed_only?`、`limit?` | 指标摘要 + 未通过 / 低分 / 执行失败的用例（输入、期望、输出、评审理由） |
 | `get_eval_compare` | `left`、`right`、`case_class?`、`limit?` | 整体结论（Δ、置信区间、改善 / 退化计数）+ 退化用例明细（附两侧输出和评审理由） |
@@ -133,7 +136,11 @@ Cursor 不一定在项目目录启动 MCP 进程，所以用 `--project-dir` 显
 - `dataset` 可以写数据集名称（`support-regression`）、`dataset/support-regression@3` 或修订 id；
 - `evaluators` 省略时读取 `[eval].evaluators`，再省略则读项目根目录的 `evals.yaml`，也可以传评估器对象列表；
 - `versions` 省略时评测最新版本；给了 `baseline` 时每个版本都与基线对比，基线在对比的左侧；
+- 移出归档：先用 `list_versions(include_archived=true)` 查看归档关系，再调用 `unarchive_version`，例如参数 `{"version":"v2","agent":"support"}`。指定的是归档版本时只移出该版本；指定的是阶段性成果时移出其下全部版本。省略 `agent` 时使用当前项目配置，版本 id 或 `agent:vN` 可在无项目目录时使用；
+- 轮间 JSON：继续已有会话时，在 `chat` 中显式传入 `middlewares`，例如 `{"message":"不添加对白","session_id":"ses_...","middlewares":[{"id":"json_artifact","version":"1.0.0","config":{"url_pointer":"/jsonUrl","content_pointer":"/story/scenes"}}]}`。首期最多一个；来源默认为紧邻上一轮，省略或传 `[]` 不启用，不会自动延续到下一轮。多个候选先用 `get_artifact_candidates` 查询，把选中的候选 `id` 写入 `config.selected_candidate_id`，同时携带 `source_turn_id` 与 `expected_previous_turn_id`；失败重试可固定原 `source_turn_id` 并省略预期上一轮。完整配置与边界见 [API 轮间 JSON 处理](api.md#get-middlewares-与轮间-json-处理)；
 - 评测等待超时（10 分钟）不会取消评测，稍后用 `get_eval_report` / `get_eval_status` 查看；
+- 已有轮次的 Trace 重查用 `refresh_trace`，例如 `{"turn_id":"trn_...","config_source":"original","force":true}`。
+  `force` 默认 `false`，设为 `true` 可修正已 `complete` 的旧汇总；只查询原上游消息，更新指标并记录审计，不重新执行业务；
 - `upsert_asset` / `import_dataset` 的 `path` 必须在项目目录内；`replay_session` 的 `mode=anchored` 精确比较单轮差异（排除前面轮次差异的累积影响），`mode=free` 观察整段对话的走向；自由模式只重放 `turns` 里选中的轮次时，上下文只含选中的前几轮。重放中途有轮次没能执行时，摘要里会注明「重放未能完整执行」。
 
 ### 默认评测配置（`.evalp.toml` 的 `[eval]`）
@@ -203,6 +210,12 @@ versions = ["latest"]                    # 默认评测哪些版本
 - 在 Web UI 里改了草稿后，助手 `push_draft` 会报冲突，先 `pull_draft` 合并，或确认后 `push_draft(force=true)`。
 
 ## 6. 常见问题
+
+旧 HTTP 接入迁移使用 `migrate_adapter_bindings`，传入 Agent、连续版本范围、平台与 major、
+当前生产／测试存档号和原因，默认 `dry_run=true`。确认预览后传 `dry_run=false` 原子应用；
+`get_adapter_binding_migration(migration_id)` 读取计数与审计摘要。迁移不运行模型。
+旧业务内容未在原生入口发布并核实前，执行返回 `NATIVE_DEPLOYMENT_REQUIRED`；
+历史 Spec、资产、输出与评分保留，旧轮次可按原消息 ID 重查 Trace。
 
 | 现象 | 处理 |
 |---|---|

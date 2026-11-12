@@ -1,13 +1,26 @@
-import type { AdapterBinding, BindingSnapshot } from '@/api/queries/adapters'
+import type { AnyAdapterBinding, BindingSnapshot } from '@/api/queries/adapters'
 import { ENVIRONMENT_LABEL } from '@/api/queries/adapters'
 
-export const adapterName = (binding: AdapterBinding) => (binding.id === 'hiagent' ? 'HiAgent' : binding.id)
+/** 平台 id：新绑定用 adapter，历史快照用 id。 */
+export function bindingAdapter(binding: AnyAdapterBinding): string {
+  return 'adapter' in binding ? binding.adapter : binding.id
+}
 
-/** 适配器与关键配置，如「HiAgent 1.0.0 · 发布版本 47 · app app-test」 */
-export function bindingSummary(binding: AdapterBinding): string {
+/** 实现大版本：新绑定用 major，历史快照从 version 取首段。 */
+export function bindingMajor(binding: AnyAdapterBinding): number {
+  if ('major' in binding) return binding.major
+  const major = Number(String(binding.version).split('.')[0])
+  return Number.isFinite(major) && major >= 1 ? major : 1
+}
+
+export const adapterName = (binding: AnyAdapterBinding) =>
+  (bindingAdapter(binding) === 'hiagent' ? 'HiAgent' : bindingAdapter(binding))
+
+/** 适配器与关键配置，如「HiAgent · 实现 v1 · 发布版本 47 · app app-test」 */
+export function bindingSummary(binding: AnyAdapterBinding): string {
   const { published_version: published, app_id: app } = binding.config
   return [
-    `${adapterName(binding)} ${binding.version}`,
+    `${adapterName(binding)} · 实现 v${bindingMajor(binding)}`,
     published ? `发布版本 ${String(published)}` : null,
     app ? `app ${String(app)}` : null,
   ].filter(Boolean).join(' · ')

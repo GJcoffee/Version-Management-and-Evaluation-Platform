@@ -654,8 +654,10 @@ CSV 需要 `column_map`（`{字段名: 列名}`）；字段名可用 `case_key /
 空串、纯空白、超长、缺字段或有多余字段返回 400 `VALIDATION_ERROR`，会话不存在返回 404。会话正在执行时也可以改。
 
 ### GET /sessions
-`?agent_id=（id 或名称）&version_id=&mode=chat,replay&q=标题关键字&limit=&cursor=`；`mode` 可逗号分隔，缺省为 `chat,replay`（**不含** `eval`、`judge`）。
+`?agent_id=（id 或名称）&version_id=&mode=chat,replay&q=标题关键字&include_archived=false&limit=&cursor=`；`mode` 可逗号分隔，缺省为 `chat,replay`（**不含** `eval`、`judge`）。
 新的在前，分页同 0 节。
+默认隐藏所属版本已归档的会话，与版本列表的阶段性成果及未归档版本对齐；`include_archived=true` 包括归档会话。
+归档过滤在分页前执行，与搜索、模式和版本筛选叠加；按 ID 读取会话详情仍可访问全部历史。
 想排除重放产生的会话，传 `mode=chat`（缺省值保持不变以兼容旧客户端；前端的“与其他会话对比”选择器默认就这样过滤，可勾选“包含重放会话”）。
 
 ### GET /sessions/{id}?include=turns,events
@@ -691,17 +693,30 @@ CSV 需要 `column_map`（`{字段名: 列名}`）；字段名可用 `case_key /
 取消执行中的轮次，等它收尾后返回（`status="cancelled"`，没有 `error`；子进程型 agent 的整个进程树会被终止，HTTP 型会收到 `/evalp/cancel` 并断开连接）。
 轮次已结束时原样返回，不报错。
 
+### POST /turns/{id}/trace/refresh → TurnOut
+重新查询该轮的远端 Trace，用于 Trace 未取得或部分缺失（`unavailable` / `partial`）后重试。
+请求体可省略，默认 `{"config_source":"current"}`：用原平台当前环境的最新凭据和观测配置。
+默认跳过 `complete`；显式传 `force: true` 可重新查询已完整的 Trace，修正旧解析器漏算的缓存。
+强制重查从原 SSE 事件恢复整轮用量，SSE 缺失时以本次 Trace 明细重算，会话累计按差额更新。
+可带 `environment: "production"|"test"`、`credential_ref`（直接选择新凭据），或
+`config_source: "original"`（沿用原连接配置）。原应用、版本、workspace 与 message_id 保持不变；只允许适配器声明的观测字段更新。
+只有带平台绑定、且适配器声明 `refresh_trace` 能力的轮次可用；取得后按远端口径回填用时、token 与调用次数，
+每次查询在 `usage.trace_refresh` 和追加的 metrics 事件里记录配置来源、存档号、凭据引用、实现指纹、查询时间与结果。
+失败时保留已取得的指标和明细；没有 message_id 时明确不可重查。轮次或会话正在执行、无平台绑定、缺少上游 message_id
+或适配器不支持该能力时返回 400 `VALIDATION_ERROR`。重查事件以该轮 `turn_id` 追加到会话事件流。
+
 ### GET /middlewares 与轮间 JSON 处理
 
-`GET /middlewares` 返回 `{"middlewares": [{id, version, name, input_modes, config_schema}]}`。
-首期只有 `json_artifact@1.0.0`，支持普通对话会话的文本输入。
+`GET /middlewares` 返回 `{"middlewares": [{id, version, name, phase, input_modes, config_schema}]}`。
+`phase` 为 `input` 或 `output`：`json_artifact@1.0.0` 读取上一轮 JSON（`input`），
+`output_contract@1.0.0` 校验本轮最终输出（`output`）。两者支持普通对话和评测会话的文本输入。
 
 `GET /sessions/{id}/turns/{source_turn_id}/artifact-candidates?url_pointer=/jsonUrl` 只解析来源轮次
 已保存的成功最终回复，不下载产物。返回
 `{"source_turn_id": "...", "candidates": [{"id": "...", "url": "...", "location": "/jsonUrl"}]}`。
 来源必须属于该会话；无后缀链接可通过 `url_pointer` 指定，多个候选须明确选择。
 
-`POST /sessions/{id}/turns` 新增可选 `middlewares`，首期最多一个：
+`POST /sessions/{id}/turns` 新增可选 `middlewares`，每轮最多两个：最多一个 `input` + 一个 `output`：
 
 ```json
 {
@@ -720,21 +735,57 @@ CSV 需要 `column_map`（`{字段名: 列名}`）；字段名可用 `case_key /
 }
 ```
 
-`source_turn_id` 缺省为紧邻上一轮，要求成功且有最终回复；不跳过失败轮次。
-新选择携带 `expected_previous_turn_id`，候选查询后上一轮变化返回 409 `ARTIFACT_SOURCE_CHANGED`。
-失败重试可明确保留较早的 `source_turn_id` 并省略预期上一轮。未知处理器/版本、非文本输入、
-评测/重放上下文与 `business_bridge` 接入会拒绝配置。省略中间件或传空列表保持旧行为。
+输出契约示例（阶段号为本轮 `Turn.idx + 1`，从 1 开始）：
+
+```json
+{
+  "input": "继续",
+  "middlewares": [{
+    "id": "output_contract",
+    "version": "1.0.0",
+    "config": {
+      "agent_id": "creative-director",
+      "required_keys": ["summary", "outputType", "agentInfo", "confirmInfo",
+                        "artifactInfo", "agentInvocationChain"],
+      "examine_key": "examineInfo",
+      "stages": {
+        "1": {"output_type": "confirm", "approval_code": "approve"},
+        "2": {"output_type": "confirm_artifact", "artifact_type": 1, "approval_code": "approve"},
+        "3": {"output_type": "examine", "artifact_type": 5,
+              "examine_status": [2, 3], "approval_code": "approve"},
+        "4": {"output_type": "finish", "terminal": true}
+      }
+    }
+  }]
+}
+```
+
+`output_contract` 消费本轮最终回复：整段以 `http://` / `https://` 开头时按 JSON URL 下载，
+否则按直接 JSON 解析；对象键集合须精确等于 `required_keys`（`examine` 阶段额外要求 `examine_key`）。
+`terminal` 要求确认题为空、`artifactInfo` 为 `null` 且没有审核信息；非 `terminal` 要求确认题非空，
+配置了 `approval_code` 时该批准选项必须存在。`confirm_artifact` / `examine` 要求 `artifactInfo` 的
+`artifactType` 在 `artifact_type`（或 `artifact_types`）内、`artifactId` 非空、`cardInfoList` 非空；
+`examine` 还要求 `examineStatus` 在 `examine_status`（默认 `[2, 3]`）内且 `examineInfoList` 非空。
+其余阶段 `artifactInfo` 必须为 `null`。URL 读取沿用上文 `[artifacts]` 域名白名单、大小与超时限制。
+
+`source_turn_id` 缺省为紧邻上一轮，要求成功且有最终回复；不跳过失败轮次。仅 `input` 步骤使用来源与
+`expected_previous_turn_id`。新选择携带 `expected_previous_turn_id` 时，候选查询后上一轮变化返回 409
+`ARTIFACT_SOURCE_CHANGED`。失败重试可明确保留较早的 `source_turn_id` 并省略预期上一轮。未知处理器/版本、
+非文本输入、同一阶段重复选择、重放上下文与 `business_bridge` 接入会拒绝配置。省略中间件或传空列表保持旧行为。
 
 `TurnOut` 增加可空的 `effective_input: Message` 与 `middleware_snapshot: {schema_version, steps}`。
-步骤记录请求配置、固定来源、`pending|running|ok|error|cancelled|timeout`、`duration_ms`、
-`source_url`、`raw_sha256`、`result_blob_hash` 和错误。`GET /turns/{id}` 可单独读取完整轮次记录。
+步骤记录请求配置、`phase`（`input`/`output`）、固定来源、`pending|running|ok|error|cancelled|timeout`、
+`duration_ms`、`source_url`、`raw_sha256`、`result_blob_hash`；输出步骤还记录 `stage`、`outputType`、
+`artifactType`、`sha256`、`size` 和错误。`GET /turns/{id}` 可单独读取完整轮次记录。
 `input` 与 `turn.start.input` 保留原始指令；中间件在同一取消/超时预算内运行，
 保存实际输入和独立 Blob 引用成功后才调用 Adapter。成功轮次的后续历史优先使用 `effective_input`。
 
 Trace 复用 `span.start/end`，`attrs.category="middleware"`；根 Span 的结束内容含实际输入和结果 Blob。
-大 `turn.start` 存根保留 `has_middleware=true`，刷新后可读取轮次详情。
-`usage.middleware_ms` 单独记录处理耗时；端到端与首输出耗时包含输入准备，不增加 LLM/工具调用数。
-失败会形成完整终态，且不调用 Agent。错误码为 `ARTIFACT_SOURCE_INVALID`、`ARTIFACT_NOT_FOUND`、
+输出契约在最终回复已确定、轮次状态仍为 `ok` 时校验；失败会把本轮标为 `error`（code 为
+`OUTPUT_CONTRACT_FAILED`，`retriable=false`），保留已流出的正文到 `output.partial_text`，并且仍然只发一个
+`turn.end`。大 `turn.start` 存根保留 `has_middleware=true`，刷新后可读取轮次详情。
+`usage.middleware_ms` 单独记录输入准备耗时；端到端与首输出耗时包含输入准备，不增加 LLM/工具调用数。
+输入准备失败会形成完整终态，且不调用 Agent。错误码为 `ARTIFACT_SOURCE_INVALID`、`ARTIFACT_NOT_FOUND`、
 `ARTIFACT_AMBIGUOUS`、`ARTIFACT_FETCH_FAILED`、`ARTIFACT_INVALID_JSON`、
 `ARTIFACT_FIELD_NOT_FOUND`、`ARTIFACT_TOO_LARGE`；总超时仍为 `TIMEOUT`。
 
@@ -753,7 +804,7 @@ timeout_s = 15
 UTF-8 输入字节计算，不能静默截断。首期不支持额外产物凭据配置。
 
 包含中间件的所选轮次，或锚定重放必需的成功历史，返回 400 `MIDDLEWARE_REPLAY_UNSUPPORTED`。
-历史查看与只读对比可继续使用，评测尚不开放中间件配置。HiAgent 直接接入将实际输入作为本轮
+历史查看与只读对比可继续使用；评测逐轮配置见下方。HiAgent 直接接入将实际输入作为本轮
 `Query`，沿用上游会话；业务桥接的组合输入消费尚未验证，首期禁用此接入的中间件。
 
 目标版本在所选环境里使用直接 HiAgent 适配器（上游自己维护会话历史、不接受外部历史）时，`mode=anchored` 返回 400 `ANCHORED_REPLAY_UNSUPPORTED`，请改用 `mode=free`。
@@ -799,9 +850,12 @@ HTTP 状态恒为 200（版本不存在 404），agent 的任何问题都体现�
 
 ## 适配器接入环境
 
-`transport: adapter` 的版本（由平台托管适配器，例如 HiAgent 发布 API）不在版本里保存连接配置。全平台只有**生产（production）**和
-**测试（test）**两套接入配置，所有这类版本运行时都使用环境里的配置，新发布的版本自动沿用，没有任何绑定操作。
-一套配置与原先的绑定内容相同：`{id, version, credential_ref, config}`（`GET /adapters` 给出可用适配器和 `config` 的 JSON Schema）。
+`transport: adapter` 的版本（由平台托管适配器，例如 HiAgent 发布 API）不在版本里保存连接配置。每个平台独立维护
+**生产（production）**和**测试（test）**两套配置；版本用 `platform` 指定平台注册 ID，旧版本省略时默认 `hiagent`。
+设置页按注册表展示平台，不显示尚未实现的平台。
+一套配置为 `{adapter, major, credential_ref, config}`：`adapter` 是平台 id，`major` 只在平台 API 不兼容时变化，实现由平台统一维护；
+agent 版本放在 `config.published_version`，不再作为适配器版本。旧的 `{id, version}` 仍可读取，服务端会归一化为新结构。
+`GET /adapters` 给出可用平台实现、`config` 的 JSON Schema、实现指纹与下线日期。
 Spec 里的 `adapter` 字段已取消：草稿校验会报错（`path=adapter`），历史版本里残留的该字段运行时被忽略，「从版本创建草稿」时会去掉。
 
 **默认用生产。** 对话、评测、重放、双栏对比都接受可选的 `environment`（`production` 默认 | `test`）。测试未配置、或与生产配置
@@ -812,9 +866,11 @@ Spec 里的 `adapter` 字段已取消：草稿校验会报错（`path=adapter`�
 
 **存档**：每个环境每次变化追加一个存档（存档号在环境内递增），记录配置、说明和来源：`edit`（编辑测试）| `push`（推送）|
 `rollback`（回滚）| `migration`（迁移 0008）。内容没有变化时不产生新存档，响应 `applied=false, message="内容未变化"`。
-存档不会被改写或删除；环境的"当前存档"指向其中一个。
+日常编辑不改写或删除存档；环境的"当前存档"指向其中一个。
+显式接入迁移可统一存量绑定，原值进入独立审计，见下文迁移接口。
 
 ### GET /adapter-environments
+环境读取、历史、编辑、推送、回滚接口均接受 `?adapter=平台注册ID`；省略时为 `hiagent`，不同平台的存档与凭据相互隔离。
 ```json
 {"production": {"environment": "production", "configured": true, "revision": 2, "binding": {…}, "fingerprint": "…",
                 "source": "push", "reason": "推送自测试存档 #3", "created_at": "…", "updated_at": "…"},
@@ -829,13 +885,14 @@ Spec 里的 `adapter` 字段已取消：草稿校验会报错（`path=adapter`�
 
 ### PUT /adapter-environments/test
 `{"binding": {…}, "expected_revision": 3, "reason": "升级发布版本"}`。`expected_revision` 是测试当前的存档号（未配置为 0），不一致返回 409；
-`binding` 校验适配器与版本、`config` 字段、凭据引用存在且正文可读，不通过返回 400。`config.business_bridge`（绑定某个固定版本的兼容入口）不能用于环境配置。
+`binding` 校验平台、实现大版本、`config` 字段、凭据引用存在且正文可读，不通过返回 400。`config.business_bridge`（绑定某个固定版本的兼容入口）不能用于环境配置。
 
 ### POST /adapter-environments/production/push
 `{"test_revision": 3, "reason": "可选备注"}`：把测试当前的配置复制为生产的新存档。`test_revision` 必须是测试当前的存档号（防止推送没验证过的内容），否则 409。
 
 ### POST /adapter-environments/production/rollback
 `{"revision": 1, "reason": "可选备注"}`：生产回到某个历史存档，即把它的配置追加为新存档（来源 `rollback`）；存档不存在返回 404。
+已迁移并停用的旧桥存档返回 400，不能重新用作平台生产环境。
 
 以上三个写接口响应相同：`{"environment", "applied": true|false, "message"?: "内容未变化", "before": <环境状态>, "target": <环境状态>}`。
 
@@ -843,15 +900,62 @@ Spec 里的 `adapter` 字段已取消：草稿校验会报错（`path=adapter`�
 会话（`SessionOut.adapter_snapshot`）和评测 Run（`EvalRun.adapter_snapshot`）创建时固化：
 `{"environment": "production|test", "revision": 存档号, "binding": {…}, "fingerprint": "…", "reason": "存档说明",
 "requested_environment"?: "test", "upstream"?: {…}}`。`requested_environment` 只在请求的环境与实际不同时出现。
-`upstream`（HiAgent 的会话 ID 等）由适配器在运行中写回同一个快照。非 `transport: adapter` 的版本快照为 `null`。
+`upstream`（HiAgent 的会话 ID 等）由适配器在运行中写回同一个快照。
+版本为 `transport: adapter` 或有 `version_adapter_routes` 时使用平台快照，其他版本为 `null`。
 评测缓存键 = `sha256(spec_hash[:fingerprint] | case_hash | repeat_idx | seed)`：有接入快照时 `spec_hash` 后接配置的 `fingerprint`，
-不同配置不共用缓存，生产与测试配置相同（落到生产）时共用。迁移前创建的会话 / 评测保留原快照（没有 `environment`，`revision` 为旧的版本修订号）。
+不同配置不共用缓存，生产与测试配置相同（落到生产）时共用。
+未执行显式接入迁移的旧会话／评测沿用旧快照（可能没有 `environment`，`revision` 为旧版本修订号）。
+
+### POST /adapters/binding-migrations
+
+显式迁移旧 HTTP 版本、该 Agent 的 HTTP 草稿，以及所选平台全部会话、评测与环境绑定。
+请求为 `{agent, first_seq, last_seq, adapter="hiagent", major=1, production_revision, test_revision, reason, dry_run=true}`。
+默认干跑；环境存档变更或关联执行未结束时返回 409。实际应用在同一事务内完成，重复调用不产生新记录。
+返回迁移 ID、版本／会话／评测／环境／草稿计数及 `historical_execution`；
+`GET /adapters/binding-migrations/{id}` 读取迁移摘要，原绑定仅在数据库审计表中保留。
+
+原业务 Spec、hash 和资产引用不变，版本详情／列表的 `runtime_binding` 表示有效平台接入。
+迁移后的历史内容与草稿使用 `native_deployment_required` 或 `execution_blocked_reason` 标记，
+在原生部署未核实前执行返回 `NATIVE_DEPLOYMENT_REQUIRED`。原会话仍可读取和按原消息 ID 重查 Trace；
+多个消息 ID 无法唯一定位时返回明确错误。迁移不执行业务，也不改写既有输出、评分和缓存键。
 
 ### 其他
 - `GET /adapters`：适配器注册表；`GET /adapters/credentials`、`POST /adapters/credentials`：凭据引用（密钥正文只进 SecretStore，接口不回显）；
-  `POST /adapters/check-connection`：只检查配置与凭据可读，不发起 LLM 请求。
+  `POST /adapters/check-connection`：配置检查与只读认证验证，不发起 LLM 请求。HiAgent 使用已发布工作流进度查询和
+  Observe 查询检查认证；聊天应用通过认证后返回明确的“only support workflow type app”应用类型错误，
+  该特定响应可确认 Key 认证（错误 Key 对照为 403 Unauthorized.Warning）。其他错误返回未确认。
+  发布 Key 的 HTTP 401/403 提示更新 Key；绑定 Trace 账号时先探活并在会话失效时自动重登。
+  真实 Trace 可用性以已有轮次重查结果为准。
 - 旧的 `/versions/{ref}/adapter-binding`（GET / PUT / rollback）与 `/adapters/bindings/batch` 已删除。
 - `POST /versions/{ref}/adapter-check` 对 `transport: adapter` 的版本使用生产环境配置。
+
+### 平台账号与 Trace 自动登录
+
+`HiAgent config.observe_account_ref` 是可选账号 ID；选中时必须设置与账号站点一致的
+`observe_base_url` 根地址。账号优先于凭据 JSON 中的 `observe_headers`，发布 API Key 引用独立维护。
+账号 ID 前缀 `acc_`。以下响应均不含密码、Cookie、CSRF 或密钥库引用。
+
+| 接口 | 请求与响应 |
+| --- | --- |
+| `GET /adapters/accounts` | 账号元数据列表 |
+| `POST /adapters/accounts` | `{name, origin, username, password, tenant_name?, adapter_id?}` → 201；当前支持 hiagent |
+| `PUT /adapters/accounts/{id}` | `{expected_revision, name?, password?, enabled?}`；密码省略或留空保留原密码 |
+| `POST /adapters/accounts/{id}/check` | 立即检查；会话失效时自动登录，返回最新账号状态 |
+| `POST /adapters/accounts/{id}/login` | 显式重新登录，返回最新账号状态 |
+| `POST /adapters/accounts/{id}/session` | `{headers: "Cookie／CSRF JSON 字符串"}`；核验后保存手动登录态 |
+| `GET /adapters/accounts/{id}/revisions` | 不可变登录态修订，含 revision/config_revision/source/expires_at/created_at/current |
+
+账号元数据含 `id, adapter_id, name, origin, tenant_name, username, config_revision,
+session_revision, enabled, status, last_checked_at, last_error, next_check_at, created_at, updated_at`。
+状态为 `pending | active | disabled | check_failed | login_failed | verification_required`。
+check/login 返回 200 时仍须检查 `status`；固定原因在 `last_error`，不会回显上游认证正文。
+重复身份或 `expected_revision` 冲突返回 409，配置／手动登录态不合格返回 400，不存在返回 404。
+
+Cookie 每次登录和更新追加修订；停用不删除历史。网络检查失败冷却一分钟，
+密码错误或额外验证暂停自动尝试，修改密码或显式检查／重登／补充登录态可恢复。
+自动探活通常每五分钟，接近已知到期时间提前检查；查询认证失败时立即检查并最多重放一次。
+`usage.trace_auth` 记录实际账号引用、配置修订、请求所用 session_revision 和响应更新后的
+latest_session_revision；旧轮次重查还记录在 `usage.trace_refresh.trace_auth`，历史运行快照不改写。
 
 ## 对比与重放（P3-C）
 
@@ -881,6 +985,8 @@ Spec 里的 `adapter` 字段已取消：草稿校验会报错（`path=adapter`�
 
 ### GET /compare、GET /compare/{id}
 列表按新到旧分页（只含 `kind=session`）；详情结构同上。重放进行中（`replay_status=running`）时前端每 2 秒刷新一次详情。
+列表默认 `include_archived=false`：任一侧会话所属版本已归档时隐藏该对比，过滤在分页前执行；
+`include_archived=true` 包括这些对比。按 ID 读取对比详情不受归档筛选影响。
 
 ### PATCH /compare/{id} → CompareGroup
 ```json
@@ -955,7 +1061,7 @@ Spec 里的 `adapter` 字段已取消：草稿校验会报错（`path=adapter`�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/evals` | 创建，201 `{batch_id, runs:[{id, version_id, status:"queued"}], estimate}`；每个版本一个 Run |
-| GET | `/evals?agent_id=&version_id=&batch_id=&status=&limit=&cursor=` | 列表，新的在前；`status` 可逗号分隔；旧参数名 `agent`、`batch` 仍可用 |
+| GET | `/evals?agent_id=&version_id=&batch_id=&status=&include_archived=false&limit=&cursor=` | 列表，新的在前；默认在分页前隐藏所属版本已归档的评测，传 `include_archived=true` 包括；`status` 可逗号分隔；旧参数名 `agent`、`batch` 仍可用 |
 | GET | `/evals/{id}` | Run 详情，带 `batch_runs`（同批次其他 Run） |
 | GET | `/evals/{id}/items?status=&passed=&q=&class=&tag=&limit=&cursor=` | Item 列表（按用例顺序、重复序号）；`passed=true/false`（false 含执行失败）；`q` 模糊匹配 case_key、输入、输出 |
 | GET | `/evals/{id}/items/{item_id}` | 单条，结构同上，另带 `output`（完整回复）、`turns`、`case_detail` |
@@ -977,6 +1083,41 @@ Spec 里的 `adapter` 字段已取消：草稿校验会报错（`path=adapter`�
 `POST /evals` 可带 `environment`（`production` 默认 | `test`）：`transport: adapter` 的版本按该环境固化接入配置，Run 的 `adapter_snapshot` 记录所用环境与存档号。
 
 `EvalRun.budget` 为 `{max_cost, max_tokens}`；SSE 的 `eval.status` 带 `pause_reason`。
+
+### 评测逐轮中间件
+
+`POST /evals` 接受可选 `turn_middlewares`：轮号从 **1** 开始，每轮最多一个输入处理器和一个输出处理器。
+配置持久化到 Run，并通过 `GET /evals/{id}` 返回；历史评测默认 `{}`。
+
+```json
+{
+  "turn_middlewares": {
+    "1": [{
+      "id": "output_contract",
+      "version": "1.0.0",
+      "config": {"stages": {"1": {"output_type": "confirm"}}}
+    }],
+    "2": [{"id": "json_artifact", "version": "1.0.0", "config": {}}]
+  }
+}
+```
+
+- 数据集可写为 `input: {"turns": ["开始", "继续"], "turn_middlewares": {...}}`，按轮覆盖 Run 的配置；
+  显式 `[]` 关闭该轮的处理器。普通字符串 / 字符串数组保持原行为。用例配置参与 `case_hash`。
+- 第 1 轮不能读取上一轮产物。输入处理器固定本次评测会话上一轮的成功输出，下载真实 JSON 并组合本轮指令；
+  不允许指定 `source_turn_id`、`expected_previous_turn_id` 或 `selected_candidate_id`。
+  多链接时用 `config.url_pointer` 指定稳定字段路径，如 `/artifactInfo/cardInfoList/0/url`。
+- 未知处理器 / 版本、重复阶段、非法字段路径、缺少本轮输出契约、轮号越界在创建或预估时拒绝（400）；
+  用例内非法配置在导入时拒绝（422）。业务桥接接入仍不支持中间件。
+- 任何一轮失败都停止该 Item 的后续轮次，保留失败轮次、步骤和错误码，Item 不进入评分。
+  输出契约失败不可自动重试；其他错误按其 `retriable` 走调度器重试。每次重试新建会话，从第 1 轮开始，
+  JSON 来源不跨尝试复用。其他用例继续执行。
+- 有效非空计划的规范化 JSON 摘要加入执行缓存键；配置、版本或参数变化不会复用不匹配的执行。
+  无中间件的旧用例保持原缓存键。重评分不执行中间件。
+- Item 详情的 `turns[]` 新增 `id`、`effective_input`、`middleware_snapshot`，含产物 Blob、来源和步骤终态；
+  原输入、Trace 和失败尝试仍可查看。
+- Web 发起评测的「运行参数 → 逐轮中间件（可选）」填写计划 JSON；报告中的计划和会话详情默认折叠。
+  MCP `run_eval(turn_middlewares={...})` 同样支持；CLI 使用 `evalp eval run --turn-middlewares plan.json`。
 
 ### EvalRun / EvalItem 的附加字段
 

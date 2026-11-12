@@ -30,9 +30,15 @@ async def create_compare(body: CompareCreate, ctx: AppContext = Depends(get_ctx)
 
 
 @router.get("/compare", response_model=Page[CompareGroupOut])
-async def list_compare(p: PageParams = Depends(page_params), ctx: AppContext = Depends(get_ctx)):
+async def list_compare(
+    include_archived: bool = False,
+    p: PageParams = Depends(page_params),
+    ctx: AppContext = Depends(get_ctx),
+):
     """对比列表（新的在前）。"""
-    return await ctx.svc(CompareService).list(limit=p.limit, cursor=p.cursor)
+    return await ctx.svc(CompareService).list(
+        include_archived=include_archived, limit=p.limit, cursor=p.cursor
+    )
 
 
 @router.get("/compare/{compare_id}", response_model=CompareGroupOut)

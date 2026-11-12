@@ -1,7 +1,7 @@
 services:
   evalp:
     build: .
-    image: evalp:latest
+    image: ${EVALP_IMAGE:-evalp:platform-trace-20261111}
     container_name: evalp
     # 只映射到宿主机的 127.0.0.1：镜像里打开了 allow_remote_bootstrap（浏览器经 Docker 网关访问），不能暴露到局域网
     ports:
@@ -9,4 +9,9 @@ services:
     # 与本机 evalp CLI / MCP 共用数据目录（token、数据库），宿主机上的 evalp 命令可以直接连容器里的服务
     volumes:
       - ${EVALP_HOME:-~/.evalp}:/data
+    environment:
+      # 密钥库按机器标识与 USER 派生密钥，重建容器时必须保持这两个值不变。
+      EVALP_MACHINE_ID: ${EVALP_MACHINE_ID:?请设置现有密钥库使用的固定机器标识}
+      USER: ${EVALP_SECRET_USER:?请设置现有密钥库使用的用户名}
+      EVALP_ARTIFACTS_ALLOWED_HOSTS: ${EVALP_ARTIFACTS_ALLOWED_HOSTS:-}
     restart: unless-stopped

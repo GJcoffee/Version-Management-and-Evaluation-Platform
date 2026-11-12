@@ -25,6 +25,7 @@ dependencies = [
   "tiktoken",
   "keyring",
   "cryptography",
+  "ddddocr==1.6.1",
   "psutil",
   "python-ulid",
   "structlog",

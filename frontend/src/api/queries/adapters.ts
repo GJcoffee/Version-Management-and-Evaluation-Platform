@@ -2,11 +2,25 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../client'
 
 export interface AdapterBinding {
+  /** 平台 id，如 hiagent；实现由平台统一维护 */
+  adapter: string
+  /** 适配器大版本；只有平台 API 不兼容时才变化 */
+  major: number
+  config: Record<string, unknown>
+  credential_ref: string
+}
+
+/** 平台升级前冻在历史会话 / 评测快照里的旧绑定 */
+export interface LegacyAdapterBinding {
   id: string
   version: string
   config: Record<string, unknown>
   credential_ref: string
 }
+
+/** 环境接口新写入始终是 AdapterBinding；历史快照可能是 LegacyAdapterBinding */
+export type AnyAdapterBinding = AdapterBinding | LegacyAdapterBinding
+
 
 export type AdapterEnvironmentName = 'production' | 'test'
 
@@ -24,7 +38,7 @@ export interface BindingSnapshot {
   environment?: AdapterEnvironmentName
   /** 环境存档号 */
   revision: number
-  binding: AdapterBinding | null
+  binding: AnyAdapterBinding | null
   fingerprint?: string
   /** 存档说明 */
   reason?: string
@@ -73,14 +87,18 @@ export interface EnvironmentChange {
 }
 
 export interface AdapterDefinition {
-  id: string
+  adapter: string
+  major: number
   name: string
-  version: string
   capabilities: string[]
   config_schema: {
     required?: string[]
     properties: Record<string, { type?: string; anyOf?: unknown[]; default?: unknown; title?: string }>
   }
+  /** 当前实现的源码指纹；平台升级后所有绑定自动跟随 */
+  impl_digest: string
+  /** 旧大版本的下线日期；活跃实现为 null */
+  sunset: string | null
 }
 export const useAdapters = () => useQuery({
   queryKey: ['adapters'], queryFn: () => api.get<AdapterDefinition[]>('/adapters'),
@@ -90,13 +108,14 @@ export const useAdapterCredentials = () => useQuery({
   queryFn: () => api.get<{ ref: string; name: string; adapter_id: string }[]>('/adapters/credentials'),
 })
 
-export const useAdapterEnvironments = () => useQuery({
-  queryKey: ['adapter-environments'],
-  queryFn: () => api.get<AdapterEnvironments>('/adapter-environments'),
+const platformQuery = (adapter?: string) => adapter && adapter !== 'hiagent' ? { adapter } : undefined
+export const useAdapterEnvironments = (adapter?: string) => useQuery({
+  queryKey: adapter && adapter !== 'hiagent' ? ['adapter-environments', adapter] : ['adapter-environments'],
+  queryFn: () => api.get<AdapterEnvironments>('/adapter-environments', { query: platformQuery(adapter) }),
 })
-export const useEnvironmentRevisions = (name: AdapterEnvironmentName) => useQuery({
-  queryKey: ['adapter-environments', name, 'revisions'],
-  queryFn: () => api.get<EnvironmentRevision[]>(`/adapter-environments/${name}/revisions`),
+export const useEnvironmentRevisions = (name: AdapterEnvironmentName, adapter?: string) => useQuery({
+  queryKey: ['adapter-environments', adapter ?? 'hiagent', name, 'revisions'],
+  queryFn: () => api.get<EnvironmentRevision[]>(`/adapter-environments/${name}/revisions`, { query: platformQuery(adapter) }),
 })
 
 function useEnvironmentMutation<T>(call: (body: T) => Promise<EnvironmentChange>) {
@@ -106,12 +125,12 @@ function useEnvironmentMutation<T>(call: (body: T) => Promise<EnvironmentChange>
     onSuccess: () => qc.invalidateQueries({ queryKey: ['adapter-environments'] }),
   })
 }
-export const useUpdateTest = () => useEnvironmentMutation((body: {
+export const useUpdateTest = (adapter?: string) => useEnvironmentMutation((body: {
   binding: AdapterBinding; expected_revision: number; reason: string
-}) => api.put<EnvironmentChange>('/adapter-environments/test', { body }))
-export const usePushToProduction = () => useEnvironmentMutation((body: {
+}) => api.put<EnvironmentChange>('/adapter-environments/test', { body, query: platformQuery(adapter) }))
+export const usePushToProduction = (adapter?: string) => useEnvironmentMutation((body: {
   test_revision: number; reason?: string
-}) => api.post<EnvironmentChange>('/adapter-environments/production/push', { body }))
-export const useRollbackProduction = () => useEnvironmentMutation((body: {
+}) => api.post<EnvironmentChange>('/adapter-environments/production/push', { body, query: platformQuery(adapter) }))
+export const useRollbackProduction = (adapter?: string) => useEnvironmentMutation((body: {
   revision: number; reason?: string
-}) => api.post<EnvironmentChange>('/adapter-environments/production/rollback', { body }))
+}) => api.post<EnvironmentChange>('/adapter-environments/production/rollback', { body, query: platformQuery(adapter) }))

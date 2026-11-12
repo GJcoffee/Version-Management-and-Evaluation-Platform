@@ -101,6 +101,7 @@ describe('CompareView：左侧是基线', () => {
     expect(within(screen.getByTestId('side-left')).getByTestId('baseline-badge')).toBeInTheDocument()
     expect(within(screen.getByTestId('side-right')).queryByTestId('baseline-badge')).toBeNull()
     expect(screen.getByTestId('side-left-version')).toHaveTextContent('v5')
+    await userEvent.click(screen.getByRole('button', { name: '全部展开' }))
     expect(screen.getByTestId('cell-left')).toHaveTextContent('查订单 A001')
     expect(screen.getByTestId('cell-right')).toHaveTextContent('录制输入')
     await userEvent.click(within(screen.getByTestId('cell-left')).getByRole('button', { name: '查看 Trace' }))
@@ -136,6 +137,7 @@ describe('CompareView：多轮结果展示', () => {
     streams.ses_r = fakeStream({ turns: buildSessionState([...first, ...second]).turns })
     renderView(group({ mode: 'history' }), { turns: [pairTurn(0, null, 'trn_1'), pairTurn(1, null, 'trn_2')] })
     const rows = await screen.findAllByTestId('compare-row')
+    await userEvent.click(screen.getByRole('button', { name: '全部展开' }))
     const firstCell = within(rows[0]).getByTestId('cell-right')
     const secondCell = within(rows[1]).getByTestId('cell-right')
     expect(within(firstCell).getAllByText(firstResult)).toHaveLength(1)
@@ -163,6 +165,7 @@ describe('CompareView：多轮结果展示', () => {
     const g = group()
     const { rerender } = renderView(g, { turns: [pairTurn(0, null, 'trn_1'), pairTurn(1, null, 'trn_2')] })
     const rows = await screen.findAllByTestId('compare-row')
+    await userEvent.click(screen.getByRole('button', { name: '全部展开' }))
     const cell = within(rows[1]).getByTestId('cell-right')
     expect(within(cell).getAllByText(secondResult)).toHaveLength(1)
     const openedTool = within(cell).getAllByTestId('tool-card')[0]
@@ -194,6 +197,9 @@ describe('CompareView：按轮折叠', () => {
     const row = (await screen.findAllByTestId('compare-row'))[0]
     const left = within(row).getByTestId('cell-left')
     const right = within(row).getByTestId('cell-right')
+    expect(row).toHaveAttribute('data-collapsed', 'true')
+    expect(within(row).queryByTestId('user-message')).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: '全部展开' }))
     await userEvent.click(screen.getByTestId('align-toggle'))
     expect(screen.getByTestId('alignment-panel')).toBeInTheDocument()
     const metrics = within(row).getByTestId('metrics-compare').textContent
@@ -230,7 +236,7 @@ describe('CompareView：按轮折叠', () => {
     expect(api.calls.filter((c) => c.method !== 'GET')).toHaveLength(0)
   })
 
-  it('之前全部折叠后，流式新轮次默认展开，已有轮次保持折叠', async () => {
+  it('之前全部展开后，流式新轮次默认折叠，已有轮次保持展开', async () => {
     streams.ses_l = fakeStream({ turns: buildSessionState(toolTurnEvents('trn_L')).turns })
     streams.ses_r = fakeStream({ turns: buildSessionState(toolTurnEvents('trn_R')).turns })
     let alignment: Alignment = { turns: [pairTurn(0, 'trn_L', 'trn_R')] }
@@ -239,7 +245,7 @@ describe('CompareView：按轮折叠', () => {
       'GET /api/v1/compare/cmp_1/alignment': () => alignment,
     })
     await screen.findAllByTestId('compare-row')
-    await userEvent.click(screen.getByRole('button', { name: '全部折叠' }))
+    await userEvent.click(screen.getByRole('button', { name: '全部展开' }))
     const next = buildSessionState([
       mk('turn.start', { input: { role: 'user', content: '进行中的新问题' }, history_len: 1 }, { seq: 20, turn: 'trn_new' }),
     ]).turns
@@ -248,11 +254,14 @@ describe('CompareView：按轮折叠', () => {
     rerender(g)
     await waitFor(() => expect(screen.getAllByTestId('compare-row')).toHaveLength(2))
     const rows = screen.getAllByTestId('compare-row')
-    expect(rows[0]).toHaveAttribute('data-collapsed', 'true')
+    expect(rows[0]).not.toHaveAttribute('data-collapsed')
     const running = within(rows[1]).getByTestId('turn')
-    expect(running).not.toHaveAttribute('data-collapsed')
+    expect(running).toHaveAttribute('data-collapsed', 'true')
     expect(running).toHaveAttribute('data-status', 'running')
     expect(within(running).getByTestId('turn-header')).toHaveTextContent('第 2 轮')
+    expect(within(running).queryByTestId('user-message')).toBeNull()
+    expect(within(running).getByTestId('turn-summary')).toHaveTextContent('进行中的新问题')
+    await userEvent.click(within(running).getByTestId('turn-header'))
     expect(within(running).getByTestId('user-message')).toHaveTextContent('进行中的新问题')
     expect(api.calls.filter((c) => c.method !== 'GET')).toHaveLength(0)
   })
@@ -269,6 +278,7 @@ describe('CompareView：按轮折叠', () => {
       forks: [{ side: 'right', turn_id: 'b_fork', idx: 1, after_pair: 0, input: 'x', final_text: null, status: 'ok', metrics: null }],
     })
     const rows = await screen.findAllByTestId('compare-row')
+    await userEvent.click(screen.getByRole('button', { name: '全部展开' }))
     const fork = within(rows[1]).getByTestId('turn')
     expect(within(fork).getByTestId('turn-header')).toHaveTextContent('第 2 轮')
     expect(within(within(rows[2]).getByTestId('cell-left')).getByTestId('turn-header')).toHaveTextContent('第 2 轮')
@@ -290,6 +300,8 @@ describe('CompareView：按轮折叠', () => {
     const row = (await screen.findAllByTestId('compare-row'))[0]
     const left = within(row).getByTestId('cell-left')
     const right = within(row).getByTestId('cell-right')
+    expect(within(row).queryByTestId('user-message')).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: '全部展开' }))
     await userEvent.click(within(left).getByTestId('turn-header'))
     expect(within(left).getByTestId('turn')).toHaveAttribute('data-collapsed', 'true')
     expect(within(right).getByTestId('user-message')).toBeInTheDocument()
@@ -465,6 +477,8 @@ describe('CompareView：运行中的增量对齐', () => {
       ],
     }
     const { rerender } = renderView(g, server)
+    await screen.findAllByTestId('compare-row')
+    await userEvent.click(screen.getByRole('button', { name: '全部展开' }))
     await userEvent.click(await screen.findByTestId('align-toggle'))
     const panel = await screen.findByTestId('alignment-panel')
     expect(panel).toHaveTextContent('左侧多调用 query_order ×1') // 来自浏览器里的增量对齐

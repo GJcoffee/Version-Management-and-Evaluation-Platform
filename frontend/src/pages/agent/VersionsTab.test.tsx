@@ -39,6 +39,17 @@ function setup(testSelectable: boolean, list: VersionSummary[] = versions) {
 }
 
 describe('版本列表', () => {
+  it('迁移的历史版本显示原生接入，并在历史内容发布前停用执行入口', () => {
+    setup(false, [mk(2, { runtime_binding: {
+      transport: 'adapter', adapter: 'hiagent', major: 1, migration_id: 'mig_1',
+      execution_blocked_reason: '历史内容待发布',
+    } }), mk(1)])
+    expect(screen.getByText('hiagent · 历史内容待发布')).toHaveAttribute('title', '历史内容待发布')
+    expect(screen.getByTestId('chat-v2')).toBeDisabled()
+    expect(screen.getByTestId('eval-v2')).toBeDisabled()
+    expect(screen.getByTestId('chat-v1')).toBeEnabled()
+  })
+
   it('不再有按版本绑定接入的入口', () => {
     setup(false)
     expect(screen.queryByText('调用接入')).toBeNull()

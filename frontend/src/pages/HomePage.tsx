@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Activity, Cpu, Database, ListChecks, MessagesSquare } from 'lucide-react'
 import { useSessions } from '@/api/queries/sessions'
@@ -14,6 +14,7 @@ import { cn } from '@/lib/cn'
 import { formatBytes } from '@/lib/format'
 import type { HealthOut } from '@/api/types'
 import { RecentComparesCard } from '@/components/compare/RecentComparesCard'
+import { IncludeArchivedToggle } from '@/components/IncludeArchivedToggle'
 import { RecentSessionList } from './session/SessionList'
 
 function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: ReactNode }) {
@@ -124,12 +125,14 @@ function HealthCards({ h }: { h: HealthOut }) {
 }
 
 function RecentSessionsCard() {
-  const { data, isLoading, error } = useSessions({ limit: 6 })
+  const [includeArchived, setIncludeArchived] = useState(false)
+  const { data, isLoading, error } = useSessions({ limit: 6, include_archived: includeArchived })
   const items = data?.items ?? []
   return (
     <Card>
       <CardHeader>
         <CardTitleRow icon={MessagesSquare}>最近会话</CardTitleRow>
+        <IncludeArchivedToggle includeArchived={includeArchived} setIncludeArchived={setIncludeArchived} label="包括已归档会话" />
       </CardHeader>
       <CardContent>
         {isLoading ? (
