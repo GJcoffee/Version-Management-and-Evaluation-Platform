@@ -112,6 +112,8 @@ class PlatformAdapter(AgentAdapter):
     capabilities: ClassVar[frozenset[str]] = frozenset()
     config_model: ClassVar[type[BaseModel] | None] = None
     trace_config_keys: ClassVar[frozenset[str]] = frozenset()
+    trace_usage_source: ClassVar[str | None] = None
+    sse_usage_source: ClassVar[str | None] = None
 
     async def refresh_trace(  # noqa: B027 - 默认能力不可用
         self, request: TraceRefreshRequest,

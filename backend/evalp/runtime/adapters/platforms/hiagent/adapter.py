@@ -58,6 +58,8 @@ class HiAgentAdapter(PlatformAdapter):
     })
     config_model = HiAgentConfig
     trace_config_keys = frozenset({"observe_base_url", "observe_account_ref", "observation_wait_s"})
+    trace_usage_source = "hiagent_trace"
+    sse_usage_source = "hiagent_sse"
 
     def __init__(self, binding: NormalizedBinding | AdapterBinding | dict[str, Any], app: AppContext) -> None:
         self.binding, self.app = normalize_binding(binding), app

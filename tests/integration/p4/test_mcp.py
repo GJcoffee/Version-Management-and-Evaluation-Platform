@@ -16,7 +16,7 @@ from tests.integration.p4 import mocks
 
 TOOLS = {
     "push_draft", "pull_draft", "publish_version", "list_versions", "diff_versions",
-    "chat", "run_eval", "get_eval_report", "get_eval_compare",
+    "chat", "run_eval", "cancel_eval", "get_eval_report", "get_eval_compare",
     "list_agents", "get_draft", "update_draft", "list_assets", "upsert_asset", "import_dataset",
     "get_eval_status", "get_session", "refresh_trace", "replay_session", "compare_sessions",
     "get_conventions",

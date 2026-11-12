@@ -997,9 +997,12 @@ class SessionService:
             "force": body.force,
         }
         previous_usage = usage
-        if body.force and usage.get("token_source") == "hiagent_trace":
+        if (
+            body.force and adapter_cls.trace_usage_source
+            and usage.get("token_source") == adapter_cls.trace_usage_source
+        ):
             # 已缓存的 Trace 汇总不是原 SSE 自报用量，不能拿它约束修正后的明细。
-            previous_usage = await self._original_sse_usage(turn_id, usage)
+            previous_usage = await self._original_sse_usage(turn_id, usage, adapter_cls.sse_usage_source)
         adapter = adapter_cls(binding, self.ctx)
         try:
             request = TraceRefreshRequest(
@@ -1049,7 +1052,9 @@ class SessionService:
         await self._apply_refreshed_trace(turn_id, turn.session_id, metrics)
         return await self.get_turn(turn_id)
 
-    async def _original_sse_usage(self, turn_id: str, usage: dict[str, Any]) -> dict[str, Any]:
+    async def _original_sse_usage(
+        self, turn_id: str, usage: dict[str, Any], source: str | None,
+    ) -> dict[str, Any]:
         """从本轮原始 SSE 指标恢复用量，避免把旧 Trace 缓存冒充 SSE 总量。"""
         previous = {k: v for k, v in usage.items() if k not in ("prompt_tokens", "completion_tokens")}
         async with self.ctx.db.read() as s:
@@ -1059,7 +1064,7 @@ class SessionService:
             )).scalars().all()
         for payload in payloads:
             reported = payload.get("usage") or {}
-            if reported.get("source") == "hiagent_sse":
+            if source and reported.get("source") == source:
                 for key in ("prompt_tokens", "completion_tokens"):
                     previous[key] = reported.get(key)
         return previous
@@ -1121,7 +1126,8 @@ class SessionService:
             usage = dict(before)
             replace_cached = (
                 metrics.get("trace_refresh", {}).get("force")
-                and before.get("token_source") == "hiagent_trace"
+                and bool(reported.get("source"))
+                and before.get("token_source") == reported["source"]
             )
             # 强制重查可替换旧 Trace 缓存；原 SSE 总量已在查询前恢复并核验。
             for key in ("prompt_tokens", "completion_tokens"):
