@@ -64,6 +64,10 @@ def canonicalize(spec: ConfigSpec | CodeSpec | dict[str, Any]) -> CanonicalSpec:
         data.pop(key, None)
     if data.get("adapter") is None:
         data.pop("adapter", None)  # 保持未接入适配器的历史 Spec 哈希稳定
+    if data.get("platform") is None:
+        data.pop("platform", None)
+    if not data.get("native_deployment_required"):
+        data.pop("native_deployment_required", None)
     if data.get("snapshot") is None:
         data.pop("snapshot", None)  # 未声明快照时不出现，保持没有该字段的旧版本哈希不变
     elif not data["snapshot"]["map"]:

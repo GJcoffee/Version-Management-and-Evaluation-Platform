@@ -79,21 +79,23 @@ export function CompareView({ group }: { group: CompareGroup }) {
   const leftOrdinals = useMemo(() => new Map(left.turns.map((t, i) => [t.id, i + 1])), [left.turns])
   const rightOrdinals = useMemo(() => new Map(right.turns.map((t, i) => [t.id, i + 1])), [right.turns])
 
-  // 按侧和轮次保存折叠状态；新到达的轮次默认展开，折叠不改变 Trace 选择。
-  const [collapsedTurns, setCollapsedTurns] = useState<ReadonlySet<string>>(() => new Set())
+  // 按侧和轮次保存用户操作；历史和新到达的轮次均默认折叠。
+  const [collapsedTurns, setCollapsedTurns] = useState<ReadonlyMap<string, boolean>>(() => new Map())
   const toggleTurn = useCallback((side: Side, turnId: string) => {
     setCollapsedTurns((prev) => {
-      const next = new Set(prev)
+      const next = new Map(prev)
       const key = `${side}:${turnId}`
-      if (!next.delete(key)) next.add(key)
+      next.set(key, !(prev.get(key) ?? true))
       return next
     })
   }, [])
-  const collapseAll = () => setCollapsedTurns(new Set([
-    ...left.turns.map((t) => `left:${t.id}`),
-    ...right.turns.map((t) => `right:${t.id}`),
+  const setAllCollapsed = (collapsed: boolean) => setCollapsedTurns((prev) => new Map([
+    ...prev,
+    ...left.turns.map((t): [string, boolean] => [`left:${t.id}`, collapsed]),
+    ...right.turns.map((t): [string, boolean] => [`right:${t.id}`, collapsed]),
   ]))
-  const expandAll = () => setCollapsedTurns(new Set())
+  const collapseAll = () => setAllCollapsed(true)
+  const expandAll = () => setAllCollapsed(false)
 
   // 运行中的行用浏览器里根据已收到的事件算出的增量对齐（随输出实时更新）；两侧都结束后以服务端结果为准。
   // 任一侧的轮次还没从 SSE 还原出来（加载中）时也沿用服务端结果。
@@ -295,12 +297,12 @@ export function CompareView({ group }: { group: CompareGroup }) {
                   right={row.rightTurnId ? rightById.get(row.rightTurnId) : undefined}
                   leftFold={row.leftTurnId ? {
                     ordinal: leftOrdinals.get(row.leftTurnId) ?? (ordinals[i] || 1),
-                    collapsed: collapsedTurns.has(`left:${row.leftTurnId}`),
+                    collapsed: collapsedTurns.get(`left:${row.leftTurnId}`) ?? true,
                     onToggle: () => toggleTurn('left', row.leftTurnId!),
                   } : undefined}
                   rightFold={row.rightTurnId ? {
                     ordinal: rightOrdinals.get(row.rightTurnId) ?? (ordinals[i] || 1),
-                    collapsed: collapsedTurns.has(`right:${row.rightTurnId}`),
+                    collapsed: collapsedTurns.get(`right:${row.rightTurnId}`) ?? true,
                     onToggle: () => toggleTurn('right', row.rightTurnId!),
                   } : undefined}
                   baseline={baseline}

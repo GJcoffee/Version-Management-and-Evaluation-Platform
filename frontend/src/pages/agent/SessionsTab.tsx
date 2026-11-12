@@ -31,11 +31,15 @@ export function SessionsTab({ agentId }: { agentId: string }) {
   const [versionId, setVersionId] = useState('')
   const [creating, setCreating] = useState(false)
   const dq = useDebouncedValue(q.trim(), 300)
-  const { shown, filter } = useArchiveFilter(versionList, [versionId])
+  const { shown, filter } = useArchiveFilter(versionList)
+  const visibleVersionId = shown.some((v) => v.id === versionId) ? versionId : ''
 
-  const sessions = useInfiniteSessions({ agent_id: agentId, version_id: versionId || undefined, q: dq || undefined })
+  const sessions = useInfiniteSessions({
+    agent_id: agentId, version_id: visibleVersionId || undefined, q: dq || undefined,
+    include_archived: filter.includeArchived,
+  })
   const items = sessions.data?.pages.flatMap((p) => p.items) ?? []
-  const filtering = !!dq || !!versionId
+  const filtering = !!dq || !!visibleVersionId
 
   return (
     <div className="space-y-3" data-testid="sessions-tab">
@@ -52,7 +56,7 @@ export function SessionsTab({ agentId }: { agentId: string }) {
         </div>
         <Select
           className="w-44"
-          value={versionId}
+          value={visibleVersionId}
           onChange={(e) => setVersionId(e.target.value)}
           aria-label="按版本筛选"
           data-testid="version-filter"
@@ -66,7 +70,8 @@ export function SessionsTab({ agentId }: { agentId: string }) {
             </option>
           ))}
         </Select>
-        <IncludeArchivedToggle {...filter} />
+        <IncludeArchivedToggle {...filter} archivedCount={undefined} label="包括已归档会话"
+          setIncludeArchived={(value) => { filter.setIncludeArchived(value); if (!value) setVersionId('') }} />
         <Button size="sm" className="ml-auto" onClick={() => setCreating(true)} disabled={!agent.data} data-testid="new-session">
           <Plus className="h-3.5 w-3.5" />
           新建对话

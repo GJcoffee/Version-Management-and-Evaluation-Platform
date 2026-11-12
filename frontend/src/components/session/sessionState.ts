@@ -12,6 +12,7 @@ import type {
 } from '@/api/types'
 import { buildStepTree, type TraceNode } from './traceTree'
 import { turnTiming } from './turnTiming'
+import { bridgeTraceMetrics, duration } from './upstreamTiming'
 
 /**
  * 会话事件流 -> 结构化状态（轮次 -> 消息 -> 步骤树）。reducer 是纯函数，不依赖 React / 网络。
@@ -484,9 +485,13 @@ function applyEventToTurn(turn: TurnState, ev: EventEnvelope): TurnState {
       }
       break
     }
+    case 'log':
     case 'metrics': {
       // 后台补齐的远端指标：用 Trace 的运行时长 / token / 调用次数改写本轮指标（只有带 trace_status 的才是）
-      const p = ev.payload as Record<string, unknown>
+      // 优先规范 metrics；旧日志作为历史兼容来源，避免 turn.end 本地值覆盖真实 Trace。
+      if (ev.type === 'log' && t.events.some((e) => e.type === 'metrics' && e.payload.source === 'hiagent_trace')) break
+      const p = ev.type === 'log' ? bridgeTraceMetrics(ev.payload) : ev.payload as Record<string, unknown>
+      if (!p) break
       const status = p.trace_status
       if (status !== 'complete' && status !== 'partial' && status !== 'unavailable') break
       const usage = (p.usage ?? {}) as Usage
@@ -500,7 +505,7 @@ function applyEventToTurn(turn: TurnState, ev: EventEnvelope): TurnState {
           promptTokens: prompt,
           completionTokens: completion,
           totalTokens: prompt + completion,
-          latencyMs: typeof p.upstream_run_ms === 'number' ? p.upstream_run_ms : null,
+          latencyMs: duration(p.upstream_run_ms),
           ttftMs: null,
           llmCalls: typeof p.llm_calls === 'number' ? p.llm_calls : t.metrics.llmCalls,
         },

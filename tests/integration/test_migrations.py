@@ -14,6 +14,8 @@ TABLES = {
     "asset_revisions", "eval_cases", "sessions", "turns", "events", "eval_batches", "eval_runs",
     "eval_items", "eval_scores", "compare_groups", "jobs", "settings",
     "adapter_credentials", "adapter_environments", "adapter_environment_revisions",
+    "adapter_binding_migrations", "version_adapter_routes",
+    "platform_accounts", "platform_account_sessions",
 }  # fmt: skip
 
 
@@ -60,7 +62,7 @@ def test_orm_metadata_covers_design_tables():
 def test_idempotent(migrated):
     run_migrations(migrated)  # 再次执行不报错
     con = sqlite3.connect(migrated)
-    assert con.execute("select version_num from alembic_version").fetchall() == [("0010",)]
+    assert con.execute("select version_num from alembic_version").fetchall() == [("0015",)]
     con.close()
 
 
@@ -568,7 +570,7 @@ def test_0010_backfills_remote_history_and_leaves_other_agents_alone(tmp_path):
         _seed_remote_history(conn)
         before = _snapshot(conn)
 
-    run_migrations(path)
+    run_migrations(path, "0010")
     with sqlite3.connect(path) as conn:
         turns, items, runs = _snapshot(conn)
     usage = {k: json.loads(v[2]) for k, v in turns.items()}
@@ -603,3 +605,61 @@ def test_0010_backfills_remote_history_and_leaves_other_agents_alone(tmp_path):
     assert {tid: turns[tid][:2] for tid in turns} == {tid: before[0][tid][:2] for tid in before[0]}
     assert items["i1"][0] == 53000 and items["i2"][0] == 8000 and items["i3"] == before[1]["i3"]
     assert "needs_recompute" not in json.loads(runs["R1"])
+
+
+def test_0011_http_bridge_logs_backfill_turns_and_eval_totals(tmp_path):
+    from alembic import command
+    from evalp.store.migrate import make_alembic_config
+
+    path = tmp_path / "bridge.db"
+    run_migrations(path, "0010")
+    with sqlite3.connect(path) as conn:
+        _seed_remote_history(conn)
+        # 真实生产路径是普通 HTTP，adapter_snapshot 为空。
+        conn.execute("UPDATE sessions SET adapter_snapshot=NULL WHERE id='sB'")
+        conn.execute("UPDATE eval_items SET session_id='sB',usage=? WHERE id='i3'",
+                     (json.dumps({"custom": "保留", "failed_attempts": [1], "wasted_cost": 0.2}),))
+
+        def event(seq, tid, **values):
+            _insert(conn, "events", session_id="sB", seq=seq, turn_id=tid, ts="t", type="log",
+                    payload=json.dumps({"message": "耗时分项",
+                                        "metric_source": "actual_upstream_trace_timestamps", **values}))
+
+        event(1, "b1", upstream_run_ms=80, llm_api_ms=60, tool_execution_ms=10)
+        event(2, "b1", upstream_run_ms=96, llm_api_ms=81, tool_execution_ms=14)
+        event(3, "b1", upstream_run_ms=-1)
+        event(4, "c1", upstream_run_ms="900")
+        event(5, "c1", upstream_run_ms=True)
+        event(6, "c1", upstream_run_ms=7, metric_source="local_clock")
+        conn.execute("UPDATE turns SET status='running' WHERE id='t3'")
+        event(7, "t3", upstream_run_ms=5)
+        before = _snapshot(conn)
+        events = conn.execute("SELECT * FROM events").fetchall()
+    run_migrations(path)
+    with sqlite3.connect(path) as conn:
+        turns, items, runs = _snapshot(conn)
+        assert conn.execute("SELECT * FROM events").fetchall() == events
+    assert turns["b1"][:2] == (96, None)
+    usage = json.loads(turns["b1"][2])
+    assert usage["local_latency_ms"] == 200 and usage["local_ttft_ms"] == 20
+    assert usage["llm_api_ms"] == 81 and usage["tool_execution_ms"] == 14
+    assert usage["trace_status"] == "complete"
+    for tid in ("c1", "t1", "t2", "t3", "t4", "t5"):
+        assert turns[tid] == before[0][tid]
+    assert items["i3"][0] == 96 and items["i3"][2] == before[1]["i3"][2]
+    item_usage = json.loads(items["i3"][1])
+    assert item_usage["custom"] == "保留" and item_usage["failed_attempts"] == [1]
+    assert item_usage["wasted_cost"] == 0.2 and item_usage["trace_status"] == "complete"
+    assert json.loads(runs["R2"])["needs_recompute"] is True
+    assert runs["R1"] == before[2]["R1"]
+    run_migrations(path)
+    with sqlite3.connect(path) as conn:
+        assert _snapshot(conn) == (turns, items, runs)
+    command.downgrade(make_alembic_config(path), "0010")
+    with sqlite3.connect(path) as conn:
+        restored = _snapshot(conn)
+        assert restored[0] == before[0]
+        assert restored[1]["i3"][0] == 200
+    run_migrations(path)
+    with sqlite3.connect(path) as conn:
+        assert _snapshot(conn)[0] == turns

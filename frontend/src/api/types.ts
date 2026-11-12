@@ -374,6 +374,13 @@ export interface VersionSummary {
   archived_into: string | null
   /** 里程碑下归档的版本数；非里程碑为 0 */
   archived_count: number
+  runtime_binding?: {
+    transport: 'adapter'
+    adapter: string
+    major: number
+    migration_id: string
+    execution_blocked_reason: string
+  } | null
 }
 
 export interface VersionAssetRef {
@@ -777,6 +784,7 @@ export interface SessionListParams {
   version_id?: string
   /** 缺省为 chat,replay（不含 eval / judge） */
   mode?: string
+  include_archived?: boolean
   q?: string
   limit?: number
 }
@@ -794,6 +802,15 @@ export interface Usage {
   /** 有远端数据的轮次才有：规范指标（用时等）以远端为准，补齐前为 pending */
   trace_status?: TraceSyncStatus
   trace_note?: string
+  upstream_message_id?: string
+  trace_refresh?: {
+    queried_at: string
+    credential_ref: string
+    environment: string
+    revision: number
+    result_status: string
+    error?: string
+  }
   /** HiAgent 适配器写入的本地传输耗时（只作诊断，不显示）；旧版 HiAgent 轮次靠它识别 */
   transport_ms?: number
 }
@@ -852,8 +869,17 @@ export interface TurnCreate {
   middlewares?: MiddlewareSelection[]
 }
 
+export interface OutputStageRule {
+  output_type: 'confirm' | 'confirm_artifact' | 'examine' | 'finish'
+  artifact_type?: number | null
+  artifact_types?: number[] | null
+  approval_code?: string | null
+  examine_status?: number[]
+  terminal?: boolean
+}
+
 export interface MiddlewareSelection {
-  id: 'json_artifact'
+  id: 'json_artifact' | 'output_contract'
   version: '1.0.0'
   source_turn_id?: string | null
   expected_previous_turn_id?: string | null
@@ -861,18 +887,28 @@ export interface MiddlewareSelection {
     url_pointer?: string | null
     content_pointer?: string | null
     selected_candidate_id?: string | null
+    agent_id?: string | null
+    required_keys?: string[]
+    examine_key?: string
+    stages?: Record<string, OutputStageRule>
   }
 }
 
 export interface MiddlewareSnapshot {
   schema_version: number
   steps: (MiddlewareSelection & {
+    phase?: 'input' | 'output'
     status: 'pending' | 'running' | 'ok' | 'error' | 'cancelled' | 'timeout'
     duration_ms: number
     source_url?: string
     raw_sha256?: string
     result_blob_hash?: string
     error?: TurnError | null
+    sha256?: string
+    size?: number
+    stage?: number
+    outputType?: string | null
+    artifactType?: number | null
   })[]
 }
 

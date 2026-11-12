@@ -18,6 +18,42 @@ async def state(client):
     return (await client.get(f"{API}/adapter-environments")).json()
 
 
+async def test_registered_platform_environments_are_isolated(world, client, monkeypatch):
+    from dataclasses import replace
+
+    from evalp.runtime.adapters import registry
+    from evalp.services import adapter as service
+
+    registered = registry.definitions()
+    platforms = (*registered, replace(registered[0], adapter="secondary", name="Secondary"))
+    monkeypatch.setattr(registry, "definitions", lambda: platforms)
+    monkeypatch.setattr(service, "definitions", lambda: platforms)
+    secondary = (await client.post(f"{API}/adapters/credentials", json={
+        "adapter_id": "secondary", "name": "secondary key", "secret": "secondary-key",
+    })).json()["ref"]
+    ref = await make_credential(client)
+    await configure_production(client, hiagent_binding(ref))
+    url = f"{API}/adapter-environments"
+    secondary_binding = {**hiagent_binding(secondary), "adapter": "secondary"}
+    result = await client.put(f"{url}/test?adapter=secondary", json={
+        "binding": secondary_binding, "expected_revision": 0, "reason": "配置第二平台",
+    })
+    assert result.status_code == 200, result.text
+    assert (await client.post(f"{url}/production/push?adapter=secondary", json={
+        "test_revision": 1,
+    })).status_code == 200
+    assert (await state(client))["production"]["binding"]["credential_ref"] == ref
+    other = (await client.get(f"{url}?adapter=secondary")).json()
+    assert other["production"]["binding"]["credential_ref"] == secondary
+    assert len((await client.get(f"{url}/production/revisions?adapter=secondary")).json()) == 1
+    version = await world.code_version({"transport": "adapter", "platform": "secondary"})
+    session = await world.session(version)
+    assert session.adapter_snapshot["binding"]["adapter"] == "secondary"
+    mismatch = await client.put(f"{url}/test?adapter=secondary", json={
+        "binding": hiagent_binding(ref), "expected_revision": 1, "reason": "错误平台",
+    })
+    assert mismatch.status_code == 400
+
 async def test_both_environments_start_unconfigured_and_session_needs_production(world, client):
     current = await state(client)
     assert current["production"]["configured"] is False and current["production"]["revision"] == 0
@@ -47,7 +83,7 @@ async def test_edit_test_then_push_to_production_archives_each_change(world, cli
         session = await world.session(version)
         snapshot = session.adapter_snapshot
         assert snapshot["environment"] == "production" and snapshot["revision"] == 1
-        assert snapshot["binding"]["id"] == "hiagent" and "requested_environment" not in snapshot
+        assert snapshot["binding"]["adapter"] == "hiagent" and "requested_environment" not in snapshot
 
 
 async def test_identical_content_adds_no_archive(world, client):
@@ -73,7 +109,7 @@ async def test_test_edit_needs_current_revision_and_valid_binding(world, client)
     })
     assert stale.status_code == 409
     for binding in (
-        hiagent_binding(ref, "latest"),
+        hiagent_binding(ref, major=0),
         {**hiagent_binding("adapter:missing")},
         hiagent_binding(ref, business_bridge={"base_url": "http://bridge.example", "spec_hash": "0" * 64}),
     ):

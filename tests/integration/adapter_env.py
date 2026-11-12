@@ -16,8 +16,8 @@ async def make_credential(client, secret: Any = "private-test-key") -> str:
     return response.json()["ref"]
 
 
-def hiagent_binding(ref: str, version: str = "1.0.0", **config: Any) -> dict:
-    return {"id": "hiagent", "version": version, "credential_ref": ref, "config": {
+def hiagent_binding(ref: str, major: int = 1, **config: Any) -> dict:
+    return {"adapter": "hiagent", "major": major, "credential_ref": ref, "config": {
         "base_url": "https://upstream.example/api/proxy",
         "app_id": "app-test", "user_id": "user-test", "published_version": "47", **config,
     }}

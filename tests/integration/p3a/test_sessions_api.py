@@ -7,6 +7,32 @@ from tests.fixtures.fake_openai import Call
 API = "/api/v1"
 
 
+async def test_archived_version_sessions_filtered_before_pagination(world, client):
+    old = await world.config_version(name="archive-bot")
+    draft = (await client.post(f"{API}/versions/{old['id']}/to-draft", json={})).json()["draft"]
+    spec = {**draft["spec"], "prompts": {"system": "阶段成果"}}
+    draft = (await world.api.save(draft, spec))["draft"]
+    latest = (await world.api.publish(draft))["version"]
+    visible = [await world.session(latest), await world.session(latest)]
+    hidden = await world.session(old)
+    response = await client.post(f"{API}/versions/{latest['id']}/milestone", json={})
+    assert response.status_code == 200, response.text
+    page = (await client.get(f"{API}/sessions?agent_id=archive-bot&limit=1")).json()
+    assert [s["id"] for s in page["items"]] == [visible[1].id]
+    assert page["next_cursor"]
+    second = (await client.get(f"{API}/sessions", params={
+        "agent_id": "archive-bot", "limit": 1, "cursor": page["next_cursor"],
+    })).json()
+    assert [s["id"] for s in second["items"]] == [visible[0].id]
+    assert second["next_cursor"] is None
+    all_sessions = (await client.get(f"{API}/sessions?include_archived=true")).json()["items"]
+    assert {s["id"] for s in all_sessions} == {hidden.id, *(s.id for s in visible)}
+    assert not (await client.get(f"{API}/sessions?version_id={old['id']}")).json()["items"]
+    assert (await client.get(f"{API}/sessions/{hidden.id}")).status_code == 200
+    assert (await client.post(f"{API}/versions/{old['id']}/unarchive")).status_code == 200
+    assert len((await client.get(f"{API}/sessions")).json()["items"]) == 3
+
+
 async def wait_turn(world, turn_id, timeout=5.0):
     for _ in range(int(timeout / 0.02)):
         t = await world.sessions.get_turn(turn_id)

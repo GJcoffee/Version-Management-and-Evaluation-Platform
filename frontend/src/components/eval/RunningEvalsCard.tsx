@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { FlaskConical } from 'lucide-react'
 import { useEvals } from '@/api/queries/evals'
+import { IncludeArchivedToggle } from '@/components/IncludeArchivedToggle'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { LoadingBlock } from '@/components/ui/Spinner'
@@ -9,7 +11,8 @@ import { runDatasetLabel, runTitle, runVersionLabel } from './evalUtils'
 
 /** 首页卡片：正在运行的评测及其进度（每 2 秒刷新） */
 export function RunningEvalsCard() {
-  const { data, isLoading } = useEvals({ status: 'queued,running,paused', limit: 8 }, { autoRefresh: 2000 })
+  const [includeArchived, setIncludeArchived] = useState(false)
+  const { data, isLoading } = useEvals({ status: 'queued,running,paused', limit: 8, include_archived: includeArchived }, { autoRefresh: 2000 })
   const runs = data?.pages[0]?.items ?? []
   return (
     <Card data-testid="running-evals">
@@ -18,6 +21,7 @@ export function RunningEvalsCard() {
           <FlaskConical className="h-4 w-4 text-muted-foreground" />
           正在运行的评测
         </CardTitle>
+        <IncludeArchivedToggle includeArchived={includeArchived} setIncludeArchived={setIncludeArchived} label="包括已归档评测" />
         <Link to="/evals" className="text-xs text-primary hover:underline">
           全部评测
         </Link>

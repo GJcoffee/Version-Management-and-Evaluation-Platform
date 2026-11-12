@@ -40,7 +40,10 @@ def provider_secret_key(provider_id: str) -> str:
 
 
 def _machine_id() -> str:
-    """读取机器标识；取不到时退化为 MAC 地址。"""
+    """读取机器标识；``EVALP_MACHINE_ID`` 可显式覆盖（容器与宿主共享密钥文件时使用）。"""
+    override = os.environ.get("EVALP_MACHINE_ID")
+    if override:
+        return override
     for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
         try:
             text = Path(p).read_text().strip()

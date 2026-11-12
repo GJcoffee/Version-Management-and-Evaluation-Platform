@@ -71,6 +71,8 @@ export function ItemConversation({ sessionId, className }: { sessionId: string |
   if (!sessionId) return <p className="p-4 text-center text-xs text-muted-foreground">这次执行没有会话（可能尚未开始或已取消）</p>
   return (
     <ChatPane
+      key={sessionId}
+      defaultCollapsed
       className={className}
       turns={stream.turns}
       sessionId={sessionId}

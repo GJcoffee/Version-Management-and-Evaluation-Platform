@@ -8,6 +8,7 @@ import { CompareCaseDrawer } from '@/components/eval/CompareCaseDrawer'
 import { COMPARE_TABS, CompareSummary, WarningBar } from '@/components/eval/CompareSummary'
 import { ToolCompareTable } from '@/components/eval/ToolStats'
 import { EvalStatusBadge } from '@/components/eval/EvalStatus'
+import { IncludeArchivedToggle } from '@/components/IncludeArchivedToggle'
 import {
   TONE_CLASS,
   deltaTone,
@@ -93,7 +94,8 @@ export default function EvalComparePage() {
   const right = sp.get('right') ?? ''
   const [cls, setCls] = useState<string>('regressed')
   const [opened, setOpened] = useState<EvalCompareCase | null>(null)
-  const runsQ = useEvals({ limit: 100 })
+  const [includeArchived, setIncludeArchived] = useState(false)
+  const runsQ = useEvals({ limit: 100, include_archived: includeArchived })
   const runs = runsQ.data?.pages.flatMap((p) => p.items) ?? []
   const leftRun = useEval(left || undefined).data
   const rightRun = useEval(right || undefined).data
@@ -120,6 +122,16 @@ export default function EvalComparePage() {
         <h1 className="text-lg font-semibold">评测对比</h1>
       </div>
 
+      <IncludeArchivedToggle includeArchived={includeArchived} label="包括已归档评测"
+        setIncludeArchived={(value) => {
+          setIncludeArchived(value)
+          if (!value) {
+            const next = new URLSearchParams(sp)
+            next.delete('left')
+            next.delete('right')
+            setSp(next, { replace: true })
+          }
+        }} />
       <div className="grid items-end gap-3 md:grid-cols-[1fr_auto_1fr]">
         <RunSelect label="左（基线）" value={left} onChange={(v) => set('left', v)} runs={options(leftRun)} testId="select-left" />
         <Button variant="outline" size="icon" aria-label="交换左右" onClick={swap} disabled={!left && !right}>

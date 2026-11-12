@@ -207,13 +207,21 @@ class CompareService:
                 raise NotFound(f"对比不存在: {compare_id}", {"id": compare_id})
             return await self._out(s, row)
 
-    async def list(self, *, limit: int = 50, cursor: str | None = None) -> Page[CompareGroupOut]:
+    async def list(
+        self, *, include_archived: bool = False, limit: int = 50, cursor: str | None = None
+    ) -> Page[CompareGroupOut]:
         """对比列表（新的在前，只含会话对比）。"""
         async with self.ctx.db.read() as s:
-            page = await paginate(
-                s, select(CompareGroup).where(CompareGroup.kind == "session"), CompareGroup.id,
-                limit=limit, cursor=cursor,
-            )  # fmt: skip
+            stmt = select(CompareGroup).where(CompareGroup.kind == "session")
+            if not include_archived:
+                archived_sessions = select(Session.id).join(
+                    Version, Session.version_id == Version.id
+                ).where(Version.archived_into.is_not(None))
+                stmt = stmt.where(
+                    CompareGroup.left_ref.not_in(archived_sessions),
+                    CompareGroup.right_ref.not_in(archived_sessions),
+                )
+            page = await paginate(s, stmt, CompareGroup.id, limit=limit, cursor=cursor)
             items = [await self._out(s, r) for r in page.items]
         return Page(items=items, next_cursor=page.next_cursor)
 
@@ -459,7 +467,7 @@ class CompareService:
 
         version_id = await self.ctx.svc(VersionService).resolve_ref(target_ref)
         if mode == "anchored":
-            await self._reject_hiagent_anchored(version_id, environment)
+            await self._reject_anchored_unsupported(version_id, environment)
         new = await self.sessions.create(
             version_id=version_id,
             mode="replay",
@@ -489,18 +497,26 @@ class CompareService:
         task.add_done_callback(lambda _t, sid=new.id: self._replays.pop(sid, None))
         return ReplayAccepted(session_id=new.id, compare_id=group.id)
 
-    async def _reject_hiagent_anchored(self, version_id: str, environment: str) -> None:
-        """HiAgent 直接接入由上游会话维护历史，忽略外部历史：并发的锚定轮次会共用并抢写同一个上游会话。"""
+    async def _reject_anchored_unsupported(self, version_id: str, environment: str) -> None:
+        """由上游维护会话历史的平台忽略外部历史：并发的锚定轮次会共用并抢写同一个上游会话。"""
+        from evalp.runtime.adapters.binding import normalize_binding
+        from evalp.runtime.adapters.registry import resolve
         from evalp.services.adapter import AdapterService
 
         async with self.ctx.db.read() as s:
             version = await s.get(Version, version_id)
             assert version is not None
-            snapshot = await self.ctx.svc(AdapterService).snapshot(s, version.spec, environment)
+            snapshot = await self.ctx.svc(AdapterService).snapshot(
+                s, version.spec, environment, version_id=version.id,
+            )
         binding = snapshot and snapshot["binding"]
-        if binding and binding["id"] == "hiagent" and not binding["config"].get("business_bridge"):
+        if not binding:
+            return
+        definition, _ = resolve(normalize_binding(binding))
+        bridge = bool(binding["config"].get("business_bridge"))
+        if "no_external_history" in definition.capabilities and not bridge:
             raise ValidationFailed(
-                "该版本使用 HiAgent 适配器：HiAgent 不接受外部历史，不能做锚定重放，请改用自由重放",
+                f"该版本使用 {definition.name} 适配器：上游不支持外部历史，不能做锚定重放，请改用自由重放",
                 code="ANCHORED_REPLAY_UNSUPPORTED",
             )
 

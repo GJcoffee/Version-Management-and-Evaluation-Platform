@@ -74,6 +74,15 @@ class SessionDetail(BaseModel):
 # ---------------------------------------------------------------- 请求
 
 
+class TraceRefreshBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    config_source: Literal["current", "original"] = "current"
+    environment: Environment | None = None
+    credential_ref: str | None = Field(None, min_length=1)
+    force: bool = Field(False, description="重新查询已 complete 的 Trace，用于修正旧解析统计")
+
+
 class SessionCreate(BaseModel):
     """创建会话：``version_id``（版本 id，也接受 ``agent:tag`` 形式）或 ``agent`` + ``tag`` 二选一。"""
 
@@ -124,7 +133,7 @@ class TurnCreate(BaseModel):
     tool_mocks: dict[str, Any] | None = None
     pair_index: int | None = None
     wait: bool = False
-    middlewares: list[MiddlewareSelection] = Field(default_factory=list, max_length=1)
+    middlewares: list[MiddlewareSelection] = Field(default_factory=list, max_length=2)
 
 
 class TurnAccepted(BaseModel):

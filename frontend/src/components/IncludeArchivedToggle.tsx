@@ -6,7 +6,8 @@ export interface ArchiveFilter {
   includeArchived: boolean
   setIncludeArchived: (v: boolean) => void
   /** 已归档的版本数；为 0 时不显示开关 */
-  archivedCount: number
+  archivedCount?: number
+  label?: string
 }
 
 /**
@@ -26,7 +27,7 @@ export function useArchiveFilter<T extends Pick<VersionSummary, 'id' | 'archived
 }
 
 /** 「包括已归档」开关：默认选择器只列里程碑与未归档的版本 */
-export function IncludeArchivedToggle({ includeArchived, setIncludeArchived, archivedCount }: ArchiveFilter) {
+export function IncludeArchivedToggle({ includeArchived, setIncludeArchived, archivedCount, label = '包括已归档' }: ArchiveFilter) {
   if (archivedCount === 0) return null
   return (
     <label className="inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground">
@@ -37,7 +38,7 @@ export function IncludeArchivedToggle({ includeArchived, setIncludeArchived, arc
         onChange={(e) => setIncludeArchived(e.target.checked)}
         data-testid="include-archived"
       />
-      包括已归档（{archivedCount}）
+      {label}{archivedCount !== undefined ? `（${archivedCount}）` : ''}
     </label>
   )
 }

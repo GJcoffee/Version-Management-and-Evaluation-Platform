@@ -4,7 +4,6 @@ import { Button } from '@/components/ui/Button'
 import { KeyValueEditor } from '@/components/ui/KeyValueEditor'
 import { cn } from '@/lib/cn'
 import type { MiddlewareSelection, Turn } from '@/api/types'
-import { MiddlewarePicker } from './MiddlewarePicker'
 import { messageText } from './sessionState'
 
 export interface MessageInputProps {
@@ -13,8 +12,6 @@ export interface MessageInputProps {
    * variables 仅在“本轮变量”展开且非空时提供。
    */
   onSend: (text: string, opts: { variables?: Record<string, string>; middlewares?: MiddlewareSelection[] }) => void | Promise<void>
-  middlewareSessionId?: string
-  sourceTurnId?: string
   restoreTurn?: Turn
   /** 有轮次在运行：显示“停止”按钮，不能发送 */
   running?: boolean
@@ -43,19 +40,17 @@ export function MessageInput({
   allowVariables = true,
   autoFocus,
   className,
-  middlewareSessionId,
-  sourceTurnId,
   restoreTurn,
 }: MessageInputProps) {
   const [text, setText] = useState('')
   const [vars, setVars] = useState<Record<string, string>>({})
   const [varsOpen, setVarsOpen] = useState(false)
   const [sending, setSending] = useState(false)
-  const [middleware, setMiddleware] = useState<MiddlewareSelection | null>(null)
-  const [middlewareReady, setMiddlewareReady] = useState(false)
   const ref = useRef<HTMLTextAreaElement>(null)
   const varCount = Object.keys(vars).length
-  const canSend = !disabled && !running && !sending && text.trim().length > 0 && (!middleware || middlewareReady)
+  const busy = !!disabled || !!running || sending
+  const canSend = !busy && text.trim().length > 0
+  const canRestore = restoreTurn && ['error', 'timeout', 'cancelled'].includes(restoreTurn.status)
 
   const send = async () => {
     if (!canSend) return
@@ -64,10 +59,8 @@ export function MessageInput({
     try {
       await onSend(payload, {
         ...(varCount > 0 ? { variables: vars } : {}),
-        ...(middleware ? { middlewares: [middleware] } : {}),
       })
       setText('')
-      setMiddleware(null)
       requestAnimationFrame(() => ref.current?.focus())
     } catch {
       /* 调用方负责提示错误；保留输入 */
@@ -85,18 +78,13 @@ export function MessageInput({
 
   return (
     <div className={cn('rounded-lg border border-input bg-card p-2', className)} data-testid="message-input">
-      {restoreTurn?.middleware_snapshot && !running && (
-        <button type="button" className="mb-2 text-xs text-primary hover:underline" onClick={() => {
-          setText(messageText(restoreTurn.input))
-          const step = restoreTurn.middleware_snapshot!.steps[0]
-          setMiddleware({ id: step.id, version: step.version, source_turn_id: step.source_turn_id, config: step.config })
-          requestAnimationFrame(() => ref.current?.focus())
-        }}>恢复失败轮次的指令与中间件配置</button>
-      )}
-      {middlewareSessionId && middleware && (
-        <MiddlewarePicker sessionId={middlewareSessionId} selection={middleware} onChange={setMiddleware}
-          onReady={setMiddlewareReady}
-          disabled={running || sending} />
+      {canRestore && !running && (
+        <button type="button" disabled={busy}
+          className="mb-2 rounded px-1 py-0.5 text-xs text-primary hover:underline disabled:opacity-50"
+          onClick={() => {
+            setText(messageText(restoreTurn.input))
+            requestAnimationFrame(() => ref.current?.focus())
+          }}>恢复上次失败输入</button>
       )}
       {allowVariables && varsOpen && (
         <div className="mb-2 rounded-md border border-border bg-muted/30 p-2" data-testid="turn-variables">
@@ -109,7 +97,7 @@ export function MessageInput({
         value={text}
         rows={2}
         autoFocus={autoFocus}
-        disabled={disabled}
+        disabled={disabled || sending}
         placeholder={placeholder}
         aria-label="消息输入"
         onChange={(e) => setText(e.target.value)}
@@ -130,15 +118,6 @@ export function MessageInput({
             </button>
           ) : (
             <span />
-          )}
-          {middlewareSessionId && (
-            <button type="button" className="rounded px-1 py-0.5 text-xs text-muted-foreground hover:bg-accent disabled:opacity-50"
-              aria-pressed={!!middleware} disabled={running || sending || (!sourceTurnId && !middleware)}
-              title={!sourceTurnId ? '需要上一轮成功结果' : '处理上一轮产物并附加到本轮'}
-              onClick={() => setMiddleware(middleware ? null : {
-                id: 'json_artifact', version: '1.0.0', source_turn_id: sourceTurnId,
-                expected_previous_turn_id: sourceTurnId, config: {},
-              })}>轮间中间件{middleware ? ' · 已开启' : ''}</button>
           )}
         </div>
         {running ? (

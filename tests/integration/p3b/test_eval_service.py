@@ -15,6 +15,37 @@ from tests.fixtures.fake_openai import FakeError
 from .conftest import API, make_cases
 
 
+async def test_eval_archive_filter_preserves_batch_and_detail_access(ev):
+    old = await ev.config_version(name="archive-eval")
+    draft = (await ev.client.post(f"{API}/versions/{old['id']}/to-draft", json={})).json()["draft"]
+    draft = (await ev.api.save(draft, {**draft["spec"], "prompts": {"system": "阶段成果"}}))["draft"]
+    latest = (await ev.api.publish(draft))["version"]
+    await ev.dataset("archive-ds", make_cases(1))
+    created = await ev.create([latest, old], "asset://dataset/archive-ds@latest")
+    for run in created.runs:
+        await ev.evals.wait_finished(run.id, timeout=10, interval=0.02)
+    recent = await ev.create(latest, "asset://dataset/archive-ds@latest")
+    await ev.evals.wait_finished(recent.runs[0].id, timeout=10, interval=0.02)
+    extra = await ev.create(old, "asset://dataset/archive-ds@latest")
+    await ev.evals.wait_finished(extra.runs[0].id, timeout=10, interval=0.02)
+    r = await ev.client.post(f"{API}/versions/{latest['id']}/milestone", json={})
+    assert r.status_code == 200, r.text
+    expected = {run.id for run in created.runs if run.version_id == latest["id"]}
+    page = (await ev.client.get(f"{API}/evals?limit=1")).json()
+    assert [run["id"] for run in page["items"]] == [recent.runs[0].id]
+    second = (await ev.client.get(f"{API}/evals", params={"limit": 1, "cursor": page["next_cursor"]})).json()
+    assert {run["id"] for run in second["items"]} == expected
+    assert second["next_cursor"] is None
+    by_batch = (await ev.client.get(f"{API}/evals", params={"batch_id": created.batch_id})).json()
+    assert {run["id"] for run in by_batch["items"]} == expected
+    all_runs = (await ev.client.get(f"{API}/evals?include_archived=true")).json()["items"]
+    assert {run["id"] for run in all_runs} == {run.id for run in [*created.runs, *recent.runs, *extra.runs]}
+    assert not (await ev.client.get(f"{API}/evals?version_id={old['id']}")).json()["items"]
+    assert (await ev.client.get(f"{API}/evals/{extra.runs[0].id}")).status_code == 200
+    assert (await ev.client.post(f"{API}/versions/{old['id']}/unarchive")).status_code == 200
+    assert len((await ev.client.get(f"{API}/evals")).json()["items"]) == len(all_runs)
+
+
 async def wait_until(pred, timeout=10.0, interval=0.02):
     loop = asyncio.get_running_loop()
     end = loop.time() + timeout

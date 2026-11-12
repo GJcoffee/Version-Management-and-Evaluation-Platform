@@ -84,7 +84,7 @@ describe('JsonViewer', () => {
   })
 
   it('多行提示词默认显示原文，切换 JSON 后才显示转义，引号和反斜杠不被改写', async () => {
-    const prompt = '你是"MINISO创意总监"。\n保留路径 C:\\prompts\\draft 和字面量 \\n。\n<script>原文</script>'
+    const prompt = '你是"示例助手"。\n保留路径 C:\\prompts\\draft 和字面量 \\n。\n<script>原文</script>'
     const { container } = render(<JsonViewer value={{ prompt }} />)
     const original = container.querySelector('[data-string-view="raw"]')
     expect(original?.textContent).toBe(prompt)

@@ -135,10 +135,12 @@ class VersionTag(Base):
 
 
 class AdapterEnvironment(Base):
-    """全平台只有生产 / 测试两套接入配置；``revision`` 指向当前存档号，0 表示尚未配置。"""
+    """按平台维护环境；HiAgent 沿用旧键，其他平台使用 platform:environment。"""
 
     __tablename__ = "adapter_environments"
-    __table_args__ = (CheckConstraint("name IN ('production','test')", name="name"),)
+    __table_args__ = (CheckConstraint(
+        "name IN ('production','test') OR name LIKE '%:production' OR name LIKE '%:test'", name="name",
+    ),)
 
     name: Mapped[str] = mapped_column(Text, primary_key=True)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"), default=0)
@@ -170,6 +172,75 @@ class AdapterCredential(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     adapter_id: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class PlatformAccount(Base):
+    """账号身份稳定，密码与登录态仅存加密密钥库的引用。"""
+
+    __tablename__ = "platform_accounts"
+    __table_args__ = (
+        UniqueConstraint(
+            "adapter_id", "origin", "tenant_name", "username", name="uq_platform_account_identity",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    adapter_id: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    tenant_name: Mapped[str] = mapped_column(Text, nullable=False)
+    username: Mapped[str] = mapped_column(Text, nullable=False)
+    password_secret_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    config_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    session_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    last_checked_at: Mapped[str | None] = mapped_column(Text)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    next_check_at: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class PlatformAccountSession(Base):
+    """Cookie 修订不可变；停用账号或修改密码不改写既有修订。"""
+
+    __tablename__ = "platform_account_sessions"
+
+    account_id: Mapped[str] = mapped_column(Text, ForeignKey("platform_accounts.id"), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    config_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    secret_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class AdapterBindingMigration(Base):
+    """接入迁移审计；原 Spec、会话与配置绑定保存在独立记录中。"""
+
+    __tablename__ = "adapter_binding_migrations"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    agent_id: Mapped[str] = mapped_column(Text, ForeignKey("agents.id"), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    before: Mapped[dict[str, Any]] = _json_col()
+    result: Mapped[dict[str, Any]] = _json_col()
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class VersionAdapterRoute(Base):
+    """历史业务版本的有效接入，独立于不可变 Spec 和资产。"""
+
+    __tablename__ = "version_adapter_routes"
+
+    version_id: Mapped[str] = mapped_column(Text, ForeignKey("versions.id"), primary_key=True)
+    adapter: Mapped[str] = mapped_column(Text, nullable=False)
+    major: Mapped[int] = mapped_column(Integer, nullable=False)
+    execution_blocked_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    migration_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("adapter_binding_migrations.id"), nullable=False,
+    )
 
 
 class VersionAssetRef(Base):
@@ -350,6 +421,7 @@ class EvalRun(Base):
     adapter_snapshot: Mapped[dict[str, Any] | None] = _json_col(nullable=True)
     dataset_rev_id: Mapped[str] = mapped_column(Text, ForeignKey("asset_revisions.id"), nullable=False)
     case_filter: Mapped[dict[str, Any]] = _json_col("{}")  # {tags:[], case_keys:[]}
+    turn_middlewares: Mapped[dict[str, Any]] = _json_col("{}")
     evaluators: Mapped[Any] = _json_col()  # 评估器配置数组（见 8.5）
     evaluators_hash: Mapped[str] = mapped_column(Text, nullable=False)
     repeats: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("3"), default=3)

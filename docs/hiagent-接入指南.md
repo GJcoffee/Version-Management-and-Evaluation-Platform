@@ -1,7 +1,9 @@
-# HiAgent 接入指南（给实现桥接的 agent 看）
+# HiAgent 接入指南
 
 本文说明如何把火山引擎 HiAgent 上的对话型 agent 接入 EvalP，用于版本记录、技术指标对比和评测。
-桥接服务与 HiAgent 凭据都在使用者本机，EvalP 只通过本机 HTTP 调用桥接服务。
+使用平台维护的 `hiagent@1` 适配器，直接调用 HiAgent 发布 API。连接配置与凭据引用在
+「设置 → 适配器 → HiAgent」维护，版本只保存业务资产和运行方式。
+旧 SDK 桥、本地桥发布包与运行时补丁已归档，不再作为新接入入口。
 
 ## 背景与约束
 
@@ -11,54 +13,15 @@
 - 建议用**专门的测试应用**评测（复制生产应用），确认后再发布到生产，避免评测期间的待测版本被真实用户用到。
 - 图片 / 视频质量由人工在 EvalP 的标注页审核；自动评测只看技术指标（耗时、首 token、token、成本、错误率、每个 skill 的调用次数 / 耗时 / 失败率）。
 
-## 要实现的两件事
+## 原生接入
 
-### 1. 桥接服务（`integrations/hiagent/bridge.py`）
+原生适配器统一处理 SSE、会话身份、发布版本核对及 Trace 补齐。
+`published_version` 属于平台环境配置，业务版本号与适配器实现版本分别记录。
+同平台兼容升级由平台统一发布，所有绑定共用当前实现。
 
-用 `sdk/`（evalp-sdk，零依赖）实现一个 HTTP agent：EvalP 每发起一轮，桥接调用 HiAgent 的 `chat_query_v2`（**必须流式**，
-阻塞模式会屏蔽中间信息），把 SSE 事件转成 EvalP 事件。SDK 用法见 `sdk/README.md`，协议见 `docs/02-详细设计.md` 6.2 节。
-
-```python
-from evalp_sdk import agent, TurnContext
-
-@agent
-async def handle(ctx: TurnContext):
-    ...  # 见下方事件映射
-
-if __name__ == "__main__":
-    handle.serve_http(port=8001)
-```
-
-**会话映射**：EvalP 每个会话（`ctx.session_id`）对应一个 HiAgent 会话。首轮创建 HiAgent 会话并记住映射（进程内 dict 即可），
-后续轮次沿用。HiAgent 自己维护上下文，`ctx.history` 不需要再发给它。评测时每个用例是一个新会话。
-
-**事件映射**：
-
-| HiAgent SSE 事件 | EvalP 中的写法 | 说明 |
-|---|---|---|
-| `message`（回复文本增量） | 在 `ctx.llm_call(model="hiagent")` 内调用 `call.delta(text)`，结束时 `call.record(全文)` | 前端流式显示；首 token 时间从第一个 delta 算 |
-| `agent_thought` / `agent_thought_end` | 一对对应一次 `ctx.tool_call(tool, tool_input 解析成的 dict)`，`agent_thought_end` 时 `t.result(输出)`；失败时 `t.error(信息)` | skill 名用 `tool` 字段；这些就是评测报告里"按工具"的指标来源 |
-| `knowledge_retrieve` / `qa_retrieve` / `terminology_retrieve` / `knowledge_graph_retrieve`（及 `_end`） | `ctx.span("knowledge_retrieve", ...)`，结束事件里记录命中数等 | Trace 里显示为一步 |
-| `think_message` / `agent_thought` 里的思考文本 | `ctx.log(text, level="debug")` | 可选 |
-| token 用量（若 SSE 里有） | `ctx.report_usage(prompt_tokens=..., completion_tokens=..., cost=...)` | 没有就不报，成本与 token 指标为空 |
-| 流中的错误事件 / HTTP 错误 | 直接抛异常 | SDK 会生成 `error` 与 `turn.end(status=error)`，计入错误率 |
-
-`agent_thought` 与 `agent_thought_end` 在流里是成对、顺序出现的；用 `t = ctx.tool_call(...)` 后手动 `t.__enter__()` / `t.__exit__(None, None, None)`
-跨事件开闭即可。
-
-**图片 / 视频**：HiAgent 回复里的图片、视频就是文本中的链接（裸 URL 或 markdown / `<img>` / `<video>` 标签），**原样放进回复文本**，
-EvalP 前端会识别并渲染（标注页同样渲染，供人工审核）。链接会过期，需要长期留档的话另行处理，本期不做。
-
-**凭据**：HiAgent 的 API Key 只放在桥接进程的环境变量里（如 `HIAGENT_API_KEY`），**不要写进 agent.yaml**——agent.yaml 的内容会存进版本、
-参与哈希，也会出现在版本 diff 里。
-
-### 2. 版本一致性检查
-
-因为 API 永远调用最新发布的版本，评测前必须确认 HiAgent 当前线上版本就是 EvalP 里选的那个版本，否则会把结果记到错误的版本上。
-
-做法：`evalp publish` 时，在 agent.yaml 的 `params` 里写入 HiAgent 的版本号（如 `hiagent_version: "0.5.3"`），它会随版本固化，
-并在每轮通过 `ctx.params` 传给桥接。桥接在**每个会话的首轮**用 `hiagentctl` 查询测试应用当前已发布的版本号，与 `ctx.params["hiagent_version"]`
-比较，不一致就抛异常（信息写明"HiAgent 线上版本是 X，所选 EvalP 版本对应 Y"）。这样整次评测会立刻以错误结束，不会产生错误的数据。
+主提示词、Skill、MCP 与模型配置通过版本快照记录；阶段输出校验由
+`output_contract` 中间件承担。API Key、Cookie／CSRF 正文只进入平台凭据存储，
+不写入 `agent.yaml` 或快照文件。
 
 ## agent 项目配置
 
@@ -74,17 +37,12 @@ evalp init --kind code
 schema: evalp/v1
 kind: code
 name: <agent 名>
-transport: http
-http:
-  base_url: http://127.0.0.1:8001
-  timeout_s: 900          # 生视频耗时长，按实际调整
+transport: adapter
+platform: hiagent
 runtime:
   turn_timeout_s: 900
 source:
   capture_git: false
-params:
-  hiagent_app: <测试应用 id>
-  hiagent_version: "0.5.3"   # 每次发布前更新
 snapshot:                      # hiagentctl 导出目录；文件随版本存档，按 map 规则入库为各类型的资产
   dir: exports/current
   map:                         # 按顺序取第一条匹配的规则；glob 与 $. 字段名按实际导出目录 / 导出 JSON 调整
@@ -98,6 +56,13 @@ snapshot:                      # hiagentctl 导出目录；文件随版本存档
     - {glob: "resources/knowledge-*.json", kind: kb_config, name: "{agent}-{stem}"}
     - {glob: "platform/*.json", kind: app_config, name: "{agent}-{stem}"}
 ```
+
+整理旧版本时，先在同一 Agent 下发布绑定完整分类资产的新版本，检查固定修订与内容，
+再通过 MCP `set_milestone` 归档过程版本。已有同类型、同内容的资产应直接复用固定修订；
+原来存为 `file` 的 Skill ZIP 应绑定到 `skill` 类型，不复制包或改写历史版本。
+
+分类基线应按实际资产类型绑定固定修订；历史版本归档后仍可读取原 Spec 和资产引用。
+平台部署、接入迁移与 Trace 账号配置见 [部署指南](platform-trace-deployment.md)。
 
 ## 快照与资产
 
@@ -206,25 +171,56 @@ evalp eval compare <上一版的 run id> <本次 run id>
 ## 用平台内置的 HiAgent 适配器（不经桥接）
 
 版本 `transport: adapter` 时（新建 Agent 时勾选「由平台托管适配器接入」，或 agent.yaml 里写 `transport: adapter`，不需要也不能写 `adapter:` 配置），
-平台直接调用 HiAgent 发布 API。连接配置**不在版本里**，而是在网页的 **设置 → 适配器** 里按环境配置，全平台只有两套：
+平台直接调用 HiAgent 发布 API。连接配置**不在版本里**，而是在网页的 **设置 → 适配器 → HiAgent** 里配置。
+每个平台独立维护两套环境；省略版本 `platform` 字段时默认使用 HiAgent：
 
 - **生产**：所有这类版本默认使用；新发布的版本自动沿用，不需要任何绑定操作。新建对话 / 评测 / 重放 / 双栏对比默认都用生产。
 - **测试**：只用来验证适配器改动（例如换了 HiAgent 的发布版本号、应用 ID、地址或凭据）。
 
 **改动流程**：
 
-1. 设置 → 适配器，在「测试」卡片点「配置 / 编辑」：选适配器（HiAgent）、填 `base_url`、`app_id`、`user_id`、`published_version`、可选的 Trace 地址，
-   选择凭据（没有就「新增凭据」，API Key 或含 `api_key` / `observe_headers` 的 JSON，只保存引用），点「检查连接配置」，写一句存档说明后保存。
+1. 设置 → 适配器 → HiAgent，在「测试」卡片点「配置 / 编辑」：填 `base_url`、`app_id`、`user_id`、`published_version`、可选的 Trace 地址，
+   选择凭据（没有就「新增凭据」，API Key 或含 `api_key` / `observe_headers` 的 JSON，只保存引用），点「检查上游认证」，写一句存档说明后保存。
 2. 测试已配置且与生产不同后，新建对话 / 评测 / 重放 / 双栏对比的对话框里会出现「生产 | 测试」切换（默认生产）。选「测试」验证；
    会话页和评测报告页的标签会显示「测试 · 存档 #N」。
 3. 验证通过后在「测试」卡片点「推送到生产」，生产得到一个新存档（来源「推送」）。生产有问题时点生产卡片的「回滚」，回到某个历史存档。
 
 每个环境的每次变化都会存档（存档号、时间、说明、来源：编辑 / 推送 / 回滚 / 迁移），内容没变化时保存或推送不产生新存档；
 历史在设置页的「存档历史」里查看。会话和评测会记下所用环境与存档号，之后改配置不影响已有运行。
+发布 API Key 过期时新增凭据并更新测试、推送生产。在旧轮次 Trace 面板点「重新获取 Trace」，
+选择平台最新配置（默认原会话环境），或直接选择新凭据。重查保留原应用、版本和消息 ID，查询信息单独记录。
+缺少上游消息 ID 的轮次无法补查；`partial` 可重查，失败不会清空已取得的指标。
 评测缓存按配置区分：配置不同不共用缓存，同一份配置共用。测试未配置、或与生产相同时，选「测试」也会落到生产（界面不再出现切换）。
 
 MCP / CLI 同样：`chat`、`run_eval`、`replay_session`（MCP）与 `evalp chat|eval run|replay --env test`（CLI）可选环境，默认生产；
 MCP 另有 `get_adapter_environments`、`update_test_adapter`、`push_adapter_to_production`、`rollback_production_adapter`。
+
+### Trace 账号与自动重登
+
+在设置 → 适配器 → HiAgent 的「Trace 账号」中添加站点根地址、租户（可选）、用户名和密码。
+随后在测试配置中填写同站点的 `observe_base_url` 并选择「Trace 账号」，检查上游认证、保存、推送生产。
+绑定中只保存 `observe_account_ref`；同账号的所有 Trace 查询共用最新 Cookie／CSRF。
+发布 API Key 仍是独立不可变凭据，账号管理不会自动更换 Key。
+
+平台参考 hiagentctl 的页面登录协议：检查 `/api/auth/checkLogin`，确认会话失效后获取验证码，
+最多识别尝试三次，以页面兼容的 AES 格式提交密码和验证码，再检查登录结果。
+没有 refresh_token 轮换，也不启动 hiagentctl 子进程。密码和完整 Cookie 属性加密保存在 SecretStore；
+每次登录或 Cookie 更新追加修订，列表和修订接口均不回显密钥正文。
+
+登录态通常每五分钟探活；站点提供 Cookie 到期时间时提前一分钟检查。
+启动时恢复探活，查询遇到 HTTP 401/403 或明确的未登录业务错误时立即核验。
+仅确认会话过期才重新登录，并最多重放一次原只读 Observe 请求。权限不足的 403 不反复重登，
+网络错误冷却一分钟后再检查，不当作已过期。检查和查询按账号串行执行，避免并发重复登录。
+
+密码错误、首次登录、密码到期或其他验证要求会暂停自动尝试，并在账号列表显示原因。
+可以更新密码、点击「检查／重新登录」，或先在站点完成验证，再点击「补充登录态」提交
+`{"Cookie":"…","X-Csrf-Token":"…"}`。平台核验成功后才保存新修订；编辑密码留空保留原密码。
+站点、租户和用户名代表固定账号身份，切换身份时新增账号；停用保留历史并停止自动探活。
+
+首次 Trace 补齐和旧轮次重查走同一账号管理器。重查选择最新配置时采用当前配置的账号引用，
+历史会话和环境快照保持不变；`usage.trace_auth` 与 `usage.trace_refresh.trace_auth`
+记录实际账号、配置修订和登录态修订。自动登录失败只影响 Trace 完整度，已有执行结果与已取得指标保留。
+未绑定账号的配置继续使用原 `observe_headers`，可逐步迁移。
 
 ### 指标以 HiAgent 远端为准（Trace 后台补齐）
 
@@ -246,7 +242,7 @@ Trace 由后台任务查询（先查 GetTraceInfo，拿到 TraceID 且 EndTime �
 
 ## 验证
 
-1. 桥接启动后执行 `evalp adapter check --version <版本>`，协议检查全部通过。注意自检会真实调用 HiAgent，产生少量费用。
-2. 在 EvalP 网页上对话一轮，Trace 里能看到每次 skill 调用（名称、入参、耗时），回复中的图片 / 视频能直接显示。
-3. 故意让 `params.hiagent_version` 与线上不一致，对话应立刻报错。
-4. 为桥接写测试：用录制下来的一段 SSE 回放（脱敏）验证事件映射，不要在测试里调真实 HiAgent。
+1. 在平台适配器设置中检查上游认证；该探针不提交模型请求。
+2. 核对版本「资产」页的分类、固定修订和来源 ID；原始包与参考版本保持一致。
+3. 业务发生变化时，通过平台 MCP 在测试环境按实际对话顺序验证；Trace 重查使用已有轮次。
+4. 平台协议变更使用脱敏 SSE／Trace 契约样本测试，兼容层的历史读取同时验证。

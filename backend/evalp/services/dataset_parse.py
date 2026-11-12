@@ -15,7 +15,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from evalp.errors import DatasetParseError
+from evalp.errors import DatasetParseError, ValidationFailed
+from evalp.schemas.eval_middleware import dump_plan, validate_plan
 from evalp.utils.canonical import canonical_json, sha256_hex
 
 MAX_REPORTED_ERRORS = 100
@@ -100,8 +101,8 @@ class _Warnings:
 def _parse_turns(value: Any) -> list[str]:
     """把 input 的各种写法转为轮次列表；不合法抛 ValueError。"""
     if isinstance(value, dict):
-        if set(value) != {"turns"}:
-            raise ValueError('input 为对象时只能是 {"turns": [...]}')
+        if "turns" not in value or set(value) - {"turns", "turn_middlewares"}:
+            raise ValueError('input 对象须包含 turns，可选 turn_middlewares')
         value = value["turns"]
         if not isinstance(value, list):
             raise ValueError("input.turns 必须是数组")
@@ -176,6 +177,14 @@ def _build_case(obj: Any, line: int, errors: _Errors, warnings: _Warnings) -> Pa
             warnings.add("UNKNOWN_FIELD", "存在未知字段，已放入 metadata", line)
             metadata.setdefault(name, obj[name])
 
+    input_ = {"turns": turns}
+    if isinstance(obj.get("input"), dict) and "turn_middlewares" in obj["input"]:
+        try:
+            plan = validate_plan(obj["input"]["turn_middlewares"], len(turns))
+            if plan:
+                input_["turn_middlewares"] = dump_plan(plan)
+        except ValidationFailed as exc:
+            errors.add(line, exc.message)
     if len(errors.items) > n_before:
         return None
     if case_key is None:
@@ -185,7 +194,6 @@ def _build_case(obj: Any, line: int, errors: _Errors, warnings: _Warnings) -> Pa
             "缺少 case_key，已用 sha256(input)[:12] 自动生成；输入文本变化后跨修订对比可能对不上",
             line,
         )
-    input_ = {"turns": turns}
     return ParsedCase(
         line=line,
         case_key=case_key,

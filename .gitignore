@@ -27,6 +27,7 @@ secrets.enc
 *.key
 .evalp/
 .DS_Store
+.trae/
 
 # HiAgent live configuration exports and private field evidence
 # Keep local files; publish only reviewed synthetic examples and source code.
@@ -44,6 +45,8 @@ secrets.enc
 exports/
 datasets/
 *.jsonl
+# 仅放行已审阅的合成契约样例。
+!/tests/contract/adapters/hiagent/stream.jsonl
 agent.yaml
 .evalp.toml
 release.sh
@@ -88,3 +91,8 @@ id_ed25519
 # Platform plans, development records, and synthetic test fixtures stay versioned.
 /docs/v50-轮间中间件测试数据.json
 /docs/v50-轮间中间件真实测试记录.md
+
+# 本地草稿、业务提示词与现场部署记录。
+/draft_*_folder/
+/test.md
+/v77第五轮修复说明.md

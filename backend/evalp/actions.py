@@ -193,6 +193,7 @@ async def create_eval(
     name: str | None = None,
     via: str = "cli",
     environment: str = "production",
+    turn_middlewares: dict[str, list[dict[str, Any]]] | None = None,
 ) -> EvalBatch:
     """发起评测（每个版本一个 Run）。有 ``baseline`` 时基线排在第一位；否则多个版本时以第一个为基线。"""
     refs: list[str] = []
@@ -220,6 +221,8 @@ async def create_eval(
         body["concurrency"] = concurrency
     if name:
         body["name"] = name
+    if turn_middlewares is not None:
+        body["turn_middlewares"] = turn_middlewares
     out = await client.post("/evals", body)
     runs = out.get("runs") or []
     if len(runs) != len(refs):
@@ -394,12 +397,18 @@ def summarize_turn(turn: dict[str, Any]) -> dict[str, Any]:
 
 
 async def chat_turn(
-    client: EvalpClient, session_id: str, message: str, *, timeout: float = 600.0
+    client: EvalpClient,
+    session_id: str,
+    message: str,
+    *,
+    timeout: float = 600.0,
+    middlewares: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """发送一条消息并等到本轮结束（wait=true），返回 TurnOut。"""
-    out = await client.post(
-        f"/sessions/{session_id}/turns", {"input": message, "wait": True}, timeout=timeout
-    )
+    body: dict[str, Any] = {"input": message, "wait": True}
+    if middlewares is not None:
+        body["middlewares"] = middlewares
+    out = await client.post(f"/sessions/{session_id}/turns", body, timeout=timeout)
     return out["turn"]
 
 

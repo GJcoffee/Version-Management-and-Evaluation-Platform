@@ -4,6 +4,7 @@ import { FlaskConical, GitCompare } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import type { EvalRunOut } from '@/api/evalTypes'
 import { useEvals } from '@/api/queries/evals'
+import { IncludeArchivedToggle } from '@/components/IncludeArchivedToggle'
 import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { DateTime } from '@/components/ui/DateTime'
@@ -31,14 +32,19 @@ export function EvalRunList({ agentId, actions, emptyAction }: { agentId?: strin
   const navigate = useNavigate()
   const [status, setStatus] = useState('')
   const [selected, setSelected] = useState<string[]>([])
-  const list = useEvals({ agent_id: agentId, status: status || undefined }, { autoRefresh: 3000 })
+  const [includeArchived, setIncludeArchived] = useState(false)
+  const list = useEvals({ agent_id: agentId, status: status || undefined, include_archived: includeArchived }, { autoRefresh: 3000 })
   const runs = list.data?.pages.flatMap((p) => p.items) ?? []
+  const visibleSelected = selected.filter((id) => runs.some((r) => r.id === id))
 
   const toggle = (id: string) =>
-    setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : cur.length >= 2 ? [cur[1], id] : [...cur, id]))
+    setSelected((cur) => {
+      const visible = cur.filter((x) => runs.some((r) => r.id === x))
+      return visible.includes(id) ? visible.filter((x) => x !== id) : visible.length >= 2 ? [visible[1], id] : [...visible, id]
+    })
 
   const compare = () => {
-    const [a, b] = selected.map((id) => runs.find((r) => r.id === id)).filter((r): r is EvalRunOut => !!r)
+    const [a, b] = visibleSelected.map((id) => runs.find((r) => r.id === id)).filter((r): r is EvalRunOut => !!r)
     if (!a || !b) return
     const [left, right] = orderForCompare(a, b)
     navigate(compareHref(left.id, right.id))
@@ -56,9 +62,11 @@ export function EvalRunList({ agentId, actions, emptyAction }: { agentId?: strin
             </option>
           ))}
         </Select>
-        <span className="text-xs text-muted-foreground">勾选两个评测可对比（已选 {selected.length}/2）</span>
+        <IncludeArchivedToggle includeArchived={includeArchived} label="包括已归档评测"
+          setIncludeArchived={(value) => { setIncludeArchived(value); setSelected([]) }} />
+        <span className="text-xs text-muted-foreground">勾选两个评测可对比（已选 {visibleSelected.length}/2）</span>
         <div className="ml-auto flex items-center gap-2">
-          <Button size="sm" variant="outline" disabled={selected.length !== 2} onClick={compare} data-testid="compare-selected">
+          <Button size="sm" variant="outline" disabled={visibleSelected.length !== 2} onClick={compare} data-testid="compare-selected">
             <GitCompare className="h-3.5 w-3.5" />
             对比所选
           </Button>

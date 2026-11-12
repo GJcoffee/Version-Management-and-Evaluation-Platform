@@ -22,6 +22,7 @@ from pydantic import Field
 from evalp import actions, render
 from evalp.client import EvalpClient, EvalpClientError, resolve_server_url
 from evalp.mcp.autostart import ServerLauncher
+from evalp.schemas.middleware import MiddlewareSelection
 from evalp.spec.refs import AssetKindName
 from evalp.workspace_client import (
     ProjectConfig,
@@ -53,6 +54,12 @@ run_eval（baseline 对比）-> get_eval_report / get_eval_compare 查看失败�
 其他：list_agents / get_draft / update_draft（直接改服务端草稿）、
 list_assets / upsert_asset / import_dataset、
 get_eval_status（评测进度）、get_session / replay_session / compare_sessions（会话查看、重放与对比）。
+轮间 JSON 处理：list_middlewares 查看配置；chat 的 middlewares 按轮启用 json_artifact，
+将上一轮 JSON 产物与本轮指令合并后传给 agent；多个链接先用 get_artifact_candidates 查询并选择。
+run_eval 的 turn_middlewares 按轮号（从1开始）配置输入与输出处理器：
+读取本次评测上一轮 JSON，失败即停止该用例；也可写入数据集 input.turn_middlewares。
+版本整理：set_milestone 归档阶段内的过程版本；unarchive_version 移出单个归档版本，
+或移出某个阶段性成果下的全部版本（保留阶段性成果）。
 transport 为 adapter 的版本使用平台的适配器环境配置（get_adapter_environments）：
 chat / run_eval / replay_session 默认用生产；改动适配器时先 update_test_adapter，
 用 environment=test 验证，确认后 push_adapter_to_production。
@@ -230,6 +237,30 @@ def build_server(
         """读取生产 / 测试两套适配器接入配置的当前内容；test_selectable 为真时才可以选测试环境。"""
         async with env.client(env.project()) as c:
             return json.dumps(await c.get("/adapter-environments"), ensure_ascii=False)
+
+    @mcp.tool()
+    @_guard
+    async def migrate_adapter_bindings(
+        agent: str, first_seq: int, last_seq: int, production_revision: int, test_revision: int,
+        reason: str, dry_run: bool = True, adapter: str = "hiagent", major: int = 1,
+    ) -> str:
+        """迁移旧 HTTP 版本、草稿与该平台所有存量绑定；原 Spec/结果不变，旧绑定独立审计。
+
+        默认干跑。旧业务内容须重新发布并核实原生部署才能执行；迁移不执行 LLM。
+        """
+        async with env.client(env.project()) as c:
+            return json.dumps(await c.post("/adapters/binding-migrations", {
+                "agent": agent, "first_seq": first_seq, "last_seq": last_seq,
+                "production_revision": production_revision, "test_revision": test_revision,
+                "reason": reason, "dry_run": dry_run, "adapter": adapter, "major": major,
+            }), ensure_ascii=False)
+
+    @mcp.tool()
+    @_guard
+    async def get_adapter_binding_migration(migration_id: str) -> str:
+        """读取接入迁移范围、计数与审计 ID。"""
+        async with env.client(env.project()) as c:
+            return json.dumps(await c.get(f"/adapters/binding-migrations/{migration_id}"), ensure_ascii=False)
 
     @mcp.tool()
     @_guard
@@ -417,6 +448,34 @@ def build_server(
 
     @mcp.tool()
     @_guard
+    async def unarchive_version(
+        version: Annotated[
+            str, Field(description="要移出归档的版本，或要全部移出归档的阶段性成果：v12、标签或版本 id")
+        ],
+        agent: Agent = None,
+    ) -> str:
+        """把版本移出归档，重新显示在默认版本列表中。
+
+        对阶段性成果（里程碑）调用时，把它名下的版本全部移出归档，保留阶段性成果及其阶段名。
+        普通版本未被归档时返回错误。版本内容、标签、会话和评测数据保持不变。
+        """
+        project = env.project()
+        name = agent or (project.agent_name if project else None)
+        async with env.client(project) as c:
+            v = await c.post(f"/versions/{actions.qualify_version(name, version)}/unarchive")
+            if v["milestone"]:
+                label = f"「{v['milestone_title']}」" if v.get("milestone_title") else ""
+                message = f"已将 v{v['seq']} 下的版本全部移出归档，阶段性成果{label}保留。"
+            else:
+                message = f"已将 v{v['seq']} 移出归档，重新显示在默认版本列表中。"
+            return (
+                f"{message}\n"
+                f"version_id: `{v['id']}`\n"
+                f"Web UI: {c.base_url}/agents/{v['agent_id']}?tab=versions"
+            )
+
+    @mcp.tool()
+    @_guard
     async def diff_versions(
         left: Annotated[str, Field(description="左侧版本：v12、标签（如 baseline）、版本 id，或草稿 @main")],
         right: Annotated[str, Field(description="右侧版本（同左；@草稿名 取服务端已保存的草稿）")],
@@ -446,6 +505,35 @@ def build_server(
 
     @mcp.tool()
     @_guard
+    async def list_middlewares() -> str:
+        """查询可用轮间中间件、版本、输入模式与配置定义，不下载产物或调用 agent。"""
+        async with env.client(env.project()) as c:
+            return json.dumps(await c.get("/middlewares"), ensure_ascii=False)
+
+    @mcp.tool()
+    @_guard
+    async def get_artifact_candidates(
+        session_id: Annotated[str, Field(description="来源轮次所属的会话 id")],
+        source_turn_id: Annotated[str, Field(description="已成功结束的来源轮次 id，chat 返回的 turn_id")],
+        url_pointer: Annotated[
+            str | None, Field(description="JSON 产物链接所在的 JSON Pointer，例如 /jsonUrl")
+        ] = None,
+    ) -> str:
+        """解析来源轮次的 JSON 产物候选链接，不下载产物。
+
+        多个候选时，将选中的 id 传给 chat 的 middlewares[].config.selected_candidate_id。
+        使用返回的 source_turn_id 固定来源，并作为 expected_previous_turn_id 防止上一轮变化。
+        """
+        async with env.client(env.project()) as c:
+            params = {"url_pointer": url_pointer} if url_pointer is not None else None
+            result = await c.get(
+                f"/sessions/{session_id}/turns/{source_turn_id}/artifact-candidates",
+                params=params,
+            )
+            return json.dumps(result, ensure_ascii=False)
+
+    @mcp.tool()
+    @_guard
     async def chat(
         message: Annotated[str, Field(description="发给 agent 的用户消息")],
         version: Annotated[str | None, Field(description="版本：v3、标签或版本 id；省略时用最新版本")] = None,
@@ -457,8 +545,21 @@ def build_server(
             Field(description="适配器接入环境，默认生产；只在验证适配器改动时选 test"),
         ] = "production",
         agent: Agent = None,
+        middlewares: Annotated[
+            list[MiddlewareSelection] | None,
+            Field(
+                max_length=1,
+                description="本轮中间件，最多一个；省略或 [] 不启用。"
+                "json_artifact@1.0.0 将上一轮 JSON 产物与本轮指令合并；"
+                "source_turn_id 省略时取紧邻上一轮，config 可指定 url_pointer、"
+                "selected_candidate_id 和 content_pointer。每轮须显式传入。",
+            ),
+        ] = None,
     ) -> str:
-        """和 agent 的某个已发布版本对话一轮：返回回复内容、工具调用摘要和 session_id（继续对话时传回）。"""
+        """和 agent 的已发布版本对话一轮，返回回复、工具调用摘要、session_id 和 turn_id。
+
+        继续对话时传回 session_id；middlewares 按轮启用，仅适用于普通文本对话。
+        """
         project = env.project()
         async with env.client(project) as c:
             ver_label = ""
@@ -466,7 +567,17 @@ def build_server(
                 session = await actions.create_session(c, env.agent_name(agent), version, environment)
                 session_id = session["id"]
                 ver_label = f"v{session.get('version_seq')}"
-            turn = await actions.chat_turn(c, session_id, message, timeout=CHAT_TIMEOUT_S)
+            turn = await actions.chat_turn(
+                c,
+                session_id,
+                message,
+                timeout=CHAT_TIMEOUT_S,
+                middlewares=(
+                    [step.model_dump(mode="json") for step in middlewares]
+                    if middlewares is not None
+                    else None
+                ),
+            )
             s = actions.summarize_turn(turn)
             lines = [f"## agent 回复{f'（{ver_label}）' if ver_label else ''}\n"]
             if s["status"] not in ("ok", None):
@@ -492,6 +603,7 @@ def build_server(
             if u.get("prompt_tokens") is not None:
                 meta.append(f"tokens {u.get('prompt_tokens')}/{u.get('completion_tokens')}")
             lines += ["", f"- session_id: `{session_id}`（继续对话时传入 session_id）"]
+            lines.append(f"- turn_id: `{turn['id']}`（查询产物候选或固定中间件来源时使用）")
             if meta:
                 lines.append("- " + "，".join(meta))
             lines.append(f"- Web UI（含 trace）: {c.base_url}/sessions/{session_id}")
@@ -535,6 +647,11 @@ def build_server(
             Literal["production", "test"],
             Field(description="适配器接入环境，默认生产；只在验证适配器改动时选 test"),
         ] = "production",
+        turn_middlewares: Annotated[
+            dict[str, list[MiddlewareSelection]] | None,
+            Field(description="按轮号（从1开始）配置 json_artifact / output_contract；"
+                  "读取本次会话上一轮，失败即停止"),
+        ] = None,
         agent: Agent = None,
     ) -> str:
         """发起评测。
@@ -566,6 +683,11 @@ def build_server(
                 concurrency=args.concurrency,
                 via="mcp",
                 environment=environment,
+                turn_middlewares=(
+                    {stage: [s.model_dump(mode="json") for s in steps]
+                     for stage, steps in turn_middlewares.items()}
+                    if turn_middlewares is not None else None
+                ),
             )
             lines = ["## 评测已发起\n"]
             for rid, ref in zip(batch.run_ids, batch.version_refs, strict=True):
@@ -865,6 +987,16 @@ def build_server(
 
     @mcp.tool()
     @_guard
+    async def cancel_eval(
+        run_id: Annotated[str, Field(description="要终止的评测 Run id（evr_…）")],
+    ) -> str:
+        """终止指定评测及正在执行的轮次，保留已完成结果。"""
+        async with env.client(env.project()) as c:
+            result = await c.post(f"/evals/{run_id}/cancel", {})
+            return render.render_eval_status(result, f"{c.base_url}/evals/{run_id}")
+
+    @mcp.tool()
+    @_guard
     async def get_eval_status(run_id: Annotated[str, Field(description="评测 Run id（evr_…）")]) -> str:
         """评测的运行状态：进度、预计剩余时间（不含用例明细，明细用 get_eval_report）。"""
         async with env.client(env.project()) as c:
@@ -895,6 +1027,26 @@ def build_server(
             return render.render_session(
                 data, turn=turn, full=detail == "full", web_url=f"{c.base_url}/sessions/{session_id}"
             )
+
+    @mcp.tool()
+    @_guard
+    async def refresh_trace(
+        turn_id: Annotated[str, Field(description="已有轮次 id（trn_…），仅重查同一上游消息")],
+        config_source: Literal["current", "original"] = "current",
+        environment: Literal["production", "test"] | None = None,
+        credential_ref: str | None = None,
+        force: Annotated[bool, Field(description="已 complete 时仍重查，修正旧解析统计")] = False,
+    ) -> str:
+        """重新获取已有轮次的 Trace 并更新指标，不创建业务轮次或请求模型。
+
+        默认跳过 complete；显式 force 可重新计算旧 Trace 汇总，会话累计按差额更新。
+        """
+        async with env.client(env.project()) as c:
+            result = await c.post(f"/turns/{turn_id}/trace/refresh", {
+                "config_source": config_source, "environment": environment,
+                "credential_ref": credential_ref, "force": force,
+            })
+            return json.dumps(result, ensure_ascii=False)
 
     @mcp.tool()
     @_guard

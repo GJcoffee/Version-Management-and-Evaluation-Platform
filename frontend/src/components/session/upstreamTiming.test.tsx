@@ -103,6 +103,37 @@ describe('HiAgent 轮次：补齐前显示同步中，不用本地值顶替', ()
 })
 
 describe('会话合计与 Trace 面板的远端口径', () => {
+  it('普通 HTTP 业务桥接历史日志修正整轮用时，不被旧 turn.end 的本地值覆盖', () => {
+    const log = mk('log', { message: '耗时分项', metric_source: 'actual_upstream_trace_timestamps',
+      upstream_run_ms: 96886, llm_api_ms: 80952, tool_execution_ms: 14248, trace_query_ms: 10000 }, { seq: 3 })
+    const old = mk('turn.end', { status: 'completed', usage: { prompt_tokens: 9, llm_calls: 2 },
+      latency_ms: 107940, ttft_ms: 83647, cost: 0.1 }, { seq: 4 })
+    const turn = turnOf(start, answer, log, old)
+    expect(turn.metrics).toMatchObject({ latencyMs: 96886, ttftMs: null, llmCalls: 2 })
+    expect(totalMetrics([turn])).toMatchObject({ remote: true, latencyMs: 96886 })
+    expect(remoteBreakdown(turn.events)).toEqual({ llmMs: 80952, toolMs: 14248 })
+    render(<TurnMetricsBar turn={turn} />)
+    expect(metric('latency')).toHaveTextContent('HiAgent 用时 96.886s')
+    expect(metric('llm_time')).toHaveTextContent('LLM累计 80.952s')
+    expect(metric('tool_time')).toHaveTextContent('工具累计 14.248s')
+    expect(metric('ttft')).toBeNull()
+    expect(metric('cost')).toBeNull()
+  })
+
+  it('坏值或非 Trace 日志不影响普通 agent，规范 Trace metrics 优先于历史日志', () => {
+    for (const value of [-1, true, '96886', null, Infinity, NaN]) {
+      const log = mk('log', { message: '计时', metric_source: 'actual_upstream_trace_timestamps',
+        upstream_run_ms: value }, { seq: 3 })
+      expect(turnOf(start, log).trace).toBeNull()
+      expect(remoteBreakdown([log])).toBeNull()
+    }
+    const log = mk('log', { message: '计时', metric_source: 'actual_upstream_trace_timestamps',
+      upstream_run_ms: 999, llm_api_ms: 998 }, { seq: 6 })
+    const turn = turnOf(start, answer, end(), complete, log)
+    expect(turn.metrics.latencyMs).toBe(20000)
+    expect(remoteBreakdown(turn.events)).toEqual({ llmMs: 15000, toolMs: 1000 })
+  })
+
   it('汇总标出有远端数据、补齐中与未取得', () => {
     const synced = turnOf(start, answer, sse, end(), complete)
     const syncing = turnOf(start, answer, sse, end())

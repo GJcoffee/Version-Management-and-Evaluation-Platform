@@ -1,0 +1,8 @@
+{"event": "message_start", "id": "msg-1", "conversation_id": "conv-1"}
+{"event": "message_output_start", "id": "seg-1"}
+{"event": "message", "answer": "第一段，"}
+{"event": "agent_thought", "id": "tool-1", "tool": "查订单", "tool_input": "{\"order_id\":\"A001\"}"}
+{"event": "agent_thought_end", "id": "tool-1", "observation": "已发货", "tool_latency": 0.2}
+{"event": "message_output_start", "id": "seg-2"}
+{"event": "message", "answer": "第二段。"}
+{"event": "message_end", "id": "msg-1", "input_tokens": 9, "output_tokens": 3}

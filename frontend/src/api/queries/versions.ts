@@ -70,6 +70,9 @@ function useInvalidateVersions() {
   return () => {
     qc.invalidateQueries({ queryKey: versionKeys.all })
     qc.invalidateQueries({ queryKey: agentKeys.all })
+    qc.invalidateQueries({ queryKey: ['sessions', 'list'] })
+    qc.invalidateQueries({ queryKey: ['compare', 'list'] })
+    qc.invalidateQueries({ queryKey: ['evals', 'list'] })
   }
 }
 

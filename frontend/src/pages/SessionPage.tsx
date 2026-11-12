@@ -3,8 +3,11 @@ import { Link, useParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { ChevronLeft, ChevronRight, PanelRightClose, PanelRightOpen, Variable, WifiOff } from 'lucide-react'
 import { ApiError } from '@/api/client'
-import { sessionKeys, useCancelTurn, useRenameSession, useSendTurn, useSession, useTurn } from '@/api/queries/sessions'
+import { sessionKeys, useCancelTurn, useRefreshTrace, useRenameSession, useSendTurn, useSession, useTurn } from '@/api/queries/sessions'
 import type { MiddlewareSelection } from '@/api/types'
+import { useAdapters } from '@/api/queries/adapters'
+import type { TraceRefreshOptions } from '@/api/queries/sessions'
+import { TraceRefreshDialog } from '@/components/session/TraceRefreshDialog'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Select } from '@/components/ui/Select'
@@ -64,6 +67,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
   const stream = useSessionStream(sessionId)
   const sendTurn = useSendTurn(sessionId)
   const cancel = useCancelTurn()
+  const refreshTrace = useRefreshTrace()
   const rename = useRenameSession(sessionId)
   const onRename = async (title: string) => {
     try {
@@ -105,6 +109,20 @@ function SessionView({ sessionId }: { sessionId: string }) {
   const lastTurn = stream.turns[stream.turns.length - 1]
   const traceTurn = stream.turns.find((t) => t.id === pinnedTurnId) ?? lastTurn
   const traceTurnIndex = traceTurn ? stream.turns.indexOf(traceTurn) + 1 : 0
+  const [refreshDialogOpen, setRefreshDialogOpen] = useState(false)
+  const traceRecord = useTurn(traceTurn?.id, !!traceTurn?.ended)
+  const adapterDefinitions = useAdapters()
+  const rawBinding = session.adapter_snapshot?.binding
+  const platform = rawBinding ? ('adapter' in rawBinding ? rawBinding.adapter : rawBinding.id) : undefined
+  const traceAdapter = adapterDefinitions.data?.find((item) => item.adapter === platform)
+  const hasMessageId = !!traceRecord.data?.usage.upstream_message_id || !!traceTurn?.events.some((event) => {
+    if (event.type !== 'metrics') return false
+    return !!(event.payload.upstream as Record<string, unknown> | undefined)?.message_id
+  })
+  const refreshUnavailableReason = !platform ? undefined : running ? '会话结束后可重新获取 Trace'
+    : !hasMessageId ? '本轮没有上游消息 ID，无法重查 Trace'
+      : traceAdapter && !traceAdapter.capabilities.includes('refresh_trace') ? '该平台不支持重查 Trace' : undefined
+  const canRefresh = !!platform && !!traceAdapter?.capabilities.includes('refresh_trace') && hasMessageId && !running
 
   // 窄屏（≤800px）：Trace 改为从底部弹出的抽屉，默认收起，开合状态不写入偏好（偏好只属于宽屏的侧栏）
   const narrow = useIsNarrow()
@@ -142,7 +160,6 @@ function SessionView({ sessionId }: { sessionId: string }) {
   const failedFromHistory = useTurn(lastTurn?.id, !!lastTurn?.ended && !!lastTurn?.middlewareSnapshot)
   const restoreTurn = [attempt.data, failedFromHistory.data].find((turn) =>
     turn && turn.status !== 'running' && !turn.effective_input && turn.middleware_snapshot)
-  const bridge = !!session.adapter_snapshot?.binding?.config?.business_bridge
 
   const onSend = async (text: string, opts: { variables?: Record<string, string>; middlewares?: MiddlewareSelection[] }) => {
     try {
@@ -185,6 +202,21 @@ function SessionView({ sessionId }: { sessionId: string }) {
     turn.trace?.status === 'unavailable' ? [`第 ${i + 1} 轮：${turn.trace.note ?? '未知原因'}`] : [])
   const spanMs = sessionSpanMs(stream.turns)
   const traceTiming = traceTurn ? turnTiming(traceTurn) : null
+  const onRefreshTrace = async (options: TraceRefreshOptions) => {
+    if (!traceTurn) return
+    try {
+      const turn = await refreshTrace.mutateAsync({ turnId: traceTurn.id, options })
+      stream.reopen() // 补齐事件已落库：从最大 seq 继续订阅，指标条与会话累计随之更新
+      if (turn.usage.trace_refresh?.result_status === 'unavailable' || turn.usage.trace_status === 'unavailable') {
+        toast.warning('仍未取得远端 Trace', { description: turn.usage.trace_note })
+      } else {
+        toast.success(turn.usage.trace_status === 'complete' ? 'Trace 已获取完整' : 'Trace 已更新，部分明细仍缺失')
+      }
+      setRefreshDialogOpen(false)
+    } catch (e) {
+      toast.error('重新查询 Trace 失败', { description: e instanceof ApiError ? e.message : undefined })
+    }
+  }
   const varCount = Object.keys(session.variables ?? {}).length
 
   return (
@@ -306,8 +338,6 @@ function SessionView({ sessionId }: { sessionId: string }) {
               stopping={cancel.isPending}
               onSend={onSend}
               onStop={onStop}
-              middlewareSessionId={session.mode === 'chat' && !bridge ? sessionId : undefined}
-              sourceTurnId={lastTurn?.status === 'ok' ? lastTurn.id : undefined}
               restoreTurn={restoreTurn}
               autoFocus
             />
@@ -392,6 +422,9 @@ function SessionView({ sessionId }: { sessionId: string }) {
                 endedAt={traceTiming?.endedAt}
                 durationMs={traceTiming?.durationMs}
                 trace={traceTurn.trace}
+                onRefreshTrace={canRefresh ? () => setRefreshDialogOpen(true) : undefined}
+                refreshUnavailableReason={refreshUnavailableReason}
+                refreshingTrace={refreshTrace.isPending}
                 running={!traceTurn.ended}
                 selectedStepId={selectedStep}
                 onSelectStep={setSelectedStep}
@@ -402,6 +435,9 @@ function SessionView({ sessionId }: { sessionId: string }) {
           </aside>
         )}
       </div>
+      {refreshDialogOpen && platform && <TraceRefreshDialog platform={platform}
+        environment={session.adapter_snapshot?.environment ?? 'production'}
+        pending={refreshTrace.isPending} onSubmit={(options) => void onRefreshTrace(options)} onClose={() => setRefreshDialogOpen(false)} />}
     </div>
   )
 }

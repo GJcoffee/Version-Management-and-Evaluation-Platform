@@ -18,10 +18,13 @@ TOOLS = {
     "push_draft", "pull_draft", "publish_version", "list_versions", "diff_versions",
     "chat", "run_eval", "get_eval_report", "get_eval_compare",
     "list_agents", "get_draft", "update_draft", "list_assets", "upsert_asset", "import_dataset",
-    "get_eval_status", "get_session", "replay_session", "compare_sessions", "get_conventions",
+    "get_eval_status", "get_session", "refresh_trace", "replay_session", "compare_sessions",
+    "get_conventions",
     "list_adapters", "get_adapter_environments", "check_adapter_connection", "update_test_adapter",
     "push_adapter_to_production", "rollback_production_adapter", "list_adapter_credentials",
-    "create_adapter_credential", "get_version", "set_milestone",
+    "create_adapter_credential", "get_version", "set_milestone", "unarchive_version",
+    "list_middlewares", "get_artifact_candidates",
+    "migrate_adapter_bindings", "get_adapter_binding_migration",
 }  # fmt: skip
 MOCK_API = "http://test/api/v1"
 
@@ -54,6 +57,25 @@ async def test_registers_all_platform_tools(project_dir):
     assert not run_eval.input_schema.get("required")  # 全部参数都可以省略（dataset 等取 [eval] 默认值）
     update = next(t for t in tools if t.name == "update_draft")
     assert update.input_schema["required"] == ["patch", "expected_revision"]
+    unarchive = next(t for t in tools if t.name == "unarchive_version")
+    assert unarchive.input_schema["required"] == ["version"]
+    assert unarchive.input_schema["properties"]["agent"]["default"] is None
+
+
+async def test_trace_refresh_tool_passes_explicit_force_and_original_configuration(mock_server):
+    server, routes = mock_server
+    route = routes.post("/turns/trn_existing/trace/refresh").mock(
+        return_value=httpx.Response(200, json={"id": "trn_existing", "usage": {"prompt_tokens": 10}})
+    )
+    async with Client(server) as c:
+        result = await c.call_tool("refresh_trace", {
+            "turn_id": "trn_existing", "config_source": "original", "force": True,
+        })
+    assert not result.is_error
+    assert json.loads(text(result))["usage"]["prompt_tokens"] == 10
+    assert json.loads(route.calls.last.request.content) == {
+        "config_source": "original", "environment": None, "credential_ref": None, "force": True,
+    }
 
 
 async def test_adapter_tools_edit_test_push_and_rollback_production(project_dir, client, provider):
@@ -68,7 +90,10 @@ async def test_adapter_tools_edit_test_push_and_rollback_production(project_dir,
         binding = {"id": "hiagent", "version": "1.0.0", "credential_ref": credential["ref"], "config": {
             "base_url": "https://example.com", "app_id": "a", "user_id": "u", "published_version": "47",
         }}
-        check = json.loads(text(await c.call_tool("check_adapter_connection", {"binding": binding})))
+        with respx.mock() as upstream:
+            upstream.post("https://example.com/api/v1/query_run_app_process").mock(
+                return_value=httpx.Response(200, json={"status": "failed"}))
+            check = json.loads(text(await c.call_tool("check_adapter_connection", {"binding": binding})))
         assert check["ok"] and check["details"]["llm_requested"] is False
         edited = json.loads(text(await c.call_tool("update_test_adapter", {
             "binding": binding, "expected_revision": 0, "reason": "MCP配置",
@@ -210,7 +235,7 @@ async def test_run_eval_waits_and_summarises(mock_server):
 
 async def test_run_eval_no_wait(mock_server):
     server, api = mock_server
-    api.post("/evals").mock(
+    post = api.post("/evals").mock(
         return_value=httpx.Response(
             201, json={"batch_id": "evb_1", "runs": [{"id": "evr_a", "version_id": "ver_1"}]}
         )
@@ -219,8 +244,12 @@ async def test_run_eval_no_wait(mock_server):
         return_value=httpx.Response(200, json=mocks.run("evr_a", 1, "running", done=1))
     )
     async with Client(server) as c:
-        out = text(await c.call_tool("run_eval", {"dataset": "d", "wait": False}))
+        out = text(await c.call_tool("run_eval", {
+            "dataset": "d", "wait": False,
+            "turn_middlewares": {"2": [{"id": "json_artifact", "config": {}}]},
+        }))
         assert "get_eval_report" in out and "evr_a" in out
+    assert json.loads(post.calls.last.request.content)["turn_middlewares"]["2"][0]["id"] == "json_artifact"
 
 
 async def test_run_eval_wait_timeout_reports_progress(project_dir):

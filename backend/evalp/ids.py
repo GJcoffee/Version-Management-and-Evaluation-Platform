@@ -23,6 +23,8 @@ PREFIXES: dict[str, str] = {
     "evi": "EvalItem",
     "cmp": "CompareGroup",
     "job": "Job",
+    "mig": "AdapterBindingMigration",
+    "acc": "PlatformAccount",
 }
 
 _lock = threading.Lock()

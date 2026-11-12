@@ -2,7 +2,9 @@
  * 评测接口的类型（一期收窄版，见 docs/contract-eval.md 与 docs/api.md「评测（P3-B）」）。
  * 与 types.ts 里早期的设计稿类型（EvalRun / EvalItem）区分开，这里一律以 `Out` 结尾，按实际接口定义。
  */
-import type { ISODateTime, TraceSyncStatus } from './types'
+import type { ISODateTime, MiddlewareSelection, MiddlewareSnapshot, TraceSyncStatus } from './types'
+
+export type EvalTurnMiddlewares = Record<string, MiddlewareSelection[]>
 
 export type EvalRunStatusOut =
   | 'queued'
@@ -159,6 +161,7 @@ export interface EvalRunOut {
   repeats: number
   concurrency: number
   cache_policy: string
+  turn_middlewares?: EvalTurnMiddlewares
   /** 预算上限：max_cost（元）、max_tokens；都是本次新增消耗的上限 */
   budget?: EvalBudget
   /** 适配器接入快照（transport=adapter 的版本才有）：所用环境与存档号 */
@@ -232,10 +235,13 @@ export interface EvalItemOut {
 }
 
 export interface EvalTurnOut {
+  id?: string
   idx: number
   input: unknown
   output: unknown
   status: string
+  effective_input?: unknown
+  middleware_snapshot?: MiddlewareSnapshot | null
 }
 
 export interface EvalItemDetailOut extends EvalItemOut {
@@ -243,7 +249,7 @@ export interface EvalItemDetailOut extends EvalItemOut {
   turns: EvalTurnOut[]
   case_detail: {
     case_key?: string
-    input?: { turns?: string[] }
+    input?: { turns?: string[]; turn_middlewares?: EvalTurnMiddlewares }
     expected?: unknown
     rubric?: unknown
     tags?: string[]
@@ -260,6 +266,7 @@ export interface EvalCreateRequest {
   repeats: number
   concurrency: number
   cache_policy?: 'reuse' | 'refresh'
+  turn_middlewares?: EvalTurnMiddlewares
   budget?: EvalBudget
   via?: 'ui'
   /** 适配器接入环境；缺省为 production */

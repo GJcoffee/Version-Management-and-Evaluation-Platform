@@ -38,6 +38,7 @@ from evalp.logging import get_logger
 from evalp.runtime.adapters.base import AgentAdapter, RunContext
 from evalp.runtime.events import AgentEvent, ev, jsonable
 from evalp.runtime.messages import Message, TurnOutput
+from evalp.runtime.timing import BRIDGE_TRACE_SOURCE, bridge_trace_metrics, duration_ms
 
 log = get_logger(__name__)
 
@@ -236,6 +237,15 @@ class Runner:
             return True
         self._absorb(event, state)
         await emit(event)
+        if event.type == "log" and (
+            state.metrics.get("source") != "hiagent_trace"
+            or state.metrics.get("metric_source") == BRIDGE_TRACE_SOURCE
+        ):
+            # 普通 HTTP 业务桥接已取回 Trace，但不使用 late_observe；保留日志并发布规范指标。
+            if metrics := bridge_trace_metrics(p):
+                normalized = ev("metrics", turn_id=ctx.turn_id, ts=event.ts, **metrics)
+                self._absorb(normalized, state)
+                await emit(normalized)
         return False
 
     @staticmethod
@@ -394,6 +404,12 @@ class Runner:
                     "message": "agent 没有返回最终回复（缺少 message.assistant 事件）",
                     "retriable": False,
                 }
+        if ctx.verify_output is not None and status == "ok" and state.final is not None:
+            try:
+                await ctx.verify_output(state.final)
+            except Exception as e:  # noqa: BLE001 - 输出契约失败转成轮次错误，仍只发一个 turn.end
+                state.error = error_from_exception(e)
+                status = "error"
         if state.error is not None and not state.error_emitted and status in ("error", "timeout"):
             await emit(ev("error", turn_id=ctx.turn_id, **state.error))
             state.error_emitted = True
@@ -413,7 +429,18 @@ class Runner:
             # 远端为主：本地用时 / 首正文只留作诊断，规范用时等补齐后改写为远端值。
             usage.update(trace_status="pending", local_latency_ms=latency_ms, local_ttft_ms=ttft_ms)
             latency_ms = ttft_ms = None
+        elif state.metrics.get("source") == "hiagent_trace":
+            usage.update(local_latency_ms=latency_ms, local_ttft_ms=ttft_ms)
+            latency_ms = duration_ms(state.metrics.get("upstream_run_ms"))
+            ttft_ms = None
         partial = "".join(state.deltas.values()) if status != "ok" else ""
+        if (
+            status == "error" and state.error is not None
+            and state.error.get("code") == "OUTPUT_CONTRACT_FAILED"
+            and not partial and state.final is not None
+        ):
+            # 契约失败发生在最终回复已到达之后：保留已流出的正文，供页面展示与重试。
+            partial = state.final.text()
         if len(partial) > PARTIAL_TEXT_MAX:
             partial = partial[:PARTIAL_TEXT_MAX] + "…"
         result = TurnResult(

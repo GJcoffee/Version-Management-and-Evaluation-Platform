@@ -90,6 +90,30 @@ describe('ReplayDialog：重放模式', () => {
 })
 
 describe('CompareSessionDialog：候选会话默认不含重放会话', () => {
+  it('归档会话需勾选才可选择，取消勾选后提交使用可见候选', async () => {
+    const api = mockApi({
+      'GET /api/v1/sessions': (c: { url: string }) => ({
+        items: c.url.includes('include_archived=true')
+          ? [sess('ses_a', 'chat', '阶段会话'), sess('ses_old', 'chat', '归档会话')]
+          : [sess('ses_a', 'chat', '阶段会话')],
+        next_cursor: null,
+      }),
+      'POST /api/v1/compare': { id: 'cmp_created' },
+    })
+    wrap(<CompareSessionDialog session={session} onClose={() => {}} />)
+    expect(await screen.findByTestId('compare-other')).not.toHaveTextContent('归档会话')
+    expect(api.find('GET', /\/sessions\?/)[0].url).toContain('include_archived=false')
+    await userEvent.click(screen.getByLabelText('包括已归档会话'))
+    await waitFor(() => expect(screen.getByTestId('compare-other')).toHaveTextContent('归档会话'))
+    await userEvent.selectOptions(screen.getByTestId('compare-other'), 'ses_old')
+    await userEvent.click(screen.getByLabelText('包括已归档会话'))
+    await waitFor(() => expect(screen.getByTestId('compare-other')).not.toHaveTextContent('归档会话'))
+    expect(screen.getByTestId('compare-other')).toHaveValue('ses_a')
+    await userEvent.click(screen.getByTestId('compare-session-submit'))
+    await waitFor(() => expect(api.find('POST', /\/compare$/)).toHaveLength(1))
+    expect(api.find('POST', /\/compare$/)[0].body).toMatchObject({ left: { session_id: 'ses_a' } })
+  })
+
   it('默认按 mode=chat 查询；勾选“包含重放会话”后带上 replay', async () => {
     const api = mockApi({
       'GET /api/v1/sessions': (c: { url: string }) => ({

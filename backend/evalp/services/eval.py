@@ -76,6 +76,7 @@ from evalp.schemas.eval import (
     RunRef,
     ScoreOut,
 )
+from evalp.schemas.eval_middleware import dump_plan, effective_plan
 from evalp.schemas.session import TurnOut
 from evalp.services.agent import AgentService
 from evalp.services.dataset import DatasetService
@@ -108,7 +109,7 @@ from evalp.store.models import (
     Version,
 )
 from evalp.store.models import Job as JobRow
-from evalp.utils.canonical import sha256_hex
+from evalp.utils.canonical import canonical_json, sha256_hex
 from evalp.utils.time import now_iso
 
 log = get_logger(__name__)
@@ -241,6 +242,13 @@ class EvalService:
         settings = await self._settings()
         concurrency = body.concurrency or settings["scheduler.default_run_concurrency"]
         budget = body.budget.model_dump(exclude_none=True)
+        middleware_plan = dump_plan(body.turn_middlewares)
+        case_plans = {c.id: dump_plan(effective_plan(middleware_plan, c.input)) for c in cases}
+        for rv in versions:
+            if any(any(steps for steps in plan.values()) for plan in case_plans.values()):
+                binding = (rv.adapter_snapshot or {}).get("binding") or {}
+                if (binding.get("config") or {}).get("business_bridge"):
+                    raise ValidationFailed("该业务桥接尚不支持平台组合输入，暂不可使用评测中间件")
 
         # 每个版本的缓存命中
         plans: list[dict[str, Any]] = []
@@ -248,7 +256,10 @@ class EvalService:
             keys = {
                 (c.id, r): cache_key_of(
                     rv.spec_hash + (":" + rv.adapter_snapshot["fingerprint"] if rv.adapter_snapshot else ""),
-                    c.case_hash, r, body.seed
+                    c.case_hash + (
+                        ":" + sha256_hex(canonical_json({k: v for k, v in case_plans[c.id].items() if v}))
+                        if any(case_plans[c.id].values()) else ""
+                    ), r, body.seed
                 )
                 for c in cases
                 for r in range(body.repeats)
@@ -277,6 +288,7 @@ class EvalService:
                     adapter_snapshot=rv.adapter_snapshot,
                     dataset_rev_id=rev_id,
                     case_filter=body.case_filter.model_dump(),
+                    turn_middlewares=middleware_plan,
                     evaluators=evaluators,
                     evaluators_hash=evaluators_hash(evaluators),
                     repeats=body.repeats,
@@ -629,6 +641,7 @@ class EvalService:
                     seed=r.seed,
                     cache_policy=r.cache_policy,
                     budget=r.budget or {},
+                    turn_middlewares=r.turn_middlewares or {},
                     adapter_snapshot=r.adapter_snapshot,
                     status=r.status,  # type: ignore[arg-type]
                     pause_reason=stored.get("pause_reason") if r.status == "paused" else None,
@@ -666,6 +679,7 @@ class EvalService:
         version_id: str | None = None,
         batch: str | None = None,
         status: str | list[str] | None = None,
+        include_archived: bool = False,
         limit: int = 50,
         cursor: str | None = None,
     ) -> Page[EvalRunOut]:
@@ -673,6 +687,10 @@ class EvalService:
         statuses = [x.strip() for x in status.split(",") if x.strip()] if isinstance(status, str) else status
         async with self.ctx.db.read() as s:
             stmt = select(EvalRun)
+            if not include_archived:
+                stmt = stmt.join(Version, EvalRun.version_id == Version.id).where(
+                    Version.archived_into.is_(None)
+                )
             if agent:
                 a = await AgentService.find_orm(s, agent)
                 stmt = stmt.where(EvalRun.agent_id == (a.id if a else agent))
@@ -1118,6 +1136,7 @@ class EvalService:
         sessions = self.ctx.svc(SessionService)
         md = case_row.metadata_ or {}
         turns = case_row.input.get("turns", [])
+        middlewares = effective_plan(run.turn_middlewares, case_row.input)
         async with self.ctx.db.write() as s:
             ok = await s.execute(
                 update(EvalItem)
@@ -1145,20 +1164,21 @@ class EvalService:
                     .where(EvalItem.id == item.id, EvalItem.status == "running")
                     .values(session_id=sess.id)
                 )
-            for text in turns:
+            for stage, text in enumerate(turns, start=1):
                 out = await sessions.run_turn(
                     sess.id,
                     text,
                     tool_mocks=md.get("tool_mocks") or None,
                     priority=PRIORITY_EVAL,
                     wait=True,
+                    middlewares=middlewares.get(str(stage)),
                 )
                 outs.append(out)
                 if out.status != "ok":
                     e = out.error
                     err = {
                         "code": e.code if e else out.status.upper(),
-                        "message": e.message if e else f"第 {out.idx + 1} 轮以 {out.status} 结束",
+                        "message": f"第 {stage} 轮失败，已停止后续轮次：{e.message if e else out.status}",
                         "retriable": bool(e.retriable) if e else False,
                     }
                     break
@@ -1949,6 +1969,11 @@ class EvalService:
             case_row = await s.get(EvalCase, it.case_id)
             assert case_row is not None
             scores = list((await s.execute(select(EvalScore).where(EvalScore.item_id == item_id))).scalars())
+            saved_turns = {
+                t.idx: t for t in (await s.execute(
+                    select(Turn).where(Turn.session_id == it.session_id)
+                )).scalars()
+            } if it.session_id else {}
         score_map = await self._score_outs(scores, run.evaluators)
         gates = [c["key"] for c in run.evaluators if c.get("gate")]
         transcript, _, loaded = await self._load_transcript(it, False)
@@ -1958,7 +1983,10 @@ class EvalService:
         turns = [
             {
                 "idx": t.idx,
+                "id": saved_turns[t.idx].id,
                 "input": t.input,
+                "effective_input": saved_turns[t.idx].effective_input,
+                "middleware_snapshot": saved_turns[t.idx].middleware_snapshot,
                 "output": t.output,
                 "status": t.status,
                 "cost": t.cost,

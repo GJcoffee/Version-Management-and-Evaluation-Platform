@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { CheckCircle2, ShieldCheck, XCircle } from 'lucide-react'
 import type { EvalGateResult, EvalRunDetailOut } from '@/api/evalTypes'
 import { useEvalGate, useEvals } from '@/api/queries/evals'
+import { IncludeArchivedToggle } from '@/components/IncludeArchivedToggle'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
@@ -69,9 +70,11 @@ export function GateResultView({ result }: { result: EvalGateResult }) {
  */
 export function GatePanel({ run }: { run: Pick<EvalRunDetailOut, 'id' | 'agent_id' | 'status'> }) {
   const gate = useEvalGate()
-  const runs = useEvals({ agent_id: run.agent_id, status: 'completed,completed_with_errors', limit: 50 })
+  const [includeArchived, setIncludeArchived] = useState(false)
+  const runs = useEvals({ agent_id: run.agent_id, status: 'completed,completed_with_errors', limit: 50, include_archived: includeArchived })
   const candidates = (runs.data?.pages.flatMap((p) => p.items) ?? []).filter((r) => r.id !== run.id)
   const [baseline, setBaseline] = useState('')
+  const baselineId = candidates.some((r) => r.id === baseline) ? baseline : ''
   const [maxReg, setMaxReg] = useState('0')
   const [minPass, setMinPass] = useState('')
   const [threshold, setThreshold] = useState('0.05')
@@ -89,7 +92,7 @@ export function GatePanel({ run }: { run: Pick<EvalRunDetailOut, 'id' | 'agent_i
     if (maxRegN === null || minPassBad || thresholdBad) return
     gate.mutate({
       id: run.id,
-      baseline: baseline || undefined,
+      baseline: baselineId || undefined,
       max_regressions: maxRegN,
       min_pass_rate: minPassN === undefined ? undefined : minPassN / 100,
       threshold: thresholdN,
@@ -113,7 +116,7 @@ export function GatePanel({ run }: { run: Pick<EvalRunDetailOut, 'id' | 'agent_i
       <CardContent className="space-y-3">
         <div className="grid gap-3 md:grid-cols-4">
           <Field label="基线评测" hint="可选；不选则只检查通过率">
-            <Select aria-label="基线评测" value={baseline} onChange={(e) => setBaseline(e.target.value)} data-testid="gate-baseline">
+            <Select aria-label="基线评测" value={baselineId} onChange={(e) => setBaseline(e.target.value)} data-testid="gate-baseline">
               <option value="">不比较基线</option>
               {candidates.map((r) => (
                 <option key={r.id} value={r.id}>
@@ -121,15 +124,17 @@ export function GatePanel({ run }: { run: Pick<EvalRunDetailOut, 'id' | 'agent_i
                 </option>
               ))}
             </Select>
+            <IncludeArchivedToggle includeArchived={includeArchived} label="包括已归档评测"
+              setIncludeArchived={(value) => { setIncludeArchived(value); setBaseline('') }} />
           </Field>
           <Field label="允许退化的用例数" hint="超过则不通过" error={showErrors && maxRegN === null ? '请输入不小于 0 的整数' : null}>
-            <Input type="number" min={0} aria-label="允许退化的用例数" value={maxReg} onChange={(e) => setMaxReg(e.target.value)} disabled={!baseline} />
+            <Input type="number" min={0} aria-label="允许退化的用例数" value={maxReg} onChange={(e) => setMaxReg(e.target.value)} disabled={!baselineId} />
           </Field>
           <Field label="最低通过率（%）" hint="可选，0–100" error={showErrors && minPassBad ? '请输入 0 到 100 之间的数' : null}>
             <Input type="number" min={0} max={100} step="any" aria-label="最低通过率" value={minPass} onChange={(e) => setMinPass(e.target.value)} placeholder="不限制" />
           </Field>
           <Field label="退化阈值 Δ" hint="分数变化超过该值才算退化" error={showErrors && thresholdBad ? '请输入不小于 0 的数' : null}>
-            <Input type="number" min={0} step="any" aria-label="退化阈值" value={threshold} onChange={(e) => setThreshold(e.target.value)} disabled={!baseline} />
+            <Input type="number" min={0} step="any" aria-label="退化阈值" value={threshold} onChange={(e) => setThreshold(e.target.value)} disabled={!baselineId} />
           </Field>
         </div>
         <div className="flex items-center gap-3">

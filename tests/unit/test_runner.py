@@ -527,3 +527,47 @@ async def test_turn_without_late_observation_keeps_its_own_measurements():
                                               ev("message.assistant", message=FINAL)]))
     assert result.latency_ms >= 40 and result.ttft_ms is not None
     assert "trace_status" not in result.usage and "local_latency_ms" not in result.usage
+
+
+async def test_http_bridge_uses_actual_trace_timing_and_keeps_raw_log_and_usage():
+    raw = ev("log", message="耗时分项", metric_source="actual_upstream_trace_timestamps",
+             upstream_run_ms=96886, llm_api_ms=80952, tool_execution_ms=14248, trace_query_ms=10000)
+    adapter = ScriptAdapter([
+        ev("llm.response", step_id="s1", content="答", usage={"prompt_tokens": 9, "completion_tokens": 3}),
+        raw, ev("message.assistant", message=FINAL),
+        ev("turn.end", status="completed", usage={"prompt_tokens": 999}),
+    ])
+    result, events = await run(adapter)
+    assert result.latency_ms == 96886 and result.ttft_ms is None
+    assert result.usage["prompt_tokens"] == 9 and result.usage["llm_calls"] == 1
+    assert result.usage["trace_status"] == "complete"
+    assert result.usage["llm_api_ms"] == 80952 and result.usage["tool_execution_ms"] == 14248
+    assert result.usage["local_latency_ms"] is not None and result.usage["local_ttft_ms"] is not None
+    assert "trace_query_ms" not in result.usage
+    assert next(e for e in events if e.type == "log").payload == raw.payload
+    assert types(events).index("log") + 1 == types(events).index("metrics")
+    assert events[-1].payload["latency_ms"] == 96886
+
+
+@pytest.mark.parametrize("value", [-1, True, "96886", None, float("inf"), float("nan")])
+async def test_invalid_bridge_timing_does_not_override_local_duration(value):
+    # AgentEvent 直接构造，避免 JSON 序列化先把非有限值改成 null。
+    from evalp.runtime.events import AgentEvent
+
+    raw = AgentEvent(type="log", payload={"message": "耗时分项", "upstream_run_ms": value,
+                                         "metric_source": "actual_upstream_trace_timestamps"})
+    result, events = await run(ScriptAdapter([raw, ev("message.assistant", message=FINAL)]))
+    assert result.latency_ms is not None and "trace_status" not in result.usage
+    assert "metrics" not in types(events)
+
+
+async def test_bridge_log_requires_source_and_cannot_replace_explicit_trace_metrics():
+    raw = ev("log", message="计时", upstream_run_ms=100, llm_api_ms=90, metric_source="local_clock")
+    result, _ = await run(ScriptAdapter([raw, ev("message.assistant", message=FINAL)]))
+    assert "upstream_run_ms" not in result.usage
+    canonical = ev("metrics", source="hiagent_trace", trace_status="partial", upstream_run_ms=200)
+    bridge = ev("log", message="耗时分项", metric_source="actual_upstream_trace_timestamps",
+                upstream_run_ms=300)
+    result, events = await run(ScriptAdapter([canonical, bridge, ev("message.assistant", message=FINAL)]))
+    assert result.latency_ms == 200 and result.usage["trace_status"] == "partial"
+    assert types(events).count("metrics") == 1

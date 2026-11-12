@@ -19,6 +19,7 @@ from evalp.schemas.session import (
     SessionDetail,
     SessionOut,
     SessionUpdate,
+    TraceRefreshBody,
     TurnAccepted,
     TurnCreate,
     TurnOut,
@@ -56,13 +57,15 @@ async def list_sessions(
         None, description="chat | replay | eval | judge，可用逗号分隔多个；缺省排除 eval 和 judge"
     ),
     q: str | None = Query(None, description="标题关键字"),
+    include_archived: bool = Query(False, description="包括所属版本已归档的会话"),
     p: PageParams = Depends(page_params),
     ctx: AppContext = Depends(get_ctx),
 ):
     """会话列表（新的在前）。"""
     modes = [m.strip() for m in mode.split(",") if m.strip()] if mode else None
     return await ctx.svc(SessionService).list_sessions(
-        agent_id=agent_id, version_id=version_id, mode=modes, q=q, limit=p.limit, cursor=p.cursor
+        agent_id=agent_id, version_id=version_id, mode=modes, q=q,
+        include_archived=include_archived, limit=p.limit, cursor=p.cursor
     )
 
 
@@ -138,6 +141,18 @@ async def cancel_turn(turn_id: str, ctx: AppContext = Depends(get_ctx)):
 async def get_turn(turn_id: str, ctx: AppContext = Depends(get_ctx)):
     """读取轮次及已保存的中间件配置与实际输入。"""
     return await ctx.svc(SessionService).get_turn(turn_id)
+
+
+@router.post("/turns/{turn_id}/trace/refresh", response_model=TurnOut)
+async def refresh_trace(
+    turn_id: str, body: TraceRefreshBody | None = None, ctx: AppContext = Depends(get_ctx),
+):
+    """重新查询该轮 HiAgent Trace；force 可修正已 complete 的旧解析统计。
+
+    只对平台原生 HiAgent 接入的轮次有效；取得后按远端口径回填用时、token 与调用次数，
+    仍未取得时只更新原因，之后还可以再试。轮次或会话正在执行时返回 400 ``VALIDATION_ERROR``。
+    """
+    return await ctx.svc(SessionService).refresh_trace(turn_id, body)
 
 
 @router.get("/sessions/{session_id}/stream")
