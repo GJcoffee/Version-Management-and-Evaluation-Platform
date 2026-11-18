@@ -20,6 +20,7 @@ def test_all_prefixes_from_design():
         "job",
         "mig",
         "acc",
+        "key",
     }
     assert set(PREFIXES) == expected
 

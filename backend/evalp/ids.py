@@ -25,6 +25,7 @@ PREFIXES: dict[str, str] = {
     "job": "Job",
     "mig": "AdapterBindingMigration",
     "acc": "PlatformAccount",
+    "key": "TraceKeyConnection",
 }
 
 _lock = threading.Lock()

@@ -13,9 +13,11 @@ import base64
 import copy
 import hashlib
 import posixpath
+from contextlib import nullcontext
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from evalp.context import AppContext
 from evalp.errors import EvalpError, NotFound, ValidationFailed
@@ -157,7 +159,7 @@ class WorkspaceService:
     def __init__(self, ctx: AppContext) -> None:
         self.ctx = ctx
 
-    async def push(self, body: PushIn) -> PushOut:
+    async def push(self, body: PushIn, *, session: AsyncSession | None = None) -> PushOut:
         """同步工作区到草稿（一个事务内完成，任何一步失败整体回滚）。"""
         assets = self.ctx.svc(AssetService)
         # --- 0. 校验 files
@@ -201,7 +203,7 @@ class WorkspaceService:
         uploaded: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         missing: list[dict[str, str]] = []
-        async with self.ctx.db.write() as s:
+        async with (self.ctx.db.write() if session is None else nullcontext(session)) as s:
             # --- 2. agent / 草稿
             agent = await AgentService.find_orm(s, body.agent_name)
             agent_created = False

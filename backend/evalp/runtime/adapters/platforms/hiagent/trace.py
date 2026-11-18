@@ -17,11 +17,13 @@ from typing import Any
 import httpx
 
 from evalp.runtime.adapters.platforms.hiagent.config import HiAgentConfig
+from evalp.runtime.adapters.platforms.hiagent.hicli_observe import HicliObserveError, query_hicli_trace
 from evalp.runtime.adapters.platforms.hiagent.mapper import HiAgentMapper
 from evalp.runtime.adapters.platforms.hiagent.sse import decoded
 from evalp.runtime.credentials import CredentialsManager
 from evalp.runtime.events import AgentEvent, ev, redact
 from evalp.runtime.hiagent_auth import AccountAuthError
+from evalp.runtime.trace_credentials import KeyConnectionService
 
 
 class TraceNotReady(Exception):
@@ -251,13 +253,14 @@ class TraceOnlyTarget:
 
 def refresh_trace(
     config: HiAgentConfig, secret: Any, message_id: str, usage: dict[str, Any] | None = None,
-    *, credentials: CredentialsManager | None = None,
+    *, credentials: CredentialsManager | None = None, key_connections: KeyConnectionService | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """按同一 HiAgent 消息重新查询 Trace：Trace 未取得后由用户稍后重试时使用。
 
     ``usage`` 传当时 SSE 的整轮用量：核验口径与首次补齐一致（整轮以 SSE 为准，明细只补空缺）。
     """
-    return collect_trace(config, secret, TraceOnlyTarget(message_id, usage), credentials=credentials)
+    return collect_trace(config, secret, TraceOnlyTarget(message_id, usage),
+                         credentials=credentials, key_connections=key_connections)
 
 
 def unavailable(note: str) -> list[AgentEvent]:
@@ -274,7 +277,7 @@ def retryable(exc: Exception) -> bool:
 
 
 def failure_reason(exc: Exception, wait_s: float) -> str:
-    if isinstance(exc, AccountAuthError):
+    if isinstance(exc, AccountAuthError | HicliObserveError):
         return str(exc)
     if isinstance(exc, TraceNotReady):
         return f"{exc}（等待 {wait_s:g}s 后仍未收齐）"
@@ -289,14 +292,17 @@ def failure_reason(exc: Exception, wait_s: float) -> str:
 
 async def collect_trace(
     config: HiAgentConfig, secret: Any, mapper: HiAgentMapper,
-    *, credentials: CredentialsManager | None = None,
+    *, credentials: CredentialsManager | None = None, key_connections: KeyConnectionService | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """在有限观测窗口查询；失败只影响观测完整性，只有暂时性情况才重试。"""
     headers = secret.get("observe_headers") if isinstance(secret, dict) else None
     note = (
         "未配置 Trace 观测地址" if not config.observe_base_url
         else "SSE 没有返回消息 ID" if not mapper.message_id
-        else "凭据未提供 observe_headers" if not config.observe_account_ref and not isinstance(headers, dict)
+        else "凭据未提供 observe_headers" if (
+            config.observe_transport != "hicli"
+            and not config.observe_account_ref and not isinstance(headers, dict)
+        )
         else None
     )
     if note:
@@ -326,6 +332,17 @@ async def collect_trace(
             nonlocal trace_auth
             if config.workspace_id:
                 body = {"WorkspaceID": config.workspace_id, **body}
+            if config.observe_transport == "hicli":
+                if config.observe_key_ref:
+                    if key_connections is None:
+                        raise HicliObserveError("密钥连接管理器不可用")
+                    result, trace_auth = await key_connections.query(
+                        config.observe_key_ref, config, action, body,
+                    )
+                    return result
+                result = await query_hicli_trace(config, action, body)
+                trace_auth = {"transport": "hicli", "credential_source": "hicli auth"}
+                return result
             if config.observe_account_ref and credentials:
                 response, trace_auth = await credentials.request(
                     config.observe_account_ref, config.observe_base_url,

@@ -174,6 +174,27 @@ class AdapterCredential(Base):
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class TraceKeyConnection(Base):
+    """密钥连接元数据；账号密钥只保留加密存储引用。"""
+
+    __tablename__ = "trace_key_connections"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    top_url: Mapped[str] = mapped_column(Text, nullable=False)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    credential_source: Mapped[str] = mapped_column(Text, nullable=False)
+    secret_ref: Mapped[str | None] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    last_checked_at: Mapped[str | None] = mapped_column(Text)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class PlatformAccount(Base):
     """账号身份稳定，密码与登录态仅存加密密钥库的引用。"""
 

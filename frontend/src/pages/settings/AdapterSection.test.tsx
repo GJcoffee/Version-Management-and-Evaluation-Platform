@@ -34,6 +34,7 @@ function setup(envs: AdapterEnvironments, histories?: { production: EnvironmentR
     }] as never
     if (path === '/adapters/credentials') return [{ ref: 'adapter:key', name: 'key', adapter_id: 'hiagent' }] as never
     if (path === '/adapters/accounts') return [] as never
+    if (path === '/adapters/key-connections') return [] as never
     throw new Error(`unexpected GET ${path}`)
   })
   const change = { applied: true, environment: 'production', before: envs.production, target: envs.production }
@@ -51,6 +52,14 @@ const differing: AdapterEnvironments = {
 
 describe('设置 · 适配器', () => {
   afterEach(() => vi.restoreAllMocks())
+
+  it('同时提供账号登录和密钥连接管理入口', async () => {
+    setup(differing)
+    expect(await screen.findByText('Trace 账号登录')).toBeInTheDocument()
+    expect(screen.getByText('执行链路密钥连接')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '新增账号' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '新建密钥连接' })).toBeInTheDocument()
+  })
 
   it('历史乱序时默认取最大存档号，生产与测试选择独立', async () => {
     setup(differing, {

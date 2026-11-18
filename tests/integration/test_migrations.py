@@ -15,7 +15,7 @@ TABLES = {
     "eval_items", "eval_scores", "compare_groups", "jobs", "settings",
     "adapter_credentials", "adapter_environments", "adapter_environment_revisions",
     "adapter_binding_migrations", "version_adapter_routes",
-    "platform_accounts", "platform_account_sessions",
+    "platform_accounts", "platform_account_sessions", "trace_key_connections",
 }  # fmt: skip
 
 
@@ -62,7 +62,7 @@ def test_orm_metadata_covers_design_tables():
 def test_idempotent(migrated):
     run_migrations(migrated)  # 再次执行不报错
     con = sqlite3.connect(migrated)
-    assert con.execute("select version_num from alembic_version").fetchall() == [("0015",)]
+    assert con.execute("select version_num from alembic_version").fetchall() == [("0016",)]
     con.close()
 
 

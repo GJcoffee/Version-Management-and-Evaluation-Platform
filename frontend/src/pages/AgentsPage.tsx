@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Archive, ArchiveRestore, Bot, Plus, Search } from 'lucide-react'
+import { Archive, ArchiveRestore, Bot, Download, Plus, Search } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import { useAgents, useCreateAgent, useUpdateAgent } from '@/api/queries/agents'
 import type { Agent, AgentKind } from '@/api/types'
+import { HiAgentImportDialog } from '@/components/HiAgentImportDialog'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -42,6 +43,7 @@ export default function AgentsPage() {
   const [kind, setKind] = useState<AgentKind | ''>('')
   const [showArchived, setShowArchived] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const [archiving, setArchiving] = useState<Agent | null>(null)
   const dq = useDebouncedValue(q.trim(), 250)
   const { data, isLoading, error, refetch } = useAgents({ q: dq, kind, include_archived: showArchived })
@@ -60,15 +62,21 @@ export default function AgentsPage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-6">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-lg font-semibold">Agents</h1>
           <p className="text-xs text-muted-foreground">被测的智能体：配置型（模型 + 提示词 + 工具）或代码型（HTTP / 子进程）。</p>
         </div>
-        <Button onClick={() => setCreateOpen(true)}>
-          <Plus className="h-4 w-4" />
-          新建 Agent
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={() => setImportOpen(true)}>
+            <Download className="h-4 w-4" />
+            从 HiAgent 导入
+          </Button>
+          <Button onClick={() => setCreateOpen(true)}>
+            <Plus className="h-4 w-4" />
+            新建 Agent
+          </Button>
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -182,6 +190,7 @@ export default function AgentsPage() {
       )}
 
       <CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} />
+      {importOpen && <HiAgentImportDialog onClose={() => setImportOpen(false)} />}
 
       <ConfirmDialog
         open={!!archiving}

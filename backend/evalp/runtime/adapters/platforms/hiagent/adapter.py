@@ -22,12 +22,14 @@ from evalp.runtime.adapters.base import (
 from evalp.runtime.adapters.binding import NormalizedBinding, normalize_binding
 from evalp.runtime.adapters.http_adapter import HttpAdapter
 from evalp.runtime.adapters.platforms.hiagent.config import HiAgentConfig
+from evalp.runtime.adapters.platforms.hiagent.hicli_observe import HicliObserveError, query_hicli_trace
 from evalp.runtime.adapters.platforms.hiagent.mapper import HiAgentMapper
 from evalp.runtime.adapters.platforms.hiagent.sse import decoded, sse_frames
 from evalp.runtime.credentials import CredentialsManager
 from evalp.runtime.events import AgentEvent, ev
 from evalp.runtime.hiagent_auth import AccountAuthError
 from evalp.runtime.messages import Message
+from evalp.runtime.trace_credentials import KeyConnectionService
 from evalp.spec.models import AdapterBinding, CodeSpec, ConfigSpec, HttpTransport, parse_spec
 from evalp.store.models import Session, Version
 
@@ -57,7 +59,10 @@ class HiAgentAdapter(PlatformAdapter):
         "no_external_history",
     })
     config_model = HiAgentConfig
-    trace_config_keys = frozenset({"observe_base_url", "observe_account_ref", "observation_wait_s"})
+    trace_config_keys = frozenset({
+        "observe_base_url", "observe_account_ref", "observation_wait_s",
+        "observe_transport", "observe_hicli_base_url", "observe_key_ref",
+    })
     trace_usage_source = "hiagent_trace"
     sse_usage_source = "hiagent_sse"
 
@@ -119,7 +124,20 @@ class HiAgentAdapter(PlatformAdapter):
                 )
                 details["published_probe"] = "chat_app_type_check" if chat_app else "workflow_process_query"
                 headers = secret.get("observe_headers") if isinstance(secret, dict) else None
-                if self.config.observe_base_url and (self.config.observe_account_ref or headers):
+                if self.config.observe_transport == "hicli":
+                    if self.config.observe_key_ref:
+                        _, auth = await self.app.svc(KeyConnectionService).query(
+                            self.config.observe_key_ref, self.config, "GetTraceInfo",
+                            {"MessageID": "evalp-auth-check"},
+                        )
+                    else:
+                        await query_hicli_trace(
+                            self.config, "GetTraceInfo", {"MessageID": "evalp-auth-check"},
+                        )
+                        auth = {"transport": "hicli", "credential_source": "hicli auth"}
+                    details["observe"] = "verified"
+                    details["trace_auth"] = auth
+                elif self.config.observe_base_url and (self.config.observe_account_ref or headers):
                     body = {
                         **({"WorkspaceID": self.config.workspace_id} if self.config.workspace_id else {}),
                         "MessageID": "evalp-auth-check",
@@ -158,7 +176,9 @@ class HiAgentAdapter(PlatformAdapter):
             )
         except AccountAuthError as exc:
             return HealthResult(ok=False, message=str(exc), details={**details, "observe": exc.status})
-        except (httpx.HTTPError, ValueError, TypeError):
+        except HicliObserveError as exc:
+            return HealthResult(ok=False, message=str(exc), details={**details, "observe": "unverified"})
+        except (httpx.HTTPError, ValueError, TypeError, TimeoutError):
             return HealthResult(
                 ok=False, message="认证检查未完成，请检查服务地址与网络；凭据状态尚未确认", details=details,
             )
@@ -182,6 +202,7 @@ class HiAgentAdapter(PlatformAdapter):
         async for event in refresh_trace(
             self.config, secret, request.message_id, usage,
             credentials=self.app.svc(CredentialsManager) if self.config.observe_account_ref else None,
+            key_connections=self.app.svc(KeyConnectionService) if self.config.observe_key_ref else None,
         ):
             yield event
 
@@ -209,6 +230,7 @@ class HiAgentAdapter(PlatformAdapter):
         ctx.late_observe = lambda: collect_trace(
             self.config, secret, mapper,
             credentials=self.app.svc(CredentialsManager) if self.config.observe_account_ref else None,
+            key_connections=self.app.svc(KeyConnectionService) if self.config.observe_key_ref else None,
         )
         submitted = False
         async with httpx.AsyncClient(

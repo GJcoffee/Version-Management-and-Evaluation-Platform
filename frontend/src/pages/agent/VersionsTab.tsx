@@ -40,17 +40,8 @@ import { RelativeTime } from '@/components/ui/RelativeTime'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/Table'
 import { cn } from '@/lib/cn'
 import { milestoneText } from '@/lib/versionArchive'
+import { validateTagName } from '@/lib/versionTag'
 import { toast } from '@/stores/toast'
-
-const TAG_RE = /^[\p{L}\p{N}_.-]{1,64}$/u
-
-export function validateTagName(tag: string): string | null {
-  const t = tag.trim()
-  if (!t) return '请填写标签'
-  if (!TAG_RE.test(t)) return '标签只能包含字母、数字、_ . -，最长 64'
-  if (t === 'latest' || /^v\d+$/.test(t)) return '标签不能是 latest 或形如 v12'
-  return null
-}
 
 const VIA_VARIANT = { ui: 'default', cli: 'success', mcp: 'warning', api: 'secondary' } as const
 

@@ -10,6 +10,11 @@ vi.mock('@/api/queries/accounts', () => ({ usePlatformAccounts: () => ({ data: [
   { id: 'acc_trace', adapter_id: 'hiagent', name: 'Trace 账号', enabled: true, origin: 'https://trace.example' },
 ] }) }))
 
+vi.mock('@/api/queries/keyConnections', () => ({ useTraceKeyConnections: () => ({ data: [
+  { id: 'key_trace', name: '观测密钥', enabled: true, status: 'active', origin: 'https://trace.example',
+    top_url: 'https://top.example:30040', workspace_id: 'workspace' },
+] }) }))
+
 vi.mock('@/api/queries/adapters', () => ({
   useAdapters: () => ({ data: [{
     adapter: 'hiagent', major: 1, name: 'HiAgent', capabilities: ['streaming'],
@@ -54,5 +59,25 @@ describe('适配器连接配置表单', () => {
     const binding = JSON.parse(screen.getByTestId('binding').textContent!)
     expect(binding.config.observe_account_ref).toBe('acc_trace')
     expect(binding.credential_ref).toBe('adapter:test')
+  })
+
+  it('选择密钥连接时填写对应站点与工作空间并清除网页登录引用', async () => {
+    render(<QueryClientProvider client={new QueryClient()}><Form /></QueryClientProvider>)
+    await userEvent.selectOptions(screen.getByLabelText('平台接入'), 'hiagent@1')
+    await userEvent.selectOptions(screen.getByLabelText(/^凭据引用/), 'adapter:test')
+    await userEvent.selectOptions(screen.getByLabelText('Trace 账号'), 'acc_trace')
+    await userEvent.selectOptions(screen.getByLabelText('执行链路密钥连接'), 'key_trace')
+    const binding = JSON.parse(screen.getByTestId('binding').textContent!)
+    expect(binding.config).toMatchObject({ observe_key_ref: 'key_trace', observe_transport: 'hicli',
+      observe_account_ref: null, observe_base_url: 'https://trace.example',
+      observe_hicli_base_url: 'https://top.example:30040', workspace_id: 'workspace' })
+    expect(binding.credential_ref).toBe('adapter:test')
+    expect(screen.getByLabelText('Trace 账号')).toHaveValue('')
+    await userEvent.selectOptions(screen.getByLabelText('Trace 账号'), 'acc_trace')
+    const accountBinding = JSON.parse(screen.getByTestId('binding').textContent!)
+    expect(accountBinding.config).toMatchObject({ observe_account_ref: 'acc_trace', observe_transport: 'web',
+      observe_key_ref: null, observe_base_url: 'https://trace.example' })
+    expect(accountBinding.credential_ref).toBe('adapter:test')
+    expect(screen.getByLabelText('执行链路密钥连接')).toHaveValue('')
   })
 })

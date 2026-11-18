@@ -150,8 +150,18 @@ class AdapterService:
                 chosen = test
         if not chosen["configured"]:
             raise ValidationFailed("生产环境尚未配置适配器，请先在 设置 → 适配器 中配置并推送到生产")
-        if chosen["binding"]["config"].get("business_bridge"):
+        config = chosen["binding"]["config"]
+        if config.get("business_bridge"):
             raise ValidationFailed("旧桥环境已停用，请先配置原生平台接入")
+        params = spec.get("params") or {}
+        if adapter == "hiagent" and params.get("hiagent_app_id"):
+            source_workspace = params.get("hiagent_workspace_id")
+            if config.get("app_id") != params["hiagent_app_id"] or (
+                source_workspace and config.get("workspace_id") and config["workspace_id"] != source_workspace
+            ):
+                raise ValidationFailed(
+                    "所选 HiAgent 连接与这份存档的来源应用不一致，请切换或配置对应应用的连接",
+                )
         if route and chosen["binding"]["major"] != route.major:
             raise ValidationFailed("版本接入与环境的适配器 major 不兼容")
         out = {
