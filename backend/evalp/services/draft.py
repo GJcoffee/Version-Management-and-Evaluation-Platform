@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any
 
 from sqlalchemy import select
@@ -138,6 +139,8 @@ class DraftService:
         notes: str | None = None,
         via: str = "api",
         tag: str | None = None,
+        *,
+        session: AsyncSession | None = None,
     ) -> PublishOut:
         """发布草稿为版本（详设 4.4）：整个过程在一个写事务内完成。
 
@@ -146,7 +149,7 @@ class DraftService:
         且不能已存在）。发布前按 agent 的规范校验（``services/conventions.py``）。
         """
         versions = self.ctx.svc(VersionService)
-        async with self.ctx.db.write() as s:
+        async with (self.ctx.db.write() if session is None else nullcontext(session)) as s:
             draft = await self.get_orm(s, draft_id)
             if draft.revision != expected_revision:
                 raise conflict_error(draft)

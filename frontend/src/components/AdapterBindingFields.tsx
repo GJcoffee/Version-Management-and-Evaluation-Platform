@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { useAdapters, useAdapterCredentials, type AdapterBinding } from '@/api/queries/adapters'
 import { usePlatformAccounts } from '@/api/queries/accounts'
+import { useTraceKeyConnections } from '@/api/queries/keyConnections'
 import { Button } from '@/components/ui/Button'
 import { Field, Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
@@ -19,6 +20,7 @@ export function AdapterBindingFields({ value, onChange, disabled, platform }: {
   const formId = useId()
   const credentials = useAdapterCredentials()
   const accounts = usePlatformAccounts()
+  const keyConnections = useTraceKeyConnections()
   const qc = useQueryClient()
   const [adding, setAdding] = useState(false)
   const [name, setName] = useState('')
@@ -67,7 +69,7 @@ export function AdapterBindingFields({ value, onChange, disabled, platform }: {
       <p className="text-xs text-muted-foreground">{definition?.capabilities.join(' · ')}</p>
       <div className="grid gap-3 sm:grid-cols-2">
         {Object.entries(definition?.config_schema.properties ?? {}).filter(([key]) =>
-          !['business_bridge', 'observe_account_ref'].includes(key)).map(([key, property]) => <Field
+          !['business_bridge', 'observe_account_ref', 'observe_key_ref', 'observe_transport'].includes(key)).map(([key, property]) => <Field
           key={key} label={key} htmlFor={`${formId}-${key}`} required={definition?.config_schema.required?.includes(key)}>
           <Input id={`${formId}-${key}`} disabled={disabled} type={property.type === 'number' ? 'number' : 'text'}
             value={String(value.config[key] ?? '')}
@@ -76,11 +78,40 @@ export function AdapterBindingFields({ value, onChange, disabled, platform }: {
             } })} />
         </Field>)}
       </div>
+      {value.adapter === 'hiagent' && <Field label="执行链路密钥连接" htmlFor={`${formId}-key-connection`}
+        hint="选择后自动填写观测地址和工作空间；只保存连接引用">
+        <Select id={`${formId}-key-connection`} disabled={disabled || keyConnections.isLoading}
+          value={String(value.config.observe_key_ref ?? (value.config.observe_transport === 'hicli' ? 'local' : ''))}
+          onChange={(e) => {
+            const connection = keyConnections.data?.find((c) => c.id === e.target.value)
+            patch({ config: { ...value.config, observe_key_ref: connection?.id ?? null,
+              observe_account_ref: null, observe_transport: e.target.value ? 'hicli' : 'web',
+              ...(connection ? { observe_base_url: connection.origin,
+                observe_hicli_base_url: connection.top_url, workspace_id: connection.workspace_id } : {}),
+            } })
+          }}>
+          <option value="">不使用密钥连接</option>
+          <option value="local">直接使用本机已配置密钥</option>
+          {keyConnections.data?.map((c) => <option key={c.id} value={c.id} disabled={!c.enabled}>
+            {c.name}{!c.enabled ? '（已停用）' : c.status !== 'active' ? '（待检查）' : ''}
+          </option>)}
+          {!!value.config.observe_key_ref && !keyConnections.data?.some((c) => c.id === value.config.observe_key_ref) &&
+            <option value={String(value.config.observe_key_ref)}>当前连接（未能读取）</option>}
+        </Select>
+        {keyConnections.isError && <p className="mt-1 text-xs text-danger">密钥连接列表读取失败</p>}
+        <a className="mt-1 inline-block text-xs text-primary underline" href="/settings#trace-key-connections">新建或管理密钥连接</a>
+      </Field>}
       {value.adapter === 'hiagent' && <Field label="Trace 账号" htmlFor={`${formId}-account`}
         hint="账号自动维护 Cookie／CSRF，站点需与 observe_base_url 一致">
         <Select id={`${formId}-account`} disabled={disabled || accounts.isLoading}
           value={String(value.config.observe_account_ref ?? '')}
-          onChange={(e) => patch({ config: { ...value.config, observe_account_ref: e.target.value || null } })}>
+          onChange={(e) => {
+            const account = accounts.data?.find((a) => a.id === e.target.value)
+            patch({ config: { ...value.config, observe_account_ref: e.target.value || null,
+              observe_key_ref: null, observe_transport: 'web',
+              ...(account ? { observe_base_url: account.origin } : {}),
+            } })
+          }}>
           <option value="">沿用凭据中的 observe_headers</option>
           {accounts.data?.filter((a) => a.adapter_id === value.adapter).map((a) =>
             <option key={a.id} value={a.id} disabled={!a.enabled}>
@@ -88,6 +119,7 @@ export function AdapterBindingFields({ value, onChange, disabled, platform }: {
             </option>)}
         </Select>
         {accounts.isError && <p className="mt-1 text-xs text-danger">Trace 账号列表读取失败</p>}
+        <a className="mt-1 inline-block text-xs text-primary underline" href="/settings#trace-accounts">新建或管理登录账号</a>
       </Field>}
       <Field label="凭据引用" htmlFor={`${formId}-credential`} required>
         <Select id={`${formId}-credential`} disabled={disabled} value={value.credential_ref}
@@ -97,7 +129,7 @@ export function AdapterBindingFields({ value, onChange, disabled, platform }: {
             <option key={c.ref} value={c.ref}>{c.name}</option>)}
         </Select>
       </Field>
-      <p className="text-xs text-muted-foreground">发布 API Key 失效时新增凭据并推送生产。选择 Trace 账号后，Cookie／CSRF 到期自动更新；旧轮次可选择最新配置重查 Trace。</p>
+      <p className="text-xs text-muted-foreground">执行链路支持账号登录和密钥连接，每套配置选择一种，选定后自动清除另一种绑定。应用调用凭据用于发起试聊，单独维护。连接修改保存到测试环境，验证后再推送为默认连接；旧轮次可用最新配置补查链路。</p>
       <Button type="button" size="sm" variant="ghost" disabled={disabled} onClick={() => setAdding(!adding)}>新增凭据</Button>
       <Button type="button" size="sm" variant="outline" disabled={disabled || !value.credential_ref}
         loading={checking}

@@ -20,6 +20,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { bindingSummary } from '@/lib/adapterEnvironment'
 import { formatApiError } from '@/lib/apiError'
 import { toast } from '@/stores/toast'
+import { TraceKeySection } from './TraceKeySection'
 import { PlatformAccountSection } from './PlatformAccountSection'
 
 /** 保存 / 推送 / 回滚的结果提示：内容没变不产生新存档 */
@@ -293,7 +294,8 @@ export function AdapterSection() {
         className={`border-b-2 px-3 py-2 text-sm ${definition.adapter === item.adapter ? 'border-primary font-medium text-primary' : 'border-transparent text-muted-foreground'}`}
         onClick={() => setPicked(item.adapter)}>{item.name}</button>)}
     </nav>
-    <PlatformSettings key={definition.adapter} definition={definition} />
+    {definition.adapter === 'hiagent' && <TraceKeySection />}
     {definition.adapter === 'hiagent' && <PlatformAccountSection />}
+    <PlatformSettings key={definition.adapter} definition={definition} />
   </div>
 }

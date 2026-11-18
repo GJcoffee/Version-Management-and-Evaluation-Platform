@@ -195,10 +195,66 @@ evalp eval compare <上一版的 run id> <本次 run id>
 MCP / CLI 同样：`chat`、`run_eval`、`replay_session`（MCP）与 `evalp chat|eval run|replay --env test`（CLI）可选环境，默认生产；
 MCP 另有 `get_adapter_environments`、`update_test_adapter`、`push_adapter_to_production`、`rollback_production_adapter`。
 
-### Trace 账号与自动重登
+### 执行链路认证：账号登录与密钥连接
 
-在设置 → 适配器 → HiAgent 的「Trace 账号」中添加站点根地址、租户（可选）、用户名和密码。
-随后在测试配置中填写同站点的 `observe_base_url` 并选择「Trace 账号」，检查上游认证、保存、推送生产。
+设置页同时保留「Trace 账号登录」与「执行链路密钥连接」。两种方式都可绑定到测试配置，
+每套配置选择一种；选择账号会清除密钥引用并切换到网页登录认证，选择密钥连接会清除账号引用并切换到密钥认证。
+
+设置 → 适配器 → HiAgent 提供「执行链路密钥连接」和「新建密钥连接」入口。
+填写连接名称、网页站点根地址、密钥接口根地址、工作空间编号，以及账号中心的访问密钥标识和正文，
+点击「保存并检查」。成功后，在测试连接配置的「执行链路密钥连接」下拉框选择它，
+页面自动填入观测地址与工作空间；检查上游认证并保存测试配置，验证后再推送生产。
+
+也可选择「复用本机已配置的密钥」，继续使用运行 EvalP 的用户的 hicli 认证，
+无需复制账号密钥。连接列表提供编辑、检查、启用和停用；更换独立密钥时两项同时填写，留空则保留原值。
+站点与工作空间固定，切换目标请新建连接。
+
+独立连接的账号密钥仅存于平台加密存储，不在接口响应、数据库连接元数据、版本或子进程参数中回显。
+签名继续由官方 hicli 执行，独立连接通过单次子进程环境传递密钥，并隔离其他本机认证配置；
+不改变 hicli 的全局账号。发布接口仍使用单独的应用调用密钥。
+新建和更新会运行只读认证检查，不提交模型请求；失败连接保留以供修正，界面明确显示检查失败。
+运行和旧轮次重查都核对连接启用状态、站点、接口根地址与工作空间，并记录实际连接编号和修订。
+
+使用密钥连接时的绑定示例（账号密钥正文不在配置内）：
+
+```json
+{
+  "observe_base_url": "https://hiagent.example.com",
+  "observe_hicli_base_url": "https://hiagent.example.com:30040",
+  "workspace_id": "工作空间编号",
+  "observe_transport": "hicli",
+  "observe_key_ref": "key_连接编号",
+  "observe_account_ref": null
+}
+```
+
+#### 使用 hicli 账号密钥采集
+
+公司统一登录用户也可复用本机已认证的官方 `hicli`。在适配器配置中设置：
+
+```json
+{
+  "observe_base_url": "https://你的-hiagent-网页站点",
+  "observe_transport": "hicli",
+  "observe_hicli_base_url": "https://管理员确认的-TOP-地址:30040",
+  "workspace_id": "真实工作空间编号"
+}
+```
+
+EvalP 服务运行用户需能执行 `hicli`，并已通过 `hicli auth` 保存有观测权限的账号密钥。
+平台只调用 `GetTraceInfo` 和 `ListTraceSpans` 两个只读接口，明确传入 TOP 地址和工作空间；
+账号密钥由 hicli 管理，不复制到版本、连接配置或子进程参数中。此方式无需网页登录密码，
+不能同时选择网页登录账号。发布接口仍使用应用发布密钥，与观测账号密钥分开维护。
+
+`published_version` 对应运行接口返回的版本标签，不是导出包的 `VersionCode`／发布编号。
+未命名发布在部分部署中返回 `draft` 标签；应核对实际返回值，并另存真实发布编号与配置快照，
+不要把标签 `draft` 当作内容固定的版本编号。
+
+#### 使用网页登录账号
+
+在设置页「Trace 账号登录」中点击「新增账号」，填写站点根地址、租户（可选）、用户名和密码。
+在测试配置的「Trace 账号」中选择刚创建的账号，页面自动填写同站点的观测地址；检查认证后保存。
+账号支持编辑、检查、重新登录、补充登录态及启停。也可随时在测试配置中改选密钥连接，验证后保存。
 绑定中只保存 `observe_account_ref`；同账号的所有 Trace 查询共用最新 Cookie／CSRF。
 发布 API Key 仍是独立不可变凭据，账号管理不会自动更换 Key。
 

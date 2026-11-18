@@ -29,6 +29,7 @@ ALLOWED_EVALP = (
     "evalp.runtime.adapters.platforms",
     "evalp.runtime.events",
     "evalp.runtime.credentials",
+    "evalp.runtime.trace_credentials",
     "evalp.runtime.hiagent_auth",
     "evalp.runtime.messages",
     "evalp.runtime.llm.ratelimit",

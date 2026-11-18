@@ -154,9 +154,9 @@ export function PlatformAccountSection() {
       toast.error(formatApiError(err, '账号操作失败').message)
     } finally { setBusy('') }
   }
-  return <Card>
+  return <section id="trace-accounts" className="scroll-mt-4"><Card>
     <CardHeader><div>
-      <CardTitle>Trace 账号</CardTitle>
+      <CardTitle>Trace 账号登录</CardTitle>
       <CardDescription>同账号共用最新登录态，每五分钟检查一次，接近到期时提前检查；认证过期会自动重登。API Key 单独维护。</CardDescription>
     </div><Button size="sm" onClick={() => setDialog({ type: 'edit' })}>新增账号</Button></CardHeader>
     <CardContent>
@@ -192,5 +192,5 @@ export function PlatformAccountSection() {
       {dialog?.type === 'import' && dialog.account && <SessionImport account={dialog.account} onClose={() => setDialog(null)} />}
       {dialog?.type === 'history' && dialog.account && <SessionHistory account={dialog.account} onClose={() => setDialog(null)} />}
     </CardContent>
-  </Card>
+  </Card></section>
 }

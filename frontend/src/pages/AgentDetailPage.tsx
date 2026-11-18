@@ -1,8 +1,11 @@
+import { useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { ApiError } from '@/api/client'
 import { useAgent } from '@/api/queries/agents'
 import { useVersions } from '@/api/queries/versions'
+import { HiAgentImportDialog } from '@/components/HiAgentImportDialog'
 import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
 import { LoadingBlock } from '@/components/ui/Spinner'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { AssetsTab } from './agent/AssetsTab'
@@ -19,6 +22,7 @@ type TabKey = (typeof TABS)[number]
 export default function AgentDetailPage() {
   const { id } = useParams()
   const [sp, setSp] = useSearchParams()
+  const [importOpen, setImportOpen] = useState(false)
   const agent = useAgent(id)
   const versions = useVersions(id, 200)
   const tabParam = sp.get('tab')
@@ -74,6 +78,9 @@ export default function AgentDetailPage() {
           <DraftsTab agent={a} versions={list} />
         </TabsContent>
         <TabsContent value="versions" className="pt-4">
+          {a.kind === 'code' && a.latest_version && !a.archived && <div className="mb-3 flex justify-end">
+            <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>从 HiAgent 导入版本</Button>
+          </div>}
           <VersionsTab
             agent={a}
             versions={list}
@@ -92,6 +99,7 @@ export default function AgentDetailPage() {
           <ConventionsTab key={JSON.stringify(a.conventions)} agent={a} />
         </TabsContent>
       </Tabs>
+      {importOpen && <HiAgentImportDialog target={a} onClose={() => setImportOpen(false)} />}
     </div>
   )
 }
